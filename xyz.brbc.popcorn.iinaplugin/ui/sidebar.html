@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="sidebar.css">
+</head>
+<body>
+    <header class="app-header">
+        <div class="brand">
+            <img src="assets/popcorn-icon.png" alt="">
+            <div><strong>Popcorn</strong><span>for IINA</span></div>
+        </div>
+        <div class="type-switch" aria-label="Media type">
+            <button id="movies-btn" type="button" data-clickable>Movies</button>
+            <button id="tv-btn" type="button" data-clickable>TV</button>
+        </div>
+    </header>
+
+    <form id="search-form" class="search">
+        <input id="search-input" type="search" placeholder="Search movies and TV" autocomplete="off">
+    </form>
+
+    <div class="section-header">
+        <button id="back-btn" class="icon-button hidden" type="button" title="Back" data-clickable>‹</button>
+        <h2 id="section-title">Trending</h2>
+    </div>
+
+    <main>
+        <div id="loading" class="loading hidden" aria-label="Loading">
+            <div></div><div></div><div></div><div></div>
+        </div>
+        <div id="content"></div>
+        <div id="error-state" class="message hidden">
+            <p id="error-message"></p>
+            <button id="retry-btn" type="button" data-clickable>Retry</button>
+        </div>
+    </main>
+
+    <script src="dist/sidebar.js"></script>
+</body>
+</html>

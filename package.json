@@ -1,0 +1,20 @@
+{
+  "name": "popcorn-iina",
+  "private": true,
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.plugin.json && tsc --noEmit -p tsconfig.ui.json",
+    "build": "bun run build:plugin && bun run build:ui",
+    "package": "bun run build && (cd xyz.brbc.popcorn.iinaplugin && zip -r ../xyz.brbc.popcorn.iinaplugin.iinaplgz .)",
+    "build:plugin": "bun build src/plugin/main.ts src/plugin/global.ts --outdir xyz.brbc.popcorn.iinaplugin/dist --target=browser --format=iife",
+    "build:ui": "bun build src/ui/sidebar.ts --outdir xyz.brbc.popcorn.iinaplugin/ui/dist --target=browser --format=iife",
+    "clean": "rm -rf xyz.brbc.popcorn.iinaplugin/dist xyz.brbc.popcorn.iinaplugin/ui/dist",
+    "sync:root-info": "bun scripts/sync-root-info.js",
+    "verify:root-info": "bun scripts/verify-root-info.js",
+    "verify:built-client-version": "bun scripts/verify-built-client-version.js"
+  },
+  "devDependencies": {
+    "iina-plugin-definition": "^0.99.3",
+    "typescript": "^5.9.3"
+  }
+}

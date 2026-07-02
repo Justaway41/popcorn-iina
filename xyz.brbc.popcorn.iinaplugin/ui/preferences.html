@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Popcorn for IINA Preferences</title>
+</head>
+<body>
+    <div class="pref-section">
+        <label for="addon-url">Stremio addon manifest URL</label>
+        <input id="addon-url" type="text" data-type="string" data-pref-key="addonManifestUrl"
+               placeholder="https://addon.example/manifest.json">
+        <p class="small secondary pref-help">
+            Required for playback. Popcorn only uses direct HTTP(S) streams returned by this addon.
+            Keep debrid-backed manifest URLs private.
+        </p>
+    </div>
+    <script>
+        (() => {
+            const input = document.getElementById("addon-url");
+            const preferences = window.iina?.preferences;
+            if (!input || !preferences) return;
+
+            preferences.get("addonManifestUrl", (value) => {
+                if (typeof value === "string") input.value = value;
+            });
+
+            input.addEventListener("input", () => {
+                preferences.set("addonManifestUrl", input.value);
+                preferences.sync?.();
+            });
+        })();
+    </script>
+</body>
+</html>
