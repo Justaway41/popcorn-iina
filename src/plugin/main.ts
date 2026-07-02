@@ -110,8 +110,8 @@ function playItem(payload: PlayItemPayload): void {
     const title = sanitizeMediaTitle(payload.title || "Popcorn");
     activeEpisodeContext = payload.episodeContext || null;
     isReplacingPlayback = true;
+    core.osd("Loading stream...");
     mpv.command("loadfile", [url, "replace", "-1", `force-media-title=${title}`]);
-    hideSidebar();
 }
 
 function handleEndFile(): void {
@@ -171,6 +171,7 @@ event.on("mpv.file-loaded", () => {
     }
     restorePlayerOptions();
     setPlayerUIHidden(false);
+    hideSidebar();
     startPlaybackMonitoring();
 });
 

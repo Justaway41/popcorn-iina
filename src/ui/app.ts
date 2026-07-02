@@ -277,8 +277,8 @@ function renderStreams(
     const list = document.createElement("div");
     list.className = "row-list";
     streams.forEach((stream) => {
-        const details = [stream.quality, stream.size].filter(Boolean).join(" · ");
-        list.appendChild(rowButton(stream.title, details, () => {
+        list.appendChild(rowButton(stream.title, buildStreamDetails(stream), () => {
+            showStreamLoading();
             iina.postMessage(MESSAGE_NAMES.PlayItem, {
                 url: stream.url,
                 title: episode ? formatEpisodeTitle(media, episode) : media.name,
@@ -289,7 +289,46 @@ function renderStreams(
     showContent(list);
 }
 
-function rowButton(title: string, subtitle: string, action: () => void): HTMLButtonElement {
+function showStreamLoading(): void {
+    ui.back.classList.add("hidden");
+    ui.title.textContent = "Loading Stream";
+    const message = document.createElement("div");
+    message.className = "stream-loading";
+    const spinner = document.createElement("div");
+    spinner.className = "stream-spinner";
+    const text = document.createElement("p");
+    text.textContent = "Opening stream in IINA...";
+    message.append(spinner, text);
+    showContent(message);
+}
+
+function buildStreamDetails(stream: PlayableStream): DocumentFragment {
+    const fragment = document.createDocumentFragment();
+    if (stream.quality) {
+        const quality = document.createElement("span");
+        quality.className = `stream-quality ${getQualityClass(stream.quality)}`;
+        quality.textContent = stream.quality;
+        fragment.appendChild(quality);
+    }
+    if (stream.size) {
+        const size = document.createElement("span");
+        size.className = "stream-size";
+        size.textContent = stream.size;
+        fragment.appendChild(size);
+    }
+    return fragment;
+}
+
+function getQualityClass(quality: string): string {
+    const normalized = quality.toLowerCase();
+    if (normalized === "4k" || normalized === "2160p") return "stream-quality--uhd";
+    if (normalized === "1080p") return "stream-quality--fhd";
+    if (normalized === "720p") return "stream-quality--hd";
+    if (normalized === "480p") return "stream-quality--sd";
+    return "stream-quality--other";
+}
+
+function rowButton(title: string, subtitle: string | Node, action: () => void): HTMLButtonElement {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "row";
@@ -301,7 +340,11 @@ function rowButton(title: string, subtitle: string, action: () => void): HTMLBut
     heading.textContent = title;
     const detail = document.createElement("span");
     detail.className = "row-detail";
-    detail.textContent = subtitle;
+    if (typeof subtitle === "string") {
+        detail.textContent = subtitle;
+    } else {
+        detail.appendChild(subtitle);
+    }
     const play = document.createElement("span");
     play.className = "row-play";
     play.textContent = "▶";

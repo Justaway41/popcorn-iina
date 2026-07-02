@@ -155,7 +155,37 @@ section h3 { padding: 5px 7px; }
 .row:hover, .row:focus-visible { background: var(--surface-hover); outline: none; }
 .row-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .row-title { overflow: hidden; color: var(--text); font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
-.row-detail { color: var(--muted); font-size: 11px; }
+.row-detail { display: flex; align-items: center; gap: 6px; min-height: 18px; color: var(--muted); font-size: 11px; }
+.stream-quality {
+    display: inline-flex;
+    align-items: center;
+    min-height: 17px;
+    padding: 1px 6px;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 750;
+    letter-spacing: .03em;
+    line-height: 1;
+}
+.stream-quality--uhd {
+    background: rgba(40, 150, 255, 0.16);
+    color: #43a7ff;
+}
+.stream-quality--fhd {
+    background: rgba(35, 190, 112, 0.14);
+    color: #3bd37f;
+}
+.stream-quality--hd {
+    background: rgba(234, 177, 49, 0.16);
+    color: #eab131;
+}
+.stream-quality--sd,
+.stream-quality--other {
+    background: rgba(160, 160, 170, 0.12);
+    color: #aaaab3;
+}
+.stream-size { color: var(--muted); }
 .row-play { color: var(--accent); font-size: 11px; }
 
 .loading { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
@@ -182,6 +212,29 @@ section h3 { padding: 5px 7px; }
     cursor: pointer;
 }
 .message button:hover { background: var(--surface-hover); }
+
+.stream-loading {
+    display: flex;
+    min-height: 220px;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 14px;
+    color: var(--muted);
+    text-align: center;
+}
+
+.stream-spinner {
+    width: 34px;
+    height: 34px;
+    border: 2px solid rgba(255, 255, 255, 0.12);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .8s linear infinite;
+}
+
+.stream-loading p { margin: 0; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 260px) {
     .media-grid, .loading { grid-template-columns: repeat(2, minmax(0, 1fr)); }
