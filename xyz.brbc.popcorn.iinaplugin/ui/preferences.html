@@ -29,6 +29,10 @@
         .addon-host { opacity: .62; font-size: 11px; }
         .addon-remove { padding: 3px 7px; }
         .addon-empty { margin: 10px 0 0; opacity: .65; font-size: 11px; }
+        .trakt-section { display: grid; gap: 6px; margin-top: 18px; }
+        .trakt-section h3, .trakt-section p { margin: 0; }
+        .trakt-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+        .trakt-device { padding: 7px 8px; border-radius: 7px; background: rgba(128,128,128,.1); }
     </style>
 </head>
 <body>
@@ -47,6 +51,25 @@
         </form>
         <div id="addon-list" class="addon-list"></div>
         <p id="addon-empty" class="addon-empty">No addons yet.</p>
+    </section>
+
+    <section class="pref-section trakt-section" aria-labelledby="trakt-heading">
+        <h3 id="trakt-heading">Trakt Sync</h3>
+        <p class="small secondary pref-help">
+            Create a Trakt application, then enter its Client ID and Client Secret.
+        </p>
+        <label for="trakt-client-id">Client ID</label>
+        <input id="trakt-client-id" type="text" autocomplete="off" spellcheck="false">
+        <label for="trakt-client-secret">Client Secret</label>
+        <input id="trakt-client-secret" type="password" autocomplete="off" spellcheck="false">
+        <div class="trakt-actions">
+            <button id="trakt-connect" type="button">Connect Trakt</button>
+            <button id="trakt-sync" type="button" hidden>Sync Now</button>
+            <button id="trakt-disconnect" type="button" hidden>Disconnect</button>
+        </div>
+        <p id="trakt-device" class="trakt-device" hidden></p>
+        <p id="trakt-status" class="small secondary" role="status">Not connected</p>
+        <p id="trakt-error" class="addon-error" role="alert" hidden></p>
     </section>
 
     <template id="addon-row-template">

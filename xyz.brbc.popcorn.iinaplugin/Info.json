@@ -18,7 +18,8 @@
     "addonManifestUrl": "",
     "addons": "[]",
     "mediaType": "movie",
-    "watchHistory": "[]"
+    "watchHistory": "[]",
+    "trakt": "{}"
   },
   "permissions": [
     "network-request",
