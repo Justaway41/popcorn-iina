@@ -1,17 +1,18 @@
 # Popcorn for IINA
 
-Browse Cinemeta movies and TV shows, choose a direct stream from your own Stremio addon, and play it in IINA.
+Browse Cinemeta movies and TV shows, choose a direct stream from your Stremio addons, and play it in IINA.
 
 ## Features
 
 - Trending and search for movies and TV series
 - Season and episode browsing
-- One user-configured Stremio addon
+- Local recently watched history and watched indicators
+- Multiple enabled Stremio addons with merged, source-labeled results
 - Direct HTTP(S) stream selection and playback in IINA
 - Next episode stream choices when an episode ends
 - Native IINA sidebar, window titles, and display-sleep prevention
 
-Popcorn does not bundle a content provider, torrent client, or debrid service. It ignores torrent-only results such as `infoHash`; your addon must return direct HTTP(S) `url` streams. Only access content you have the legal right to view.
+Popcorn does not bundle a content provider, torrent client, or debrid service. It ignores torrent-only results such as `infoHash`; addons must return direct HTTP(S) `url` streams. Only access content you have the legal right to view.
 
 ## Install from GitHub
 
@@ -19,7 +20,7 @@ Popcorn does not bundle a content provider, torrent client, or debrid service. I
 2. Select **Install from GitHub**.
 3. Enter `Justaway41/popcorn-iina`.
 4. Restart IINA if Popcorn does not appear immediately.
-5. Configure **Stremio addon manifest URL** under Popcorn for IINA.
+5. Add one or more **Stremio addon manifest URLs** under Popcorn for IINA.
 
 Open Popcorn with `Shift+P` or IINA's Plugin menu.
 
@@ -32,7 +33,7 @@ bun install
 bun run package
 ```
 
-In IINA Settings → Plugins, click **Install Package…** and choose `xyz.brbc.popcorn.iinaplugin.iinaplgz`. Restart IINA, then configure **Stremio addon manifest URL** under Popcorn for IINA.
+In IINA Settings → Plugins, click **Install Package…** and choose `xyz.brbc.popcorn.iinaplugin.iinaplgz`. Restart IINA, then add one or more **Stremio addon manifest URLs** under Popcorn for IINA.
 
 Accepted manifest forms:
 
@@ -40,7 +41,7 @@ Accepted manifest forms:
 - `http://localhost:7000/manifest.json`
 - `stremio://addon.example/manifest.json` (normalized to HTTPS)
 
-Manifest URLs may contain private debrid credentials. Do not share them.
+Enabled addons are queried together, and each stream is labeled with its source. Manifest URLs may contain private debrid credentials; Popcorn hides their paths and query strings after adding. Do not share them.
 
 ## Development
 

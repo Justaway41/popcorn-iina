@@ -22,6 +22,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Test
+        run: bun test
+
       - name: Typecheck
         run: bun run typecheck
 
@@ -36,7 +39,7 @@ jobs:
 
       - name: Create plugin archive
         run: |
-          zip -r ../xyz.brbc.popcorn.iinaplugin.iinaplgz .
+          zip -FSr ../xyz.brbc.popcorn.iinaplugin.iinaplgz .
         working-directory: xyz.brbc.popcorn.iinaplugin
 
       - name: Upload release asset

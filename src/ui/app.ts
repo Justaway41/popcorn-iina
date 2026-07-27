@@ -1,21 +1,29 @@
-import type { ConfigurationPayload, ShowNextEpisodePayload } from "../shared/messages";
-import type { Episode, Media, MediaType, PlayableStream } from "../shared/stremio";
+import type { ConfigurationPayload, HistoryPayload, ShowNextEpisodePayload } from "../shared/messages";
+import type { AddonStream, StremioAddon } from "../shared/addons";
+import type { WatchHistoryEntry } from "../shared/history";
+import type { Episode, Media, MediaType } from "../shared/stremio";
 
+import { loadAddonStreams, parseAddons } from "../shared/addons";
+import { parseWatchHistory } from "../shared/history";
 import { MESSAGE_NAMES } from "../shared/messages";
 import { CLIENT_VERSION } from "../shared/version";
 import {
     buildCinemetaSearchUrl,
     buildCinemetaSeriesUrl,
     buildCinemetaTrendingUrl,
+    buildOpenSubtitlesUrl,
     buildStremioStreamUrl,
-    normalizeAddonManifestUrl,
+    isEpisodeAvailable,
+    parseEnglishSubtitleAvailability,
     parseMediaResponse,
+    parseMediaTypePreference,
     parsePlayableStreams,
     parseSeriesEpisodes
 } from "../shared/stremio";
 
 type View =
     | { kind: "home"; query: string }
+    | { kind: "history" }
     | { kind: "episodes"; media: Media }
     | { kind: "streams"; media: Media; episode?: Episode; episodes: Episode[] };
 
@@ -35,10 +43,18 @@ interface Elements {
 
 let ui: Elements;
 let mediaType: MediaType = "movie";
-let addonManifestUrl = "";
+let addons: StremioAddon[] = [];
+let watchHistory: WatchHistoryEntry[] = [];
+let homeQuery = "";
 let view: View = { kind: "home", query: "" };
 let retryAction: (() => Promise<void>) | null = null;
 let pendingConfigurationResolvers: Array<() => void> = [];
+let activeRequest: AbortController | null = null;
+
+export function replaceRequest(previous: AbortController | null): AbortController {
+    previous?.abort();
+    return new AbortController();
+}
 
 export function initApp(): void {
     iina.onMessage(MESSAGE_NAMES.Configuration, (data) => {
@@ -46,6 +62,10 @@ export function initApp(): void {
         const resolvers = pendingConfigurationResolvers;
         pendingConfigurationResolvers = [];
         resolvers.forEach((resolve) => resolve());
+    });
+    iina.onMessage(MESSAGE_NAMES.HistoryUpdated, (data) => {
+        watchHistory = parseWatchHistory((data as HistoryPayload)?.history);
+        if (view.kind === "history") renderHistory();
     });
     iina.onMessage(MESSAGE_NAMES.ShowNextEpisode, (data) => {
         const payload = data as ShowNextEpisodePayload;
@@ -80,15 +100,17 @@ export function initApp(): void {
         ui.back.addEventListener("click", () => void goBack());
         ui.retry.addEventListener("click", () => retryAction && void retryAction());
 
-        void refreshConfiguration();
         updateTypeButtons();
-        void loadHome("");
+        void refreshConfiguration().then(() => loadHome(""));
     });
 }
 
 function applyConfiguration(data: unknown): void {
     const payload = data as ConfigurationPayload;
-    addonManifestUrl = typeof payload?.addonManifestUrl === "string" ? payload.addonManifestUrl : "";
+    addons = parseAddons(payload?.addons);
+    mediaType = parseMediaTypePreference(payload?.mediaType);
+    watchHistory = parseWatchHistory(payload?.history);
+    updateTypeButtons();
 }
 
 function refreshConfiguration(): Promise<void> {
@@ -118,6 +140,7 @@ function switchType(type: MediaType): void {
     mediaType = type;
     ui.searchInput.value = "";
     updateTypeButtons();
+    iina.postMessage(MESSAGE_NAMES.SetMediaType, { mediaType });
     void loadHome("");
 }
 
@@ -127,9 +150,13 @@ function updateTypeButtons(): void {
 }
 
 async function loadHome(query: string): Promise<void> {
+    const request = replaceRequest(activeRequest);
+    activeRequest = request;
+    homeQuery = query;
     view = { kind: "home", query };
+    ui.searchInput.value = query;
     ui.back.classList.add("hidden");
-    ui.title.textContent = query ? "Search Results" : "Trending";
+    ui.title.textContent = query ? "Search Results" : watchHistory.length > 0 ? "Browse" : "Trending";
     setLoading();
     retryAction = () => loadHome(query);
 
@@ -137,14 +164,16 @@ async function loadHome(query: string): Promise<void> {
         const url = query
             ? buildCinemetaSearchUrl(mediaType, query)
             : buildCinemetaTrendingUrl(mediaType);
-        const items = parseMediaResponse(await fetchJson(url));
-        renderMedia(items);
+        const items = parseMediaResponse(await fetchJson(url, request.signal));
+        renderMedia(items, query);
     } catch (error) {
-        showError(readError(error, "Could not load Cinemeta."));
+        if (!request.signal.aborted) showError(readError(error, "Could not load Cinemeta."));
     }
 }
 
 async function loadEpisodes(media: Media): Promise<void> {
+    const request = replaceRequest(activeRequest);
+    activeRequest = request;
     view = { kind: "episodes", media };
     ui.back.classList.remove("hidden");
     ui.title.textContent = media.name;
@@ -152,14 +181,16 @@ async function loadEpisodes(media: Media): Promise<void> {
     retryAction = () => loadEpisodes(media);
 
     try {
-        const episodes = parseSeriesEpisodes(await fetchJson(buildCinemetaSeriesUrl(media.imdbId)));
+        const episodes = parseSeriesEpisodes(await fetchJson(buildCinemetaSeriesUrl(media.imdbId), request.signal));
         renderEpisodes(media, episodes);
     } catch (error) {
-        showError(readError(error, "Could not load episodes."));
+        if (!request.signal.aborted) showError(readError(error, "Could not load episodes."));
     }
 }
 
 async function loadStreams(media: Media, episode?: Episode, episodes: Episode[] = []): Promise<void> {
+    const request = replaceRequest(activeRequest);
+    activeRequest = request;
     view = { kind: "streams", media, episode, episodes };
     ui.back.classList.remove("hidden");
     ui.title.textContent = episode ? formatEpisodeTitle(media, episode) : media.name;
@@ -168,67 +199,187 @@ async function loadStreams(media: Media, episode?: Episode, episodes: Episode[] 
 
     try {
         await refreshConfiguration();
-        if (!addonManifestUrl.trim()) {
-            throw new Error("Add a Stremio addon manifest URL in IINA Settings → Plugins → Popcorn for IINA.");
+        if (request.signal.aborted) return;
+        const enabledAddons = addons.filter((addon) => addon.enabled);
+        if (enabledAddons.length === 0) {
+            throw new Error("Enable a Stremio addon in IINA Settings → Plugins → Popcorn for IINA.");
         }
-        const baseUrl = normalizeAddonManifestUrl(addonManifestUrl);
         const videoId = episode?.id || media.imdbId;
-        const streams = parsePlayableStreams(await fetchJson(buildStremioStreamUrl(baseUrl, media.type, videoId)));
-        renderStreams(media, episode, episodes, streams);
+        const [result, englishSubtitles] = await Promise.all([
+            loadAddonStreams(enabledAddons, async (addon) => (
+                parsePlayableStreams(await fetchJson(
+                    buildStremioStreamUrl(addon.manifestUrl, media.type, videoId),
+                    request.signal
+                ))
+            )),
+            fetchJson(buildOpenSubtitlesUrl(media.type, videoId), request.signal)
+                .then(parseEnglishSubtitleAvailability)
+                .catch(() => null)
+        ]);
+        if (request.signal.aborted) return;
+        if (result.successfulAddons === 0) {
+            throw new Error("Could not load streams from any enabled addon.");
+        }
+        renderStreams(media, episode, episodes, result.streams, result.failedAddons, englishSubtitles);
     } catch (error) {
-        showError(readError(error, "Could not load streams."));
+        if (!request.signal.aborted) showError(readError(error, "Could not load streams."));
     }
 }
 
 async function goBack(): Promise<void> {
     if (view.kind === "episodes") {
-        await loadHome("");
+        await loadHome(homeQuery);
     } else if (view.kind === "streams" && view.episode) {
         await loadEpisodes(view.media);
     } else if (view.kind === "streams") {
-        await loadHome("");
+        await loadHome(homeQuery);
+    } else if (view.kind === "history") {
+        await loadHome(homeQuery);
     }
 }
 
-function renderMedia(items: Media[]): void {
+function renderMedia(items: Media[], query: string): void {
     if (items.length === 0) {
         renderEmpty("No titles found.");
         return;
     }
-    const list = document.createElement("div");
-    list.className = "media-grid";
-    items.forEach((media) => {
-        const card = document.createElement("button");
-        card.className = "media-card";
-        card.type = "button";
-        card.setAttribute("data-clickable", "");
-        card.addEventListener("click", () => {
+    const fragment = document.createDocumentFragment();
+    if (!query && watchHistory.length > 0) {
+        fragment.appendChild(historySection(watchHistory.slice(0, 6), true));
+        fragment.appendChild(contentHeading("Trending"));
+    }
+    fragment.appendChild(mediaGrid(items.map((media) => mediaCard(
+        media,
+        media.name,
+        media.releaseInfo,
+        () => {
             if (media.type === "series") void loadEpisodes(media);
             else void loadStreams(media);
-        });
+        },
+        isWatched(media.imdbId)
+    ))));
+    showContent(fragment);
+}
 
-        const poster = document.createElement("div");
-        poster.className = "poster";
-        if (media.poster) {
-            const image = document.createElement("img");
-            image.src = media.poster;
-            image.alt = "";
-            image.loading = "lazy";
-            image.addEventListener("error", () => image.remove(), { once: true });
-            poster.appendChild(image);
-        }
+function renderHistory(): void {
+    view = { kind: "history" };
+    ui.back.classList.remove("hidden");
+    ui.title.textContent = "Recently Watched";
+    retryAction = null;
+    if (watchHistory.length === 0) {
+        renderEmpty("Nothing watched yet.");
+        return;
+    }
+    showContent(historySection(watchHistory, false));
+}
 
-        const name = document.createElement("span");
-        name.className = "media-name";
-        name.textContent = media.name;
-        const year = document.createElement("span");
-        year.className = "media-year";
-        year.textContent = media.releaseInfo;
+function historySection(entries: WatchHistoryEntry[], showAll: boolean): HTMLElement {
+    const section = document.createElement("section");
+    section.className = "history-section";
+    if (showAll) section.appendChild(contentHeading("Recently Watched", renderHistory));
+    section.appendChild(mediaGrid(entries.map((entry) => mediaCard(
+        entry.media,
+        entry.media.name,
+        entry.episode
+            ? `S${pad(entry.episode.season)}E${pad(entry.episode.episode)} · ${entry.episode.name}`
+            : entry.media.releaseInfo,
+        () => void openHistoryEntry(entry),
+        entry.watched
+    ))));
+    return section;
+}
 
-        card.append(poster, name, year);
-        list.appendChild(card);
-    });
-    showContent(list);
+function contentHeading(title: string, action?: () => void): HTMLElement {
+    const heading = document.createElement("div");
+    heading.className = "content-heading";
+    const label = document.createElement("h3");
+    label.textContent = title;
+    heading.appendChild(label);
+    if (action) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "See all";
+        button.setAttribute("data-clickable", "");
+        button.addEventListener("click", action);
+        heading.appendChild(button);
+    }
+    return heading;
+}
+
+function mediaGrid(cards: HTMLButtonElement[]): HTMLElement {
+    const grid = document.createElement("div");
+    grid.className = "media-grid";
+    grid.append(...cards);
+    return grid;
+}
+
+function mediaCard(
+    media: Media,
+    title: string,
+    subtitle: string,
+    action: () => void,
+    watched: boolean
+): HTMLButtonElement {
+    const card = document.createElement("button");
+    card.className = "media-card";
+    card.type = "button";
+    card.setAttribute("data-clickable", "");
+    card.setAttribute("aria-label", watched ? `${title}, watched` : title);
+    card.addEventListener("click", action);
+
+    const poster = document.createElement("div");
+    poster.className = "poster";
+    if (media.poster) {
+        const image = document.createElement("img");
+        image.src = media.poster;
+        image.alt = "";
+        image.loading = "lazy";
+        image.addEventListener("error", () => image.remove(), { once: true });
+        poster.appendChild(image);
+    }
+    if (watched) {
+        const badge = document.createElement("span");
+        badge.className = "watched-badge";
+        badge.textContent = "✓";
+        badge.title = "Watched";
+        poster.appendChild(badge);
+    }
+
+    const name = document.createElement("span");
+    name.className = "media-name";
+    name.textContent = title;
+    const detail = document.createElement("span");
+    detail.className = "media-year";
+    detail.textContent = subtitle;
+    card.append(poster, name, detail);
+    return card;
+}
+
+async function openHistoryEntry(entry: WatchHistoryEntry): Promise<void> {
+    if (!entry.episode) {
+        await loadStreams(entry.media);
+        return;
+    }
+    ui.back.classList.remove("hidden");
+    ui.title.textContent = entry.media.name;
+    setLoading();
+    retryAction = () => openHistoryEntry(entry);
+    const request = replaceRequest(activeRequest);
+    activeRequest = request;
+    try {
+        const episodes = parseSeriesEpisodes(await fetchJson(
+            buildCinemetaSeriesUrl(entry.media.imdbId),
+            request.signal
+        ));
+        const episode = episodes.find((item) => item.id === entry.episode?.id) || entry.episode;
+        await loadStreams(entry.media, episode, episodes);
+    } catch (error) {
+        if (!request.signal.aborted) showError(readError(error, "Could not open this episode."));
+    }
+}
+
+function isWatched(id: string): boolean {
+    return watchHistory.some((entry) => entry.id === id && entry.watched);
 }
 
 function renderEpisodes(media: Media, episodes: Episode[]): void {
@@ -245,17 +396,28 @@ function renderEpisodes(media: Media, episodes: Episode[]): void {
     });
 
     [...seasons.entries()].sort(([a], [b]) => a - b).forEach(([season, values]) => {
-        const section = document.createElement("section");
-        const heading = document.createElement("h3");
-        heading.textContent = `Season ${season}`;
+        const section = document.createElement("details");
+        section.className = "season";
+        const heading = document.createElement("summary");
+        const seasonName = document.createElement("span");
+        seasonName.textContent = `Season ${season}`;
+        const count = document.createElement("span");
+        count.className = "season-count";
+        count.textContent = `${values.length} ${values.length === 1 ? "episode" : "episodes"}`;
+        heading.append(seasonName, count);
         section.appendChild(heading);
         const list = document.createElement("div");
         list.className = "row-list";
         values.sort((a, b) => a.episode - b.episode).forEach((episode) => {
+            const available = isEpisodeAvailable(episode);
             list.appendChild(rowButton(
                 `S${pad(episode.season)}E${pad(episode.episode)} · ${episode.name}`,
-                episode.aired ? new Date(episode.aired).toLocaleDateString() : "",
-                () => void loadStreams(media, episode, episodes)
+                available
+                    ? formatDate(episode.aired)
+                    : `Available ${formatDate(episode.aired)}`,
+                () => void loadStreams(media, episode, episodes),
+                !available,
+                available && isWatched(episode.id)
             ));
         });
         section.appendChild(list);
@@ -268,29 +430,39 @@ function renderStreams(
     media: Media,
     episode: Episode | undefined,
     episodes: Episode[],
-    streams: PlayableStream[]
+    streams: AddonStream[],
+    failedAddons: number,
+    englishSubtitles: boolean | null
 ): void {
     if (streams.length === 0) {
-        renderEmpty("No direct HTTP streams. This addon may only return torrent entries.");
+        renderEmpty("No direct HTTP streams. The enabled addons may only return torrent entries.");
         return;
+    }
+    const content = document.createDocumentFragment();
+    if (failedAddons > 0) {
+        const warning = document.createElement("div");
+        warning.className = "addon-warning";
+        warning.textContent = `${failedAddons} ${failedAddons === 1 ? "addon" : "addons"} unavailable`;
+        content.appendChild(warning);
     }
     const list = document.createElement("div");
     list.className = "row-list";
     streams.forEach((stream) => {
-        list.appendChild(rowButton(stream.title, buildStreamDetails(stream), () => {
+        list.appendChild(rowButton(stream.title, buildStreamDetails(stream, englishSubtitles), () => {
             showStreamLoading();
             iina.postMessage(MESSAGE_NAMES.PlayItem, {
                 url: stream.url,
                 title: episode ? formatEpisodeTitle(media, episode) : media.name,
-                episodeContext: episode ? { media, episode, episodes } : undefined
+                playbackContext: { media, ...(episode ? { episode } : {}), episodes }
             });
         }));
     });
-    showContent(list);
+    content.appendChild(list);
+    showContent(content);
 }
 
 function showStreamLoading(): void {
-    ui.back.classList.add("hidden");
+    ui.back.classList.remove("hidden");
     ui.title.textContent = "Loading Stream";
     const message = document.createElement("div");
     message.className = "stream-loading";
@@ -302,14 +474,31 @@ function showStreamLoading(): void {
     showContent(message);
 }
 
-function buildStreamDetails(stream: PlayableStream): DocumentFragment {
+function buildStreamDetails(stream: AddonStream, englishSubtitles: boolean | null): DocumentFragment {
     const fragment = document.createDocumentFragment();
+    const addon = document.createElement("span");
+    addon.className = "stream-addon";
+    addon.textContent = stream.addonName;
+    fragment.appendChild(addon);
     if (stream.quality) {
         const quality = document.createElement("span");
         quality.className = `stream-quality ${getQualityClass(stream.quality)}`;
         quality.textContent = stream.quality;
         fragment.appendChild(quality);
     }
+    const audioDetails = getAudioBadge(stream.audioLanguages);
+    const audio = document.createElement("span");
+    audio.className = "stream-meta-badge stream-audio";
+    audio.textContent = audioDetails.label;
+    audio.title = audioDetails.title;
+    fragment.appendChild(audio);
+
+    const subtitleDetails = getSubtitleBadge(stream.subtitleLanguages, englishSubtitles);
+    const subtitles = document.createElement("span");
+    subtitles.className = `stream-meta-badge stream-subtitles stream-subtitles--${subtitleDetails.state}`;
+    subtitles.textContent = subtitleDetails.label;
+    subtitles.title = subtitleDetails.title;
+    fragment.appendChild(subtitles);
     if (stream.size) {
         const size = document.createElement("span");
         size.className = "stream-size";
@@ -317,6 +506,38 @@ function buildStreamDetails(stream: PlayableStream): DocumentFragment {
         fragment.appendChild(size);
     }
     return fragment;
+}
+
+export function getAudioBadge(languages: string[]): { label: string; title: string } {
+    if (languages.length === 0) {
+        return { label: "Audio ?", title: "Audio language not provided" };
+    }
+    if (languages.length === 1) {
+        const language = languages[0];
+        const title = language === "Multi" || language === "Dual Audio"
+            ? "Multiple audio languages (not specified)"
+            : `Audio: ${language}`;
+        return { label: language, title };
+    }
+    return {
+        label: `Multi (${languages.length})`,
+        title: `Audio: ${languages.map((language) => (
+            language === "Other" ? "other languages" : language
+        )).join(", ")}`
+    };
+}
+
+export function getSubtitleBadge(
+    streamLanguages: string[] | null,
+    externalEnglishAvailable: boolean | null
+): { label: string; title: string; state: "yes" | "no" | "unknown" } {
+    if (streamLanguages?.includes("English") || externalEnglishAvailable === true) {
+        return { label: "EN Subs", title: "English subtitles available", state: "yes" };
+    }
+    if (streamLanguages !== null || externalEnglishAvailable === false) {
+        return { label: "No EN Subs", title: "English subtitles not found", state: "no" };
+    }
+    return { label: "Subs ?", title: "Subtitle availability unknown", state: "unknown" };
 }
 
 function getQualityClass(quality: string): string {
@@ -328,11 +549,18 @@ function getQualityClass(quality: string): string {
     return "stream-quality--other";
 }
 
-function rowButton(title: string, subtitle: string | Node, action: () => void): HTMLButtonElement {
+function rowButton(
+    title: string,
+    subtitle: string | Node,
+    action: () => void,
+    disabled = false,
+    watched = false
+): HTMLButtonElement {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "row";
-    button.setAttribute("data-clickable", "");
+    button.disabled = disabled;
+    if (!disabled) button.setAttribute("data-clickable", "");
     const body = document.createElement("span");
     body.className = "row-body";
     const heading = document.createElement("span");
@@ -346,16 +574,17 @@ function rowButton(title: string, subtitle: string | Node, action: () => void): 
         detail.appendChild(subtitle);
     }
     const play = document.createElement("span");
-    play.className = "row-play";
-    play.textContent = "▶";
+    play.className = `row-play${watched ? " row-play--watched" : ""}`;
+    play.textContent = watched ? "✓" : disabled ? "" : "▶";
+    if (watched) play.title = "Watched";
     body.append(heading, detail);
     button.append(body, play);
-    button.addEventListener("click", action);
+    if (!disabled) button.addEventListener("click", action);
     return button;
 }
 
-async function fetchJson(url: string): Promise<unknown> {
-    const response = await fetch(url, { headers: { Accept: "application/json" } });
+async function fetchJson(url: string, signal: AbortSignal): Promise<unknown> {
+    const response = await fetch(url, { headers: { Accept: "application/json" }, signal });
     if (!response.ok) throw new Error(`Request failed with HTTP ${response.status}.`);
     return await response.json() as unknown;
 }
@@ -397,4 +626,9 @@ function formatEpisodeTitle(media: Media, episode: Episode): string {
 
 function pad(value: number): string {
     return String(value).padStart(2, "0");
+}
+
+function formatDate(value: string): string {
+    const date = new Date(value);
+    return value && Number.isFinite(date.getTime()) ? date.toLocaleDateString() : "";
 }

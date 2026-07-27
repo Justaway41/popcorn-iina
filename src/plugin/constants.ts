@@ -1,7 +1,5 @@
-import { CLIENT_NAME, DEBUG_LOGS } from "../shared/constants";
-
 export { CLIENT_VERSION } from "../shared/version";
-export { CLIENT_NAME, DEBUG_LOGS };
+export { DEBUG_LOGS } from "../shared/constants";
 
 export const SHOW_SIDEBAR_DELAY_MS = 300;
 export const SPLASH_URL_MARKER = "assets/Popcorn";

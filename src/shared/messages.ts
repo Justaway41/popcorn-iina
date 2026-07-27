@@ -1,26 +1,40 @@
-import type { Episode, Media } from "./stremio";
+import type { Episode, Media, MediaType } from "./stremio";
+import type { WatchHistoryEntry } from "./history";
+import type { StremioAddon } from "./addons";
 
 export const MESSAGE_NAMES = {
     PlayItem: "playItem",
     RequestConfiguration: "requestConfiguration",
     Configuration: "configuration",
+    SetMediaType: "setMediaType",
+    HistoryUpdated: "historyUpdated",
     ShowNextEpisode: "showNextEpisode"
 } as const;
 
-export interface EpisodePlaybackContext {
+export interface PlaybackContext {
     media: Media;
-    episode: Episode;
+    episode?: Episode;
     episodes: Episode[];
 }
 
 export interface PlayItemPayload {
     url: string;
     title: string;
-    episodeContext?: EpisodePlaybackContext;
+    playbackContext: PlaybackContext;
 }
 
 export interface ConfigurationPayload {
-    addonManifestUrl: string;
+    addons: StremioAddon[];
+    mediaType: MediaType;
+    history: WatchHistoryEntry[];
+}
+
+export interface SetMediaTypePayload {
+    mediaType: MediaType;
+}
+
+export interface HistoryPayload {
+    history: WatchHistoryEntry[];
 }
 
 export interface ShowNextEpisodePayload {

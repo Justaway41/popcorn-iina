@@ -10,11 +10,11 @@ function playerIdsMatch(a: number | string, b: number | string): boolean {
 }
 
 global.onMessage("playerReady", (_data, playerId) => {
-    if (playerId !== undefined && playerId !== null) activePlayerId = playerId;
+    if (playerId != null) activePlayerId = playerId;
 });
 
 global.onMessage("playerClosed", (_data, playerId) => {
-    if (playerId !== undefined && playerId !== null && activePlayerId !== null && playerIdsMatch(playerId, activePlayerId)) {
+    if (playerId != null && activePlayerId !== null && playerIdsMatch(playerId, activePlayerId)) {
         activePlayerId = null;
     }
 });

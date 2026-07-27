@@ -16,6 +16,7 @@ const files = [
     "xyz.brbc.popcorn.iinaplugin/dist/main.js",
     "xyz.brbc.popcorn.iinaplugin/dist/global.js",
     "xyz.brbc.popcorn.iinaplugin/ui/dist/sidebar.js",
+    "xyz.brbc.popcorn.iinaplugin/ui/dist/preferences.js",
 ];
 
 let ok = true;

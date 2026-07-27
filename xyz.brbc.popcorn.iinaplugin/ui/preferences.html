@@ -4,32 +4,62 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Popcorn for IINA Preferences</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; }
+        .addon-form { display: grid; gap: 6px; }
+        .addon-entry { display: flex; gap: 6px; }
+        .addon-entry input { min-width: 0; flex: 1; }
+        .addon-entry button { flex: none; }
+        .addon-error { margin: 0; color: #d83b3b; font-size: 11px; }
+        .addon-list { display: grid; gap: 5px; margin-top: 10px; }
+        .addon-row {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 8px;
+            border: 1px solid rgba(128, 128, 128, .24);
+            border-radius: 7px;
+            background: rgba(128, 128, 128, .08);
+        }
+        .addon-copy { min-width: 0; }
+        .addon-name, .addon-host { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .addon-name { font-weight: 600; }
+        .addon-host { opacity: .62; font-size: 11px; }
+        .addon-remove { padding: 3px 7px; }
+        .addon-empty { margin: 10px 0 0; opacity: .65; font-size: 11px; }
+    </style>
 </head>
 <body>
-    <div class="pref-section">
-        <label for="addon-url">Stremio addon manifest URL</label>
-        <input id="addon-url" type="text" data-type="string" data-pref-key="addonManifestUrl"
-               placeholder="https://addon.example/manifest.json">
-        <p class="small secondary pref-help">
-            Required for playback. Popcorn only uses direct HTTP(S) streams returned by this addon.
-            Keep debrid-backed manifest URLs private.
-        </p>
-    </div>
-    <script>
-        (() => {
-            const input = document.getElementById("addon-url");
-            const preferences = window.iina?.preferences;
-            if (!input || !preferences) return;
+    <section class="pref-section">
+        <form id="addon-form" class="addon-form">
+            <label for="addon-url">Stremio addon manifest URL</label>
+            <div class="addon-entry">
+                <input id="addon-url" type="text" autocomplete="off"
+                       placeholder="https://addon.example/manifest.json">
+                <button id="add-addon" type="submit">Add Addon</button>
+            </div>
+            <p id="addon-error" class="addon-error" role="alert" hidden></p>
+            <p class="small secondary pref-help">
+                Enabled addons are searched together. Private URL details stay hidden after adding.
+            </p>
+        </form>
+        <div id="addon-list" class="addon-list"></div>
+        <p id="addon-empty" class="addon-empty">No addons yet.</p>
+    </section>
 
-            preferences.get("addonManifestUrl", (value) => {
-                if (typeof value === "string") input.value = value;
-            });
+    <template id="addon-row-template">
+        <div class="addon-row">
+            <input class="addon-enabled" type="checkbox">
+            <div class="addon-copy">
+                <strong class="addon-name"></strong>
+                <span class="addon-host"></span>
+            </div>
+            <button class="addon-remove" type="button">Remove</button>
+        </div>
+    </template>
 
-            input.addEventListener("input", () => {
-                preferences.set("addonManifestUrl", input.value);
-                preferences.sync?.();
-            });
-        })();
-    </script>
+    <script src="dist/preferences.js"></script>
 </body>
 </html>

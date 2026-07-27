@@ -1,34 +1,17 @@
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 
 import {
     buildCinemetaSearchUrl,
+    buildOpenSubtitlesUrl,
     buildStremioStreamUrl,
     findNextEpisode,
-    normalizeAddonManifestUrl,
+    isEpisodeAvailable,
+    parseEnglishSubtitleAvailability,
     parseMediaResponse,
+    parseMediaTypePreference,
     parsePlayableStreams,
     parseSeriesEpisodes
 } from "./stremio";
-
-describe("normalizeAddonManifestUrl", () => {
-    test("normalizes web and Stremio manifest URLs", () => {
-        expect(normalizeAddonManifestUrl(" https://addon.example/config/manifest.json ")).toBe(
-            "https://addon.example/config"
-        );
-        expect(normalizeAddonManifestUrl("stremio://addon.example/config/manifest.json")).toBe(
-            "https://addon.example/config"
-        );
-        expect(normalizeAddonManifestUrl("http://localhost:7000/manifest.json")).toBe(
-            "http://localhost:7000"
-        );
-    });
-
-    test("rejects unsupported schemes", () => {
-        expect(() => normalizeAddonManifestUrl("file:///tmp/manifest.json")).toThrow(
-            "Addon URL must start with http://, https://, or stremio://"
-        );
-    });
-});
 
 test("builds encoded Cinemeta and addon endpoints", () => {
     expect(buildCinemetaSearchUrl("movie", "Alien & Aliens")).toBe(
@@ -36,6 +19,9 @@ test("builds encoded Cinemeta and addon endpoints", () => {
     );
     expect(buildStremioStreamUrl("https://addon.example", "series", "tt123:1:2")).toBe(
         "https://addon.example/stream/series/tt123%3A1%3A2.json"
+    );
+    expect(buildOpenSubtitlesUrl("series", "tt123:1:2")).toBe(
+        "https://opensubtitles-v3.strem.io/subtitles/series/tt123%3A1%3A2.json"
     );
 });
 
@@ -66,15 +52,80 @@ test("parses media and episode responses defensively", () => {
 test("keeps only playable HTTP streams", () => {
     expect(parsePlayableStreams({
         streams: [
-            { title: "4K WEB\n💾 12 GB", url: "https://cdn.example/movie.mkv" },
+            { title: "4K WEB English\n💾 12 GB", url: "https://cdn.example/movie.mkv" },
+            { name: "1080p MULTI", title: "Release.Group", url: "https://cdn.example/multi.mkv" },
             { name: "LAN", url: "http://192.168.1.2/movie.mp4" },
             { title: "Torrent", infoHash: "abc" },
             { title: "Unsafe", url: "file:///tmp/movie.mkv" }
         ]
     })).toEqual([
-        { title: "4K WEB\n💾 12 GB", url: "https://cdn.example/movie.mkv", quality: "4K", size: "12 GB" },
-        { title: "LAN", url: "http://192.168.1.2/movie.mp4", quality: "", size: "" }
+        {
+            title: "4K WEB English\n💾 12 GB",
+            url: "https://cdn.example/movie.mkv",
+            quality: "4K",
+            size: "12 GB",
+            audioLanguages: ["English"],
+            subtitleLanguages: null
+        },
+        {
+            title: "Release.Group",
+            url: "https://cdn.example/multi.mkv",
+            quality: "1080p",
+            size: "",
+            audioLanguages: ["Multi"],
+            subtitleLanguages: null
+        },
+        {
+            title: "LAN",
+            url: "http://192.168.1.2/movie.mp4",
+            quality: "",
+            size: "",
+            audioLanguages: [],
+            subtitleLanguages: null
+        }
     ]);
+});
+
+test("parses multiple audio languages without treating subtitle labels as audio", () => {
+    expect(parsePlayableStreams({
+        streams: [
+            {
+                name: "1080p Dual Audio English Hindi",
+                url: "https://cdn.example/dual.mkv",
+                subtitles: [{ lang: "eng", url: "https://subs.example/en.srt" }, { lang: "spa" }]
+            },
+            {
+                title: "ENG Subs Japanese Audio",
+                url: "https://cdn.example/japanese.mkv",
+                subtitles: []
+            }
+        ]
+    })).toMatchObject([
+        {
+            audioLanguages: ["English", "Hindi"],
+            subtitleLanguages: ["English", "Spanish"]
+        },
+        {
+            audioLanguages: ["Japanese"],
+            subtitleLanguages: []
+        }
+    ]);
+});
+
+test("detects English subtitles in subtitle addon responses", () => {
+    expect(parseEnglishSubtitleAvailability({ subtitles: [{ lang: "spa" }, { lang: "eng" }] })).toBe(true);
+    expect(parseEnglishSubtitleAvailability({ subtitles: [{ lang: "English" }] })).toBe(true);
+    expect(parseEnglishSubtitleAvailability({ subtitles: [{ lang: "jpn" }] })).toBe(false);
+    expect(parseEnglishSubtitleAvailability({ subtitles: "invalid" })).toBe(false);
+});
+
+test("marks only valid future episode dates unavailable", () => {
+    const now = new Date("2026-07-06T12:00:00Z");
+    expect(isEpisodeAvailable({ ...episode("past", 1, 1), aired: "2026-07-05T12:00:00Z" }, now)).toBe(true);
+    expect(isEpisodeAvailable({ ...episode("now", 1, 2), aired: now.toISOString() }, now)).toBe(true);
+    expect(isEpisodeAvailable({ ...episode("future", 1, 3), aired: "2026-07-07T12:00:00Z" }, now)).toBe(false);
+    expect(isEpisodeAvailable({ ...episode("missing", 1, 4), aired: "" }, now)).toBe(true);
+    expect(isEpisodeAvailable({ ...episode("invalid", 1, 5), aired: "unknown" }, now)).toBe(true);
 });
 
 test("finds the next episode across seasons", () => {
@@ -87,6 +138,23 @@ test("finds the next episode across seasons", () => {
     expect(findNextEpisode(episodes, episode("tt1:1:1", 1, 1))?.id).toBe("tt1:1:2");
     expect(findNextEpisode(episodes, episode("tt1:1:2", 1, 2))?.id).toBe("tt1:2:1");
     expect(findNextEpisode(episodes, episode("tt1:2:1", 2, 1))).toBeNull();
+});
+
+test("skips unreleased episodes when finding the next episode", () => {
+    const now = new Date("2026-07-06T12:00:00Z");
+    const episodes = [
+        { ...episode("tt1:1:1", 1, 1), aired: "2026-07-01T12:00:00Z" },
+        { ...episode("tt1:1:2", 1, 2), aired: "2026-07-10T12:00:00Z" }
+    ];
+
+    expect(findNextEpisode(episodes, episodes[0], now)).toBeNull();
+});
+
+test("restores only supported media type preferences", () => {
+    expect(parseMediaTypePreference("series")).toBe("series");
+    expect(parseMediaTypePreference("movie")).toBe("movie");
+    expect(parseMediaTypePreference("invalid")).toBe("movie");
+    expect(parseMediaTypePreference(null)).toBe("movie");
 });
 
 function episode(id: string, season: number, episodeNumber: number) {

@@ -1,8 +1,11 @@
-import type { EpisodePlaybackContext, PlayItemPayload } from "../shared/messages";
+import type { PlaybackContext, PlayItemPayload, SetMediaTypePayload } from "../shared/messages";
 
 import { MESSAGE_NAMES } from "../shared/messages";
-import { findNextEpisode } from "../shared/stremio";
+import { parseAddons } from "../shared/addons";
+import { parseWatchHistory, recordPlayback } from "../shared/history";
+import { findNextEpisode, parseMediaTypePreference } from "../shared/stremio";
 import { PLAYBACK_TICK_INTERVAL_MS, SHOW_SIDEBAR_DELAY_MS, SPLASH_URL_MARKER } from "./constants";
+import { getPlaybackMilestone, shouldOfferNextEpisode } from "./playback";
 import { keepAwakeTick, startKeepAwake, stopKeepAwake } from "./sleep";
 import { formatError, isHttpUrl, logDebug, sanitizeMediaTitle } from "./utils";
 
@@ -14,8 +17,12 @@ let sidebarVisible = false;
 let playbackTimer: ReturnType<typeof setInterval> | null = null;
 let savedImageDisplayDuration: string | null = null;
 let savedPositionOnQuitFlag: boolean | null = null;
-let activeEpisodeContext: EpisodePlaybackContext | null = null;
+let activePlaybackContext: PlaybackContext | null = null;
 let isReplacingPlayback = false;
+let reachedNaturalEof = false;
+let recentRecorded = false;
+let watchedRecorded = false;
+let watchHistory = parseWatchHistory(preferences.get("watchHistory"));
 
 function setPlayerUIHidden(hidden: boolean): void {
     const api = core as typeof core & { setUIVisibility?: (hidden: boolean) => void };
@@ -64,7 +71,25 @@ function setWindowTitle(title: string): void {
 function startPlaybackMonitoring(): void {
     stopPlaybackMonitoring();
     startKeepAwake();
-    playbackTimer = setInterval(() => keepAwakeTick(!mpv.getFlag("pause")), PLAYBACK_TICK_INTERVAL_MS);
+    playbackTimer = setInterval(() => {
+        const playing = !mpv.getFlag("pause");
+        keepAwakeTick(playing);
+        if (playing) updatePlaybackHistory(mpv.getNumber("percent-pos"));
+    }, PLAYBACK_TICK_INTERVAL_MS);
+}
+
+function updatePlaybackHistory(percent: number): void {
+    const context = activePlaybackContext;
+    if (!context) return;
+    const milestone = getPlaybackMilestone(percent, recentRecorded, watchedRecorded);
+    if (milestone === null) return;
+    watchHistory = parseWatchHistory(preferences.get("watchHistory"));
+    watchHistory = recordPlayback(watchHistory, context, milestone, new Date().toISOString());
+    recentRecorded = true;
+    if (milestone === 90) watchedRecorded = true;
+    preferences.set("watchHistory", JSON.stringify(watchHistory));
+    preferences.sync();
+    sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history: watchHistory });
 }
 
 function stopPlaybackMonitoring(): void {
@@ -108,21 +133,27 @@ function playItem(payload: PlayItemPayload): void {
         return;
     }
     const title = sanitizeMediaTitle(payload.title || "Popcorn");
-    activeEpisodeContext = payload.episodeContext || null;
+    activePlaybackContext = payload.playbackContext || null;
     isReplacingPlayback = true;
+    reachedNaturalEof = false;
+    recentRecorded = false;
+    watchedRecorded = false;
     core.osd("Loading stream...");
     mpv.command("loadfile", [url, "replace", "-1", `force-media-title=${title}`]);
 }
 
 function handleEndFile(): void {
     stopPlaybackMonitoring();
+    const offerNextEpisode = shouldOfferNextEpisode(isReplacingPlayback, reachedNaturalEof);
+    reachedNaturalEof = false;
     if (isReplacingPlayback) {
         return;
     }
 
-    const context = activeEpisodeContext;
-    activeEpisodeContext = null;
-    if (!context) {
+    if (offerNextEpisode) updatePlaybackHistory(100);
+    const context = activePlaybackContext;
+    activePlaybackContext = null;
+    if (!offerNextEpisode || !context?.episode) {
         return;
     }
 
@@ -145,9 +176,20 @@ global.onMessage("showPopcornSidebar", toggleSidebar);
 event.on("iina.window-loaded", () => {
     sidebar.loadFile("ui/sidebar.html");
     sidebar.onMessage(MESSAGE_NAMES.PlayItem, playItem);
+    sidebar.onMessage(MESSAGE_NAMES.SetMediaType, (data) => {
+        const mediaType = parseMediaTypePreference((data as SetMediaTypePayload)?.mediaType);
+        preferences.set("mediaType", mediaType);
+        preferences.sync();
+    });
     sidebar.onMessage(MESSAGE_NAMES.RequestConfiguration, () => {
+        watchHistory = parseWatchHistory(preferences.get("watchHistory"));
         sidebar.postMessage(MESSAGE_NAMES.Configuration, {
-            addonManifestUrl: String(preferences.get("addonManifestUrl") || "")
+            addons: parseAddons(
+                preferences.get("addons"),
+                preferences.get("addonManifestUrl")
+            ),
+            mediaType: parseMediaTypePreference(preferences.get("mediaType")),
+            history: watchHistory
         });
     });
     windowReady = true;
@@ -161,9 +203,10 @@ event.on("iina.window-loaded", () => {
 event.on("mpv.file-loaded", () => {
     const path = mpv.getString("path") || "";
     isReplacingPlayback = false;
+    reachedNaturalEof = false;
     if (path.includes(SPLASH_URL_MARKER)) {
         stopPlaybackMonitoring();
-        activeEpisodeContext = null;
+        activePlaybackContext = null;
         setPlayerUIHidden(true);
         setWindowTitle("Popcorn");
         showSidebar();
@@ -175,13 +218,17 @@ event.on("mpv.file-loaded", () => {
     startPlaybackMonitoring();
 });
 
+event.on("mpv.eof-reached.changed", () => {
+    if (mpv.getFlag("eof-reached")) reachedNaturalEof = true;
+});
 event.on("mpv.end-file", handleEndFile);
 event.on("iina.window-will-close", () => {
     stopPlaybackMonitoring();
     windowReady = false;
     sidebarVisible = false;
-    activeEpisodeContext = null;
+    activePlaybackContext = null;
     isReplacingPlayback = false;
+    reachedNaturalEof = false;
     global.postMessage("playerClosed", {});
 });
 

@@ -15,7 +15,10 @@
   },
   "preferencesPage": "ui/preferences.html",
   "preferenceDefaults": {
-    "addonManifestUrl": ""
+    "addonManifestUrl": "",
+    "addons": "[]",
+    "mediaType": "movie",
+    "watchHistory": "[]"
   },
   "permissions": [
     "network-request",
