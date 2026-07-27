@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { parseWatchHistory } from "./history";
 import type { PlaybackContext } from "./messages";
 import {
     buildScrobblePayload,
@@ -77,6 +78,18 @@ test("parses Trakt playback and watched items into local history", () => {
         expect.objectContaining({ id: "tt456:1:2", progress: 37.5, watched: false }),
         expect.objectContaining({ id: "tt123", progress: 100, watched: true })
     ]);
+});
+
+test("keeps remote episodes without a Trakt title after history persistence", () => {
+    const entries = parseTraktHistory([{
+        progress: 37.5,
+        paused_at: "2026-07-27T10:00:00.000Z",
+        type: "episode",
+        episode: { season: 1, number: 2 },
+        show: { title: "Show", year: 2026, ids: { imdb: "tt456" } }
+    }], []);
+
+    expect(parseWatchHistory(JSON.stringify(entries))).toHaveLength(1);
 });
 
 test("merges by newest timestamp while keeping watched and rich metadata", () => {

@@ -116,7 +116,7 @@ function parseRemote(value: unknown, watched: boolean): WatchHistoryEntry[] {
         media: remoteMedia(imdbId, "series", showName, show?.year),
         episode: {
             id: `${imdbId}:${season}:${number}`,
-            name: getString(episode?.title),
+            name: getString(episode?.title) || `Episode ${season}x${number}`,
             season,
             episode: number,
             aired: getString(episode?.first_aired),
