@@ -9,6 +9,7 @@ import {
 } from "../shared/addons";
 import { parseWatchHistory } from "../shared/history";
 import {
+    mergeWatchHistory,
     parseTraktState,
     pollDeviceToken,
     requestDeviceCode,
@@ -24,6 +25,7 @@ interface WebviewPreferences {
 
 let addons: StremioAddon[] = [];
 let trakt = parseTraktState(null);
+let traktRevision = 0;
 
 document.documentElement.dataset.version = CLIENT_VERSION;
 const preferences = iina.preferences as unknown as WebviewPreferences;
@@ -180,14 +182,18 @@ function renderTrakt(): void {
     traktSync.hidden = !connected;
     traktDisconnect.hidden = !connected;
     traktStatus.textContent = connected
-        ? `Connected${trakt.lastSyncAt ? ` · Last synced ${new Date(trakt.lastSyncAt).toLocaleString()}` : ""}`
+        ? trakt.lastError
+            ? "Connected · Sync failed"
+            : `Connected${trakt.lastSyncAt ? ` · Last synced ${new Date(trakt.lastSyncAt).toLocaleString()}` : ""}`
         : "Not connected";
+    if (trakt.lastError) setTraktError(trakt.lastError);
 }
 
 function saveTrakt(next: TraktState): void {
     trakt = next;
     preferences.set("trakt", JSON.stringify(next));
     preferences.sync?.();
+    if (!next.lastError) setTraktError("");
     renderTrakt();
 }
 
@@ -195,6 +201,8 @@ function saveTraktCredentials(): void {
     const clientId = traktClientId.value.trim();
     const clientSecret = traktClientSecret.value.trim();
     if (clientId === trakt.clientId && clientSecret === trakt.clientSecret) return;
+    traktRevision += 1;
+    traktDevice.hidden = true;
     saveTrakt({
         ...trakt,
         clientId,
@@ -216,6 +224,7 @@ async function connectTrakt(): Promise<void> {
         return;
     }
 
+    const revision = ++traktRevision;
     traktConnect.disabled = true;
     try {
         saveTrakt({
@@ -230,6 +239,7 @@ async function connectTrakt(): Promise<void> {
         });
         traktStatus.textContent = "Requesting device code…";
         const code = await requestDeviceCode(browserTransport, trakt);
+        if (revision !== traktRevision) return;
         traktDevice.hidden = false;
         traktDevice.textContent = `Enter ${code.userCode} at trakt.tv/activate`;
         const activation = `${code.verificationUrl.replace(/\/$/, "")}/${encodeURIComponent(code.userCode)}`;
@@ -241,40 +251,54 @@ async function connectTrakt(): Promise<void> {
             code,
             (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
         );
+        if (revision !== traktRevision) return;
         saveTrakt(connected);
 
         const local = parseWatchHistory(await getPreference("watchHistory"));
+        if (revision !== traktRevision) return;
         const result = await syncTraktHistory(browserTransport, connected, local);
-        preferences.set("watchHistory", JSON.stringify(result.history));
+        const latest = parseWatchHistory(await getPreference("watchHistory"));
+        if (revision !== traktRevision) return;
+        preferences.set("watchHistory", JSON.stringify(mergeWatchHistory(result.history, latest)));
         preferences.sync?.();
         saveTrakt(result.state);
         traktDevice.hidden = true;
     } catch (error) {
-        setTraktError(error instanceof Error ? error.message : "Could not connect Trakt.");
+        if (revision === traktRevision) {
+            setTraktError(error instanceof Error ? error.message : "Could not connect Trakt.");
+        }
     } finally {
         traktConnect.disabled = false;
-        renderTrakt();
+        if (revision === traktRevision) renderTrakt();
     }
 }
 
 async function syncTraktNow(): Promise<void> {
     if (!trakt.tokens) return;
+    const state = trakt;
+    const revision = ++traktRevision;
     traktSync.disabled = true;
     setTraktError("");
     try {
         const local = parseWatchHistory(await getPreference("watchHistory"));
-        const result = await syncTraktHistory(browserTransport, trakt, local);
-        preferences.set("watchHistory", JSON.stringify(result.history));
+        if (revision !== traktRevision) return;
+        const result = await syncTraktHistory(browserTransport, state, local);
+        const latest = parseWatchHistory(await getPreference("watchHistory"));
+        if (revision !== traktRevision) return;
+        preferences.set("watchHistory", JSON.stringify(mergeWatchHistory(result.history, latest)));
         preferences.sync?.();
         saveTrakt(result.state);
     } catch (error) {
-        setTraktError(error instanceof Error ? error.message : "Could not sync Trakt.");
+        if (revision === traktRevision) {
+            setTraktError(error instanceof Error ? error.message : "Could not sync Trakt.");
+        }
     } finally {
         traktSync.disabled = false;
     }
 }
 
 function disconnectTrakt(): void {
+    traktRevision += 1;
     saveTrakt({
         ...trakt,
         tokens: null,
