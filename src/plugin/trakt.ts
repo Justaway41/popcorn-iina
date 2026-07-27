@@ -50,28 +50,38 @@ export function createIinaTraktClient(
         preferences.set("trakt", JSON.stringify(state));
         preferences.sync();
     };
+    let pending = Promise.resolve();
+    const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
+        const result = pending.then(operation);
+        pending = result.then(() => {}, () => {});
+        return result;
+    };
 
     return {
-        async sendPlayback(action, context, progress) {
-            const state = read();
-            if (!state.tokens) return;
-            try {
-                save(await scrobble(transport, state, action, context, progress));
-            } catch (error) {
-                onError(error);
-            }
+        sendPlayback(action, context, progress) {
+            return enqueue(async () => {
+                const state = read();
+                if (!state.tokens) return;
+                try {
+                    save(await scrobble(transport, state, action, context, progress));
+                } catch (error) {
+                    onError(error);
+                }
+            });
         },
-        async sync(history) {
-            const state = read();
-            if (!state.tokens) return history;
-            try {
-                const result = await syncTraktHistory(transport, state, history);
-                save(result.state);
-                return result.history;
-            } catch (error) {
-                onError(error);
-                return history;
-            }
+        sync(history) {
+            return enqueue(async () => {
+                const state = read();
+                if (!state.tokens) return history;
+                try {
+                    const result = await syncTraktHistory(transport, state, history);
+                    save(result.state);
+                    return result.history;
+                } catch (error) {
+                    onError(error);
+                    return history;
+                }
+            });
         }
     };
 }

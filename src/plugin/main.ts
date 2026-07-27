@@ -4,7 +4,7 @@ import { MESSAGE_NAMES } from "../shared/messages";
 import { parseAddons } from "../shared/addons";
 import { parseWatchHistory, recordPlayback } from "../shared/history";
 import { findNextEpisode, parseMediaTypePreference } from "../shared/stremio";
-import type { TraktScrobbleAction } from "../shared/trakt";
+import { mergeWatchHistory, type TraktScrobbleAction } from "../shared/trakt";
 import {
     PLAYBACK_TICK_INTERVAL_MS,
     PROGRESS_SAVE_INTERVAL_MS,
@@ -236,7 +236,11 @@ event.on("iina.window-loaded", () => {
     });
     windowReady = true;
     global.postMessage("playerReady", {});
-    void trakt.sync(watchHistory).then((history) => {
+    void trakt.sync(watchHistory).then((synced) => {
+        const history = mergeWatchHistory(
+            parseWatchHistory(preferences.get("watchHistory")),
+            synced
+        );
         watchHistory = history;
         preferences.set("watchHistory", JSON.stringify(history));
         preferences.sync();
