@@ -237,11 +237,10 @@ export async function scrobble(
         );
         return { ...current, lastError: "", retryAt: 0 };
     } catch (error) {
-        if (!(error instanceof TraktError)) throw error;
         return {
             ...current,
-            lastError: error.message,
-            retryAt: error.retryAt
+            lastError: error instanceof Error ? error.message : "Trakt request failed.",
+            retryAt: error instanceof TraktError ? error.retryAt : 0
         };
     }
 }
@@ -253,47 +252,58 @@ export async function syncTraktHistory(
     now = Date.now()
 ): Promise<{ state: TraktState; history: WatchHistoryEntry[] }> {
     if (state.retryAt > now) return { state, history: local };
-    const current = await refreshTraktTokens(transport, state, now);
-    if (!current.tokens) throw new Error("Trakt is not connected.");
+    let current = state;
+    try {
+        current = await refreshTraktTokens(transport, state, now);
+        if (!current.tokens) throw new Error("Trakt is not connected.");
 
-    const playback = await request(transport, current, "GET", "/sync/playback", null, now);
-    const watched = await request(
-        transport,
-        current,
-        "GET",
-        "/sync/history?limit=100",
-        null,
-        now
-    );
-    const history = mergeWatchHistory(local, parseTraktHistory(playback, watched));
-
-    if (!current.initialHistoryUploaded) {
-        const remoteWatched = new Set(
-            parseTraktHistory([], watched).map((entry) => entry.id)
+        const playback = await request(transport, current, "GET", "/sync/playback", null, now);
+        const watched = await request(
+            transport,
+            current,
+            "GET",
+            "/sync/history?limit=100",
+            null,
+            now
         );
-        const pending = local.filter((entry) => entry.watched && !remoteWatched.has(entry.id));
-        if (pending.length > 0) {
-            await request(
-                transport,
-                current,
-                "POST",
-                "/sync/history",
-                historyUploadPayload(pending),
-                now
-            );
-        }
-    }
+        const history = mergeWatchHistory(local, parseTraktHistory(playback, watched));
 
-    return {
-        state: {
-            ...current,
-            initialHistoryUploaded: true,
-            lastSyncAt: new Date(now).toISOString(),
-            lastError: "",
-            retryAt: 0
-        },
-        history
-    };
+        if (!current.initialHistoryUploaded) {
+            const remoteWatched = new Set(
+                parseTraktHistory([], watched).map(historyKey)
+            );
+            const pending = local.filter(
+                (entry) => entry.watched && !remoteWatched.has(historyKey(entry))
+            );
+            if (pending.length > 0) {
+                await request(
+                    transport,
+                    current,
+                    "POST",
+                    "/sync/history",
+                    historyUploadPayload(pending),
+                    now
+                );
+            }
+        }
+
+        return {
+            state: {
+                ...current,
+                initialHistoryUploaded: true,
+                lastSyncAt: new Date(now).toISOString(),
+                lastError: "",
+                retryAt: 0
+            },
+            history
+        };
+    } catch (error) {
+        if (!(error instanceof TraktError) || error.status !== 429) throw error;
+        return {
+            state: { ...current, lastError: error.message, retryAt: error.retryAt },
+            history: local
+        };
+    }
 }
 
 export function parseTraktHistory(playback: unknown, watched: unknown): WatchHistoryEntry[] {
@@ -310,8 +320,9 @@ export function mergeWatchHistory(
 ): WatchHistoryEntry[] {
     const entries = new Map<string, WatchHistoryEntry>();
     for (const entry of [...local, ...remote]) {
-        const existing = entries.get(entry.id);
-        entries.set(entry.id, existing ? mergeEntry(existing, entry) : entry);
+        const key = historyKey(entry);
+        const existing = entries.get(key);
+        entries.set(key, existing ? mergeEntry(existing, entry) : entry);
     }
     return [...entries.values()]
         .sort((a, b) => timestamp(b.lastPlayedAt) - timestamp(a.lastPlayedAt))
@@ -489,6 +500,12 @@ function remoteMedia(
 function timestamp(value: string): number {
     const parsed = Date.parse(value);
     return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function historyKey(entry: WatchHistoryEntry): string {
+    return entry.episode
+        ? `${entry.media.imdbId}:${entry.episode.season}:${entry.episode.episode}`
+        : entry.media.imdbId;
 }
 
 function parseJson(value: unknown): unknown {

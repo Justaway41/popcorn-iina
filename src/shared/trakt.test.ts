@@ -351,3 +351,98 @@ test("records Retry-After without retrying immediately", async () => {
     expect(calls).toHaveLength(1);
     expect(result.retryAt).toBe(now + 12_000);
 });
+
+test("records sync Retry-After and returns unchanged local history", async () => {
+    const now = 1_000_000;
+    const state = parseTraktState({
+        clientId: "id",
+        clientSecret: "secret",
+        tokens: {
+            accessToken: "access",
+            refreshToken: "refresh",
+            expiresAt: 2_000_000
+        }
+    });
+    const local = [{
+        id: movie.imdbId,
+        media: movie,
+        lastPlayedAt: "2026-07-27T10:00:00.000Z",
+        watched: false,
+        progress: 42
+    }];
+    const result = await syncTraktHistory(queueTransport([{
+        status: 429,
+        data: {},
+        headers: { "Retry-After": "12" }
+    }]), state, local, now);
+
+    expect(result.history).toBe(local);
+    expect(result.state.retryAt).toBe(now + 12_000);
+});
+
+test("dedupes remote watched episodes with noncanonical local IDs", async () => {
+    const state = parseTraktState({
+        clientId: "id",
+        clientSecret: "secret",
+        tokens: {
+            accessToken: "access",
+            refreshToken: "refresh",
+            expiresAt: 2_000_000
+        }
+    });
+    const calls: RecordedRequest[] = [];
+    const result = await syncTraktHistory(recordingTransport([
+        { status: 200, data: [], headers: {} },
+        {
+            status: 200,
+            data: [{
+                type: "episode",
+                watched_at: "2026-07-27T10:00:00.000Z",
+                show: { title: "Show", ids: { imdb: "tt456" } },
+                episode: { title: "Episode", season: 2, number: 3 }
+            }],
+            headers: {}
+        }
+    ], calls), state, [{
+        id: "addon-episode-id",
+        media: { ...movie, id: "tt456", imdbId: "tt456", type: "series", name: "Show" },
+        episode: {
+            id: "addon-episode-id",
+            name: "Episode",
+            season: 2,
+            episode: 3,
+            aired: "",
+            description: "",
+            thumbnail: ""
+        },
+        lastPlayedAt: "2026-07-26T10:00:00.000Z",
+        watched: true,
+        progress: 100
+    }], 1_000_000);
+
+    expect(calls).toHaveLength(2);
+    expect(result.history).toHaveLength(1);
+});
+
+test("records scrobble transport failures without rejecting playback", async () => {
+    const state = parseTraktState({
+        clientId: "id",
+        clientSecret: "secret",
+        tokens: {
+            accessToken: "access",
+            refreshToken: "refresh",
+            expiresAt: 2_000_000
+        }
+    });
+    const result = await scrobble(
+        async () => { throw new Error("Network unavailable"); },
+        state,
+        "pause",
+        { media: movie, episodes: [] },
+        42,
+        1_000_000
+    );
+
+    expect(result.lastError).toBe("Network unavailable");
+    expect(result.tokens).toEqual(state.tokens);
+});
