@@ -43,6 +43,19 @@ Accepted manifest forms:
 
 Enabled addons are queried together, and each stream is labeled with its source. Manifest URLs may contain private debrid credentials; Popcorn hides their paths and query strings after adding. Do not share them.
 
+### Trakt progress sync
+
+Popcorn always keeps local recent and watched progress. To sync across devices:
+
+1. Create a Trakt API application at https://trakt.tv/oauth/applications.
+2. Open IINA Settings → Plugins → Popcorn for IINA.
+3. Enter the application's Client ID and Client Secret.
+4. Choose **Connect Trakt** and approve the displayed device code.
+
+When connected, Popcorn syncs watched history and unfinished playback progress.
+Trakt failures do not interrupt playback; local progress continues offline.
+Disconnecting Trakt keeps local history.
+
 ## Development
 
 ```sh
