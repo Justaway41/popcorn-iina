@@ -21,6 +21,7 @@ export interface PlayItemPayload {
     url: string;
     title: string;
     playbackContext: PlaybackContext;
+    resumePercent?: number;
 }
 
 export interface ConfigurationPayload {

@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 
-import { getPlaybackMilestone, shouldOfferNextEpisode } from "./playback";
+import {
+    shouldOfferNextEpisode,
+    shouldSaveProgress
+} from "./playback";
 
 test("offers the next episode only after natural EOF", () => {
     expect(shouldOfferNextEpisode(false, true)).toBe(true);
@@ -8,11 +11,8 @@ test("offers the next episode only after natural EOF", () => {
     expect(shouldOfferNextEpisode(true, true)).toBe(false);
 });
 
-test("emits each playback milestone once", () => {
-    expect(getPlaybackMilestone(4.9, false, false)).toBeNull();
-    expect(getPlaybackMilestone(5, false, false)).toBe(5);
-    expect(getPlaybackMilestone(50, true, false)).toBeNull();
-    expect(getPlaybackMilestone(90, true, false)).toBe(90);
-    expect(getPlaybackMilestone(100, true, true)).toBeNull();
-    expect(getPlaybackMilestone(95, false, false)).toBe(90);
+test("saves local progress every 30 seconds", () => {
+    expect(shouldSaveProgress(29_999, 0, 30_000)).toBe(false);
+    expect(shouldSaveProgress(30_000, 0, 30_000)).toBe(true);
+    expect(shouldSaveProgress(60_001, 30_001, 30_000)).toBe(true);
 });

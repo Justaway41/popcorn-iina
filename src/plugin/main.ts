@@ -4,8 +4,13 @@ import { MESSAGE_NAMES } from "../shared/messages";
 import { parseAddons } from "../shared/addons";
 import { parseWatchHistory, recordPlayback } from "../shared/history";
 import { findNextEpisode, parseMediaTypePreference } from "../shared/stremio";
-import { PLAYBACK_TICK_INTERVAL_MS, SHOW_SIDEBAR_DELAY_MS, SPLASH_URL_MARKER } from "./constants";
-import { getPlaybackMilestone, shouldOfferNextEpisode } from "./playback";
+import {
+    PLAYBACK_TICK_INTERVAL_MS,
+    PROGRESS_SAVE_INTERVAL_MS,
+    SHOW_SIDEBAR_DELAY_MS,
+    SPLASH_URL_MARKER
+} from "./constants";
+import { shouldOfferNextEpisode, shouldSaveProgress } from "./playback";
 import { keepAwakeTick, startKeepAwake, stopKeepAwake } from "./sleep";
 import { formatError, isHttpUrl, logDebug, sanitizeMediaTitle } from "./utils";
 
@@ -18,10 +23,10 @@ let playbackTimer: ReturnType<typeof setInterval> | null = null;
 let savedImageDisplayDuration: string | null = null;
 let savedPositionOnQuitFlag: boolean | null = null;
 let activePlaybackContext: PlaybackContext | null = null;
+let pendingResumePercent: number | null = null;
+let lastProgressSavedAt = 0;
 let isReplacingPlayback = false;
 let reachedNaturalEof = false;
-let recentRecorded = false;
-let watchedRecorded = false;
 let watchHistory = parseWatchHistory(preferences.get("watchHistory"));
 
 function setPlayerUIHidden(hidden: boolean): void {
@@ -74,22 +79,29 @@ function startPlaybackMonitoring(): void {
     playbackTimer = setInterval(() => {
         const playing = !mpv.getFlag("pause");
         keepAwakeTick(playing);
-        if (playing) updatePlaybackHistory(mpv.getNumber("percent-pos"));
+        if (playing && shouldSaveProgress(
+            Date.now(),
+            lastProgressSavedAt,
+            PROGRESS_SAVE_INTERVAL_MS
+        )) {
+            savePlaybackProgress();
+        }
     }, PLAYBACK_TICK_INTERVAL_MS);
 }
 
-function updatePlaybackHistory(percent: number): void {
+function savePlaybackProgress(percent = mpv.getNumber("percent-pos")): void {
     const context = activePlaybackContext;
-    if (!context) return;
-    const milestone = getPlaybackMilestone(percent, recentRecorded, watchedRecorded);
-    if (milestone === null) return;
-    watchHistory = parseWatchHistory(preferences.get("watchHistory"));
-    watchHistory = recordPlayback(watchHistory, context, milestone, new Date().toISOString());
-    recentRecorded = true;
-    if (milestone === 90) watchedRecorded = true;
+    if (!context || !Number.isFinite(percent)) return;
+    watchHistory = recordPlayback(
+        parseWatchHistory(preferences.get("watchHistory")),
+        context,
+        percent,
+        new Date().toISOString()
+    );
     preferences.set("watchHistory", JSON.stringify(watchHistory));
     preferences.sync();
     sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history: watchHistory });
+    lastProgressSavedAt = Date.now();
 }
 
 function stopPlaybackMonitoring(): void {
@@ -134,10 +146,14 @@ function playItem(payload: PlayItemPayload): void {
     }
     const title = sanitizeMediaTitle(payload.title || "Popcorn");
     activePlaybackContext = payload.playbackContext || null;
+    pendingResumePercent = typeof payload.resumePercent === "number" &&
+        Number.isFinite(payload.resumePercent) &&
+        payload.resumePercent >= 0 &&
+        payload.resumePercent <= 100
+        ? payload.resumePercent
+        : null;
     isReplacingPlayback = true;
     reachedNaturalEof = false;
-    recentRecorded = false;
-    watchedRecorded = false;
     core.osd("Loading stream...");
     mpv.command("loadfile", [url, "replace", "-1", `force-media-title=${title}`]);
 }
@@ -150,7 +166,7 @@ function handleEndFile(): void {
         return;
     }
 
-    if (offerNextEpisode) updatePlaybackHistory(100);
+    savePlaybackProgress(offerNextEpisode ? 100 : mpv.getNumber("percent-pos"));
     const context = activePlaybackContext;
     activePlaybackContext = null;
     if (!offerNextEpisode || !context?.episode) {
@@ -207,6 +223,7 @@ event.on("mpv.file-loaded", () => {
     if (path.includes(SPLASH_URL_MARKER)) {
         stopPlaybackMonitoring();
         activePlaybackContext = null;
+        pendingResumePercent = null;
         setPlayerUIHidden(true);
         setWindowTitle("Popcorn");
         showSidebar();
@@ -216,17 +233,26 @@ event.on("mpv.file-loaded", () => {
     setPlayerUIHidden(false);
     hideSidebar();
     startPlaybackMonitoring();
+    if (pendingResumePercent !== null) {
+        mpv.command("seek", [String(pendingResumePercent), "absolute-percent+exact"]);
+        pendingResumePercent = null;
+    }
 });
 
+event.on("mpv.pause.changed", () => {
+    if (!isReplacingPlayback && mpv.getFlag("pause")) savePlaybackProgress();
+});
 event.on("mpv.eof-reached.changed", () => {
     if (mpv.getFlag("eof-reached")) reachedNaturalEof = true;
 });
 event.on("mpv.end-file", handleEndFile);
 event.on("iina.window-will-close", () => {
     stopPlaybackMonitoring();
+    savePlaybackProgress();
     windowReady = false;
     sidebarVisible = false;
     activePlaybackContext = null;
+    pendingResumePercent = null;
     isReplacingPlayback = false;
     reachedNaturalEof = false;
     global.postMessage("playerClosed", {});

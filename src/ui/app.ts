@@ -4,10 +4,11 @@ import type { WatchHistoryEntry } from "../shared/history";
 import type { Episode, Media, MediaType } from "../shared/stremio";
 
 import { loadAddonStreams, parseAddons } from "../shared/addons";
-import { parseWatchHistory } from "../shared/history";
+import { getResumePercent, parseWatchHistory } from "../shared/history";
 import { MESSAGE_NAMES } from "../shared/messages";
 import { CLIENT_VERSION } from "../shared/version";
 import {
+    buildCinemetaPosterUrl,
     buildCinemetaSearchUrl,
     buildCinemetaSeriesUrl,
     buildCinemetaTrendingUrl,
@@ -54,6 +55,15 @@ let activeRequest: AbortController | null = null;
 export function replaceRequest(previous: AbortController | null): AbortController {
     previous?.abort();
     return new AbortController();
+}
+
+export function getProgressDisplay(
+    progress: number | null,
+    watched: boolean
+): { percent: number; label: string } | null {
+    if (watched || progress === null || progress < 5 || progress >= 90) return null;
+    const percent = Math.round(progress);
+    return { percent, label: `${percent}% watched` };
 }
 
 export function initApp(): void {
@@ -256,7 +266,8 @@ function renderMedia(items: Media[], query: string): void {
             if (media.type === "series") void loadEpisodes(media);
             else void loadStreams(media);
         },
-        isWatched(media.imdbId)
+        isWatched(media.imdbId),
+        null
     ))));
     showContent(fragment);
 }
@@ -284,7 +295,8 @@ function historySection(entries: WatchHistoryEntry[], showAll: boolean): HTMLEle
             ? `S${pad(entry.episode.season)}E${pad(entry.episode.episode)} · ${entry.episode.name}`
             : entry.media.releaseInfo,
         () => void openHistoryEntry(entry),
-        entry.watched
+        entry.watched,
+        entry.progress
     ))));
     return section;
 }
@@ -318,7 +330,8 @@ function mediaCard(
     title: string,
     subtitle: string,
     action: () => void,
-    watched: boolean
+    watched: boolean,
+    progress: number | null = null
 ): HTMLButtonElement {
     const card = document.createElement("button");
     card.className = "media-card";
@@ -329,20 +342,32 @@ function mediaCard(
 
     const poster = document.createElement("div");
     poster.className = "poster";
-    if (media.poster) {
-        const image = document.createElement("img");
-        image.src = media.poster;
-        image.alt = "";
-        image.loading = "lazy";
-        image.addEventListener("error", () => image.remove(), { once: true });
-        poster.appendChild(image);
-    }
+    const image = document.createElement("img");
+    image.src = media.poster || buildCinemetaPosterUrl(media.imdbId);
+    image.alt = "";
+    image.loading = "lazy";
+    image.addEventListener("error", () => image.remove(), { once: true });
+    poster.appendChild(image);
     if (watched) {
         const badge = document.createElement("span");
         badge.className = "watched-badge";
         badge.textContent = "✓";
         badge.title = "Watched";
         poster.appendChild(badge);
+    }
+    const progressDisplay = getProgressDisplay(progress, watched);
+    if (progressDisplay) {
+        const track = document.createElement("span");
+        track.className = "poster-progress";
+        track.title = progressDisplay.label;
+        track.setAttribute("role", "progressbar");
+        track.setAttribute("aria-valuemin", "0");
+        track.setAttribute("aria-valuemax", "100");
+        track.setAttribute("aria-valuenow", String(progressDisplay.percent));
+        const fill = document.createElement("span");
+        fill.style.width = `${progressDisplay.percent}%`;
+        track.appendChild(fill);
+        poster.appendChild(track);
     }
 
     const name = document.createElement("span");
@@ -380,6 +405,11 @@ async function openHistoryEntry(entry: WatchHistoryEntry): Promise<void> {
 
 function isWatched(id: string): boolean {
     return watchHistory.some((entry) => entry.id === id && entry.watched);
+}
+
+function getEntryProgress(id: string): number | null {
+    const entry = watchHistory.find((item) => item.id === id);
+    return entry ? getResumePercent(entry.progress, entry.watched) : null;
 }
 
 function renderEpisodes(media: Media, episodes: Episode[]): void {
@@ -450,10 +480,12 @@ function renderStreams(
     streams.forEach((stream) => {
         list.appendChild(rowButton(stream.title, buildStreamDetails(stream, englishSubtitles), () => {
             showStreamLoading();
+            const resumePercent = getEntryProgress(episode?.id || media.imdbId);
             iina.postMessage(MESSAGE_NAMES.PlayItem, {
                 url: stream.url,
                 title: episode ? formatEpisodeTitle(media, episode) : media.name,
-                playbackContext: { media, ...(episode ? { episode } : {}), episodes }
+                playbackContext: { media, ...(episode ? { episode } : {}), episodes },
+                ...(resumePercent === null ? {} : { resumePercent })
             });
         }));
     });

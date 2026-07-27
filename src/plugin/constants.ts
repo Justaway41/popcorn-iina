@@ -4,6 +4,7 @@ export { DEBUG_LOGS } from "../shared/constants";
 export const SHOW_SIDEBAR_DELAY_MS = 300;
 export const SPLASH_URL_MARKER = "assets/Popcorn";
 export const PLAYBACK_TICK_INTERVAL_MS = 1000;
+export const PROGRESS_SAVE_INTERVAL_MS = 30_000;
 export const SLEEP_CAFFEINATE_TIMEOUT_SEC = 30;
 export const SLEEP_REFRESH_INTERVAL_SEC = 20;
 

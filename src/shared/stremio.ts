@@ -62,6 +62,10 @@ export function buildCinemetaSeriesUrl(imdbId: string): string {
     return `${CINEMETA_BASE_URL}/meta/series/${encodeURIComponent(imdbId)}.json`;
 }
 
+export function buildCinemetaPosterUrl(imdbId: string): string {
+    return `https://images.metahub.space/poster/medium/${encodeURIComponent(imdbId)}/img`;
+}
+
 export function buildOpenSubtitlesUrl(type: MediaType, videoId: string): string {
     return `${OPEN_SUBTITLES_BASE_URL}/subtitles/${type}/${encodeURIComponent(videoId)}.json`;
 }

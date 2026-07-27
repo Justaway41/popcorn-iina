@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 
-import { getAudioBadge, getSubtitleBadge, replaceRequest } from "./app";
+import {
+    getAudioBadge,
+    getProgressDisplay,
+    getSubtitleBadge,
+    replaceRequest
+} from "./app";
 
 test("replacing a request aborts the previous request only", () => {
     const previous = new AbortController();
@@ -36,4 +41,10 @@ test("combines embedded and external English subtitle availability", () => {
         title: "Subtitle availability unknown",
         state: "unknown"
     });
+});
+
+test("shows progress only for unfinished entries with an exact position", () => {
+    expect(getProgressDisplay(null, false)).toBeNull();
+    expect(getProgressDisplay(42.25, false)).toEqual({ percent: 42, label: "42% watched" });
+    expect(getProgressDisplay(95, true)).toBeNull();
 });

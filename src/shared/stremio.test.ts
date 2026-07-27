@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import {
+    buildCinemetaPosterUrl,
     buildCinemetaSearchUrl,
     buildOpenSubtitlesUrl,
     buildStremioStreamUrl,
@@ -12,6 +13,12 @@ import {
     parsePlayableStreams,
     parseSeriesEpisodes
 } from "./stremio";
+
+test("builds a lazy poster fallback for an IMDb item", () => {
+    expect(buildCinemetaPosterUrl("tt123")).toBe(
+        "https://images.metahub.space/poster/medium/tt123/img"
+    );
+});
 
 test("builds encoded Cinemeta and addon endpoints", () => {
     expect(buildCinemetaSearchUrl("movie", "Alien & Aliens")).toBe(
