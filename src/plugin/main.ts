@@ -4,6 +4,7 @@ import { MESSAGE_NAMES } from "../shared/messages";
 import { parseAddons } from "../shared/addons";
 import { parseWatchHistory, recordPlayback } from "../shared/history";
 import { findNextEpisode, parseMediaTypePreference } from "../shared/stremio";
+import type { TraktScrobbleAction } from "../shared/trakt";
 import {
     PLAYBACK_TICK_INTERVAL_MS,
     PROGRESS_SAVE_INTERVAL_MS,
@@ -12,9 +13,13 @@ import {
 } from "./constants";
 import { shouldOfferNextEpisode, shouldSaveProgress } from "./playback";
 import { keepAwakeTick, startKeepAwake, stopKeepAwake } from "./sleep";
+import { createIinaTraktClient } from "./trakt";
 import { formatError, isHttpUrl, logDebug, sanitizeMediaTitle } from "./utils";
 
-const { core, event, global, mpv, preferences, sidebar, utils } = iina;
+const { core, event, global, http, mpv, preferences, sidebar, utils } = iina;
+const trakt = createIinaTraktClient(http, preferences, (error) => {
+    logDebug("Popcorn: Trakt request failed:", formatError(error));
+});
 
 let windowReady = false;
 let pendingShowSidebar = false;
@@ -104,6 +109,25 @@ function savePlaybackProgress(percent = mpv.getNumber("percent-pos")): void {
     lastProgressSavedAt = Date.now();
 }
 
+function sendTrakt(action: TraktScrobbleAction, percent: number): void {
+    const context = activePlaybackContext;
+    if (!context || !Number.isFinite(percent)) return;
+    void trakt.sendPlayback(action, context, percent);
+}
+
+function checkpointPlayback(forceStop = false): void {
+    const context = activePlaybackContext;
+    if (!context) return;
+    const percent = forceStop ? 100 : mpv.getNumber("percent-pos");
+    if (!Number.isFinite(percent)) return;
+    savePlaybackProgress(percent);
+    void trakt.sendPlayback(
+        forceStop || percent >= 90 ? "stop" : "pause",
+        context,
+        percent
+    );
+}
+
 function stopPlaybackMonitoring(): void {
     if (playbackTimer) {
         clearInterval(playbackTimer);
@@ -145,6 +169,7 @@ function playItem(payload: PlayItemPayload): void {
         return;
     }
     const title = sanitizeMediaTitle(payload.title || "Popcorn");
+    checkpointPlayback();
     activePlaybackContext = payload.playbackContext || null;
     pendingResumePercent = typeof payload.resumePercent === "number" &&
         Number.isFinite(payload.resumePercent) &&
@@ -161,12 +186,13 @@ function playItem(payload: PlayItemPayload): void {
 function handleEndFile(): void {
     stopPlaybackMonitoring();
     const offerNextEpisode = shouldOfferNextEpisode(isReplacingPlayback, reachedNaturalEof);
+    const naturalEof = reachedNaturalEof;
     reachedNaturalEof = false;
     if (isReplacingPlayback) {
         return;
     }
 
-    savePlaybackProgress(offerNextEpisode ? 100 : mpv.getNumber("percent-pos"));
+    checkpointPlayback(naturalEof);
     const context = activePlaybackContext;
     activePlaybackContext = null;
     if (!offerNextEpisode || !context?.episode) {
@@ -210,6 +236,12 @@ event.on("iina.window-loaded", () => {
     });
     windowReady = true;
     global.postMessage("playerReady", {});
+    void trakt.sync(watchHistory).then((history) => {
+        watchHistory = history;
+        preferences.set("watchHistory", JSON.stringify(history));
+        preferences.sync();
+        sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history });
+    });
     if (pendingShowSidebar) {
         pendingShowSidebar = false;
         showSidebarWithDelay();
@@ -237,10 +269,13 @@ event.on("mpv.file-loaded", () => {
         mpv.command("seek", [String(pendingResumePercent), "absolute-percent+exact"]);
         pendingResumePercent = null;
     }
+    sendTrakt("start", mpv.getNumber("percent-pos"));
 });
 
 event.on("mpv.pause.changed", () => {
-    if (!isReplacingPlayback && mpv.getFlag("pause")) savePlaybackProgress();
+    if (isReplacingPlayback) return;
+    if (mpv.getFlag("pause")) checkpointPlayback();
+    else sendTrakt("start", mpv.getNumber("percent-pos"));
 });
 event.on("mpv.eof-reached.changed", () => {
     if (mpv.getFlag("eof-reached")) reachedNaturalEof = true;
@@ -248,7 +283,7 @@ event.on("mpv.eof-reached.changed", () => {
 event.on("mpv.end-file", handleEndFile);
 event.on("iina.window-will-close", () => {
     stopPlaybackMonitoring();
-    savePlaybackProgress();
+    checkpointPlayback();
     windowReady = false;
     sidebarVisible = false;
     activePlaybackContext = null;
