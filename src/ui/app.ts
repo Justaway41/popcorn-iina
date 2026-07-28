@@ -73,6 +73,10 @@ export function getEpisodeOrderLabel(order: EpisodeOrder): string {
     return order === "newest" ? "Newest First" : "Oldest First";
 }
 
+export function getEpisodeOrderButtonId(order: EpisodeOrder): string {
+    return `episode-order-${order}`;
+}
+
 export function initApp(): void {
     iina.onMessage(MESSAGE_NAMES.Configuration, (data) => {
         applyConfiguration(data);
@@ -420,7 +424,7 @@ function getEntryProgress(id: string): number | null {
     return entry ? getResumePercent(entry.progress, entry.watched) : null;
 }
 
-function renderEpisodes(media: Media, episodes: Episode[]): void {
+function renderEpisodes(media: Media, episodes: Episode[], focusOrder?: EpisodeOrder): void {
     if (episodes.length === 0) {
         renderEmpty("No episodes found.");
         return;
@@ -432,6 +436,7 @@ function renderEpisodes(media: Media, episodes: Episode[]): void {
         const value = order as EpisodeOrder;
         const button = document.createElement("button");
         button.type = "button";
+        button.id = getEpisodeOrderButtonId(value);
         button.textContent = getEpisodeOrderLabel(value);
         button.classList.toggle("active", episodeOrder === value);
         button.setAttribute("aria-pressed", String(episodeOrder === value));
@@ -439,7 +444,7 @@ function renderEpisodes(media: Media, episodes: Episode[]): void {
             if (episodeOrder === value) return;
             episodeOrder = value;
             iina.postMessage(MESSAGE_NAMES.SetEpisodeOrder, { episodeOrder });
-            renderEpisodes(media, episodes);
+            renderEpisodes(media, episodes, value);
         });
         orderControl.appendChild(button);
     });
@@ -480,6 +485,7 @@ function renderEpisodes(media: Media, episodes: Episode[]): void {
         fragment.appendChild(section);
     });
     showContent(fragment);
+    if (focusOrder) document.getElementById(getEpisodeOrderButtonId(focusOrder))?.focus();
 }
 
 function renderStreams(

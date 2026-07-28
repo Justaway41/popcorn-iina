@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
     getAudioBadge,
+    getEpisodeOrderButtonId,
     getEpisodeOrderLabel,
     getProgressDisplay,
     getSubtitleBadge,
@@ -11,6 +12,11 @@ import {
 test("labels both serial episode orders", () => {
     expect(getEpisodeOrderLabel("oldest")).toBe("Oldest First");
     expect(getEpisodeOrderLabel("newest")).toBe("Newest First");
+});
+
+test("uses stable IDs for re-rendered episode order buttons", () => {
+    expect(getEpisodeOrderButtonId("oldest")).toBe("episode-order-oldest");
+    expect(getEpisodeOrderButtonId("newest")).toBe("episode-order-newest");
 });
 
 test("replacing a request aborts the previous request only", () => {
