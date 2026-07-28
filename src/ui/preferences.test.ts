@@ -8,6 +8,12 @@ import {
 const preferencesHtml = await Bun.file(
     new URL("../../xyz.brbc.popcorn.iinaplugin/ui/preferences.html", import.meta.url)
 ).text();
+const preferencesSource = await Bun.file(new URL("./preferences.ts", import.meta.url)).text();
+
+test("uses IINA's preference-page API from window", () => {
+    expect(preferencesSource).toContain("window.iina");
+    expect(preferencesSource).not.toContain("const preferences = iina.preferences");
+});
 
 test("links Trakt account and API app creation from preferences", () => {
     expect(preferencesHtml).toContain('href="https://app.trakt.tv/"');

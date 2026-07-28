@@ -28,12 +28,18 @@ interface WebviewPreferences {
     sync?(): void;
 }
 
+declare global {
+    interface Window {
+        iina: { preferences: WebviewPreferences };
+    }
+}
+
 let addons: StremioAddon[] = [];
 let trakt = parseTraktState(null);
 let traktRevision = 0;
 
 document.documentElement.dataset.version = CLIENT_VERSION;
-const preferences = iina.preferences as unknown as WebviewPreferences;
+const preferences = window.iina.preferences as unknown as WebviewPreferences;
 const form = element<HTMLFormElement>("addon-form");
 const input = element<HTMLInputElement>("addon-url");
 const addButton = element<HTMLButtonElement>("add-addon");
