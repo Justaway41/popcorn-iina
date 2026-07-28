@@ -15,7 +15,7 @@
         .addon-list { display: grid; gap: 5px; margin-top: 10px; }
         .addon-row {
             display: grid;
-            grid-template-columns: auto minmax(0, 1fr) auto;
+            grid-template-columns: auto minmax(0, 1fr) auto auto;
             align-items: center;
             gap: 8px;
             padding: 7px 8px;
@@ -27,7 +27,18 @@
         .addon-name, .addon-host { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .addon-name { font-weight: 600; }
         .addon-host { opacity: .62; font-size: 11px; }
-        .addon-remove { padding: 3px 7px; }
+        .addon-url {
+            display: block;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 10px;
+        }
+        .addon-url.is-blurred {
+            filter: blur(4px);
+            user-select: none;
+        }
+        .addon-reveal, .addon-remove { padding: 3px 7px; }
         .addon-empty { margin: 10px 0 0; opacity: .65; font-size: 11px; }
         .trakt-section { display: grid; gap: 6px; margin-top: 18px; }
         .trakt-section h3, .trakt-section p { margin: 0; }
@@ -47,7 +58,7 @@
             </div>
             <p id="addon-error" class="addon-error" role="alert" hidden></p>
             <p class="small secondary pref-help">
-                Enabled addons are searched together. Private URL details stay hidden after adding.
+                Enabled addons are searched together. Private URL details are blurred until you reveal them.
             </p>
         </form>
         <div id="addon-list" class="addon-list"></div>
@@ -83,7 +94,9 @@
             <div class="addon-copy">
                 <strong class="addon-name"></strong>
                 <span class="addon-host"></span>
+                <span class="addon-url is-blurred" aria-hidden="true"></span>
             </div>
+            <button class="addon-reveal" type="button">Reveal</button>
             <button class="addon-remove" type="button">Remove</button>
         </div>
     </template>

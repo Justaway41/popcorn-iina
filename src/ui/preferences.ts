@@ -1,6 +1,8 @@
 import type { StremioAddon } from "../shared/addons";
 import type { TraktState, TraktTransport } from "../shared/trakt";
 
+import { getAddonUrlVisibility } from "./addon-url-visibility";
+
 import {
     canonicalizeManifestUrl,
     getAddonHostname,
@@ -133,19 +135,36 @@ function render(): void {
         const toggle = row.querySelector<HTMLInputElement>(".addon-enabled");
         const name = row.querySelector<HTMLElement>(".addon-name");
         const host = row.querySelector<HTMLElement>(".addon-host");
+        const url = row.querySelector<HTMLElement>(".addon-url");
+        const reveal = row.querySelector<HTMLButtonElement>(".addon-reveal");
         const remove = row.querySelector<HTMLButtonElement>(".addon-remove");
-        if (!toggle || !name || !host || !remove) throw new Error("Invalid addon row template.");
+        if (!toggle || !name || !host || !url || !reveal || !remove) {
+            throw new Error("Invalid addon row template.");
+        }
 
         toggle.checked = addon.enabled;
         toggle.setAttribute("aria-label", `Enable ${addon.name}`);
         name.textContent = addon.name;
         host.textContent = getAddonHostname(addon.manifestUrl);
+        url.textContent = addon.manifestUrl;
         remove.setAttribute("aria-label", `Remove ${addon.name}`);
+        const setRevealed = (revealed: boolean) => {
+            const state = getAddonUrlVisibility(revealed);
+            url.className = state.className;
+            url.setAttribute("aria-hidden", state.ariaHidden);
+            reveal.textContent = state.label;
+            reveal.setAttribute("aria-label", `${state.label} URL for ${addon.name}`);
+        };
+        setRevealed(false);
 
         toggle.addEventListener("change", () => {
             addons[index] = { ...addon, enabled: toggle.checked };
             save(false);
         });
+        reveal.addEventListener("click", () => {
+            setRevealed(url.classList.contains("is-blurred"));
+        });
+        reveal.addEventListener("blur", () => setRevealed(false));
         remove.addEventListener("click", () => {
             addons.splice(index, 1);
             if (addons.length === 0) preferences.set("addonManifestUrl", "");
