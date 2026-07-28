@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { getAddonUrlVisibility } from "./addon-url-visibility";
+import {
+    createAddonUrlVisibilityController,
+    getAddonUrlVisibility
+} from "./addon-url-visibility";
 
 const preferencesHtml = await Bun.file(
     new URL("../../xyz.brbc.popcorn.iinaplugin/ui/preferences.html", import.meta.url)
@@ -30,4 +33,31 @@ test("defines a private addon URL and reveal control in each row", () => {
         '<span class="addon-url is-blurred" aria-hidden="true"></span>'
     );
     expect(preferencesHtml).toContain('class="addon-reveal"');
+});
+
+test("toggles an addon URL and focuses before revealing it", () => {
+    let controller = createAddonUrlVisibilityController(() => {
+        expect(controller.state()).toEqual(getAddonUrlVisibility(false));
+    });
+
+    expect(controller.toggle()).toEqual(getAddonUrlVisibility(true));
+    expect(controller.toggle()).toEqual(getAddonUrlVisibility(false));
+});
+
+test("hides a revealed addon URL on blur or addon toggle", () => {
+    const controller = createAddonUrlVisibilityController(() => {});
+
+    controller.toggle();
+    expect(controller.hide()).toEqual(getAddonUrlVisibility(false));
+    controller.toggle();
+    expect(controller.hide()).toEqual(getAddonUrlVisibility(false));
+});
+
+test("keeps addon URL visibility controllers isolated per row", () => {
+    const first = createAddonUrlVisibilityController(() => {});
+    const second = createAddonUrlVisibilityController(() => {});
+
+    first.toggle();
+    expect(first.state()).toEqual(getAddonUrlVisibility(true));
+    expect(second.state()).toEqual(getAddonUrlVisibility(false));
 });

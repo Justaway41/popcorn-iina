@@ -1,7 +1,7 @@
 import type { StremioAddon } from "../shared/addons";
 import type { TraktState, TraktTransport } from "../shared/trakt";
 
-import { getAddonUrlVisibility } from "./addon-url-visibility";
+import { createAddonUrlVisibilityController } from "./addon-url-visibility";
 
 import {
     canonicalizeManifestUrl,
@@ -148,23 +148,24 @@ function render(): void {
         host.textContent = getAddonHostname(addon.manifestUrl);
         url.textContent = addon.manifestUrl;
         remove.setAttribute("aria-label", `Remove ${addon.name}`);
-        const setRevealed = (revealed: boolean) => {
-            const state = getAddonUrlVisibility(revealed);
+        const visibility = createAddonUrlVisibilityController(() => reveal.focus());
+        const setVisibility = (state: ReturnType<typeof visibility.state>) => {
             url.className = state.className;
             url.setAttribute("aria-hidden", state.ariaHidden);
             reveal.textContent = state.label;
             reveal.setAttribute("aria-label", `${state.label} URL for ${addon.name}`);
         };
-        setRevealed(false);
+        setVisibility(visibility.state());
 
         toggle.addEventListener("change", () => {
             addons[index] = { ...addon, enabled: toggle.checked };
+            setVisibility(visibility.hide());
             save(false);
         });
         reveal.addEventListener("click", () => {
-            setRevealed(url.classList.contains("is-blurred"));
+            setVisibility(visibility.toggle());
         });
-        reveal.addEventListener("blur", () => setRevealed(false));
+        reveal.addEventListener("blur", () => setVisibility(visibility.hide()));
         remove.addEventListener("click", () => {
             addons.splice(index, 1);
             if (addons.length === 0) preferences.set("addonManifestUrl", "");
