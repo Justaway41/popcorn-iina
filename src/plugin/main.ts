@@ -1,9 +1,14 @@
-import type { PlaybackContext, PlayItemPayload, SetMediaTypePayload } from "../shared/messages";
+import type {
+    PlaybackContext,
+    PlayItemPayload,
+    SetEpisodeOrderPayload,
+    SetMediaTypePayload
+} from "../shared/messages";
 
 import { MESSAGE_NAMES } from "../shared/messages";
 import { parseAddons } from "../shared/addons";
 import { parseWatchHistory, recordPlayback } from "../shared/history";
-import { findNextEpisode, parseMediaTypePreference } from "../shared/stremio";
+import { findNextEpisode, parseEpisodeOrder, parseMediaTypePreference } from "../shared/stremio";
 import { mergeWatchHistory, type TraktScrobbleAction } from "../shared/trakt";
 import {
     PLAYBACK_TICK_INTERVAL_MS,
@@ -233,6 +238,13 @@ event.on("iina.window-loaded", () => {
         preferences.set("mediaType", mediaType);
         preferences.sync();
     });
+    sidebar.onMessage(MESSAGE_NAMES.SetEpisodeOrder, (data) => {
+        preferences.set(
+            "episodeOrder",
+            parseEpisodeOrder((data as SetEpisodeOrderPayload)?.episodeOrder)
+        );
+        preferences.sync();
+    });
     sidebar.onMessage(MESSAGE_NAMES.RequestConfiguration, () => {
         watchHistory = parseWatchHistory(preferences.get("watchHistory"));
         sidebar.postMessage(MESSAGE_NAMES.Configuration, {
@@ -241,6 +253,7 @@ event.on("iina.window-loaded", () => {
                 preferences.get("addonManifestUrl")
             ),
             mediaType: parseMediaTypePreference(preferences.get("mediaType")),
+            episodeOrder: parseEpisodeOrder(preferences.get("episodeOrder")),
             history: watchHistory
         });
     });

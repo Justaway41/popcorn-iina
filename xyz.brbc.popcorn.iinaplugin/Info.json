@@ -18,6 +18,7 @@
     "addonManifestUrl": "",
     "addons": "[]",
     "mediaType": "movie",
+    "episodeOrder": "oldest",
     "watchHistory": "[]",
     "trakt": "{}"
   },

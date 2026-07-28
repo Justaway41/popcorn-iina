@@ -1,6 +1,7 @@
 import { canonicalizeManifestUrl } from "./addons";
 
 export type MediaType = "movie" | "series";
+export type EpisodeOrder = "oldest" | "newest";
 
 export interface Media {
     id: string;
@@ -83,6 +84,17 @@ export function buildStremioStreamUrl(manifestUrl: string, type: MediaType, vide
 
 export function parseMediaTypePreference(value: unknown): MediaType {
     return value === "series" ? "series" : "movie";
+}
+
+export function parseEpisodeOrder(value: unknown): EpisodeOrder {
+    return value === "newest" ? "newest" : "oldest";
+}
+
+export function sortEpisodes(episodes: Episode[], order: EpisodeOrder): Episode[] {
+    const direction = order === "newest" ? -1 : 1;
+    return [...episodes].sort((a, b) =>
+        direction * (a.season - b.season || a.episode - b.episode)
+    );
 }
 
 export function parseMediaResponse(value: unknown): Media[] {

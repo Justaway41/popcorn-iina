@@ -2,10 +2,16 @@ import { expect, test } from "bun:test";
 
 import {
     getAudioBadge,
+    getEpisodeOrderLabel,
     getProgressDisplay,
     getSubtitleBadge,
     replaceRequest
 } from "./app";
+
+test("labels both serial episode orders", () => {
+    expect(getEpisodeOrderLabel("oldest")).toBe("Oldest First");
+    expect(getEpisodeOrderLabel("newest")).toBe("Newest First");
+});
 
 test("replacing a request aborts the previous request only", () => {
     const previous = new AbortController();

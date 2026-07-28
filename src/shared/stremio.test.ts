@@ -9,9 +9,11 @@ import {
     isEpisodeAvailable,
     parseEnglishSubtitleAvailability,
     parseMediaResponse,
+    parseEpisodeOrder,
     parseMediaTypePreference,
     parsePlayableStreams,
-    parseSeriesEpisodes
+    parseSeriesEpisodes,
+    sortEpisodes
 } from "./stremio";
 
 test("builds a lazy poster fallback for an IMDb item", () => {
@@ -162,6 +164,26 @@ test("restores only supported media type preferences", () => {
     expect(parseMediaTypePreference("movie")).toBe("movie");
     expect(parseMediaTypePreference("invalid")).toBe("movie");
     expect(parseMediaTypePreference(null)).toBe("movie");
+});
+
+test("restores only supported episode order preferences", () => {
+    expect(parseEpisodeOrder("newest")).toBe("newest");
+    expect(parseEpisodeOrder("oldest")).toBe("oldest");
+    expect(parseEpisodeOrder("unwatched")).toBe("oldest");
+    expect(parseEpisodeOrder(null)).toBe("oldest");
+});
+
+test("sorts episodes serially in either direction", () => {
+    const values = [
+        episode("s2e1", 2, 1),
+        episode("s1e2", 1, 2),
+        episode("s1e1", 1, 1)
+    ];
+    expect(sortEpisodes(values, "oldest").map((item) => item.id))
+        .toEqual(["s1e1", "s1e2", "s2e1"]);
+    expect(sortEpisodes(values, "newest").map((item) => item.id))
+        .toEqual(["s2e1", "s1e2", "s1e1"]);
+    expect(values.map((item) => item.id)).toEqual(["s2e1", "s1e2", "s1e1"]);
 });
 
 function episode(id: string, season: number, episodeNumber: number) {

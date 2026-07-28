@@ -44,14 +44,14 @@ button { color: inherit; }
 .brand strong { font-size: 14px; }
 .brand span { color: var(--muted); font-size: 10px; }
 
-.type-switch {
+.type-switch, .episode-order {
     display: flex;
     padding: 2px;
     border-radius: 7px;
     background: var(--surface);
 }
 
-.type-switch button {
+.type-switch button, .episode-order button {
     border: 0;
     border-radius: 5px;
     padding: 5px 8px;
@@ -61,7 +61,8 @@ button { color: inherit; }
     font-size: 11px;
 }
 
-.type-switch button.active { background: #3a3a3f; color: var(--text); }
+.type-switch button.active, .episode-order button.active { background: #3a3a3f; color: var(--text); }
+.episode-order button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 
 .search { padding: 10px 14px 8px; }
 .search input {

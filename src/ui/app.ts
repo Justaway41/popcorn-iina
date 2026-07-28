@@ -1,7 +1,7 @@
 import type { ConfigurationPayload, HistoryPayload, ShowNextEpisodePayload } from "../shared/messages";
 import type { AddonStream, StremioAddon } from "../shared/addons";
 import type { WatchHistoryEntry } from "../shared/history";
-import type { Episode, Media, MediaType } from "../shared/stremio";
+import type { Episode, EpisodeOrder, Media, MediaType } from "../shared/stremio";
 
 import { loadAddonStreams, parseAddons } from "../shared/addons";
 import { getResumePercent, parseWatchHistory } from "../shared/history";
@@ -16,10 +16,12 @@ import {
     buildStremioStreamUrl,
     isEpisodeAvailable,
     parseEnglishSubtitleAvailability,
+    parseEpisodeOrder,
     parseMediaResponse,
     parseMediaTypePreference,
     parsePlayableStreams,
-    parseSeriesEpisodes
+    parseSeriesEpisodes,
+    sortEpisodes
 } from "../shared/stremio";
 
 type View =
@@ -44,6 +46,7 @@ interface Elements {
 
 let ui: Elements;
 let mediaType: MediaType = "movie";
+let episodeOrder: EpisodeOrder = "oldest";
 let addons: StremioAddon[] = [];
 let watchHistory: WatchHistoryEntry[] = [];
 let homeQuery = "";
@@ -64,6 +67,10 @@ export function getProgressDisplay(
     if (watched || progress === null || progress < 5 || progress >= 90) return null;
     const percent = Math.round(progress);
     return { percent, label: `${percent}% watched` };
+}
+
+export function getEpisodeOrderLabel(order: EpisodeOrder): string {
+    return order === "newest" ? "Newest First" : "Oldest First";
 }
 
 export function initApp(): void {
@@ -119,6 +126,7 @@ function applyConfiguration(data: unknown): void {
     const payload = data as ConfigurationPayload;
     addons = parseAddons(payload?.addons);
     mediaType = parseMediaTypePreference(payload?.mediaType);
+    episodeOrder = parseEpisodeOrder(payload?.episodeOrder);
     watchHistory = parseWatchHistory(payload?.history);
     updateTypeButtons();
 }
@@ -418,14 +426,32 @@ function renderEpisodes(media: Media, episodes: Episode[]): void {
         return;
     }
     const fragment = document.createDocumentFragment();
+    const orderControl = document.createElement("div");
+    orderControl.className = "episode-order";
+    ["oldest", "newest"].forEach((order) => {
+        const value = order as EpisodeOrder;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = getEpisodeOrderLabel(value);
+        button.classList.toggle("active", episodeOrder === value);
+        button.setAttribute("aria-pressed", String(episodeOrder === value));
+        button.addEventListener("click", () => {
+            if (episodeOrder === value) return;
+            episodeOrder = value;
+            iina.postMessage(MESSAGE_NAMES.SetEpisodeOrder, { episodeOrder });
+            renderEpisodes(media, episodes);
+        });
+        orderControl.appendChild(button);
+    });
+    fragment.appendChild(orderControl);
     const seasons = new Map<number, Episode[]>();
-    episodes.forEach((episode) => {
+    sortEpisodes(episodes, episodeOrder).forEach((episode) => {
         const values = seasons.get(episode.season) || [];
         values.push(episode);
         seasons.set(episode.season, values);
     });
 
-    [...seasons.entries()].sort(([a], [b]) => a - b).forEach(([season, values]) => {
+    seasons.forEach((values, season) => {
         const section = document.createElement("details");
         section.className = "season";
         const heading = document.createElement("summary");
@@ -438,7 +464,7 @@ function renderEpisodes(media: Media, episodes: Episode[]): void {
         section.appendChild(heading);
         const list = document.createElement("div");
         list.className = "row-list";
-        values.sort((a, b) => a.episode - b.episode).forEach((episode) => {
+        values.forEach((episode) => {
             const available = isEpisodeAvailable(episode);
             list.appendChild(rowButton(
                 `S${pad(episode.season)}E${pad(episode.episode)} · ${episode.name}`,
