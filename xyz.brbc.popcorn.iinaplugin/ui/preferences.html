@@ -31,6 +31,7 @@
         .addon-empty { margin: 10px 0 0; opacity: .65; font-size: 11px; }
         .trakt-section { display: grid; gap: 6px; margin-top: 18px; }
         .trakt-section h3, .trakt-section p { margin: 0; }
+        .trakt-links { display: flex; gap: 8px; }
         .trakt-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
         .trakt-device { padding: 7px 8px; border-radius: 7px; background: rgba(128,128,128,.1); }
     </style>
@@ -57,6 +58,10 @@
         <h3 id="trakt-heading">Trakt Sync</h3>
         <p class="small secondary pref-help">
             Create a Trakt application, then enter its Client ID and Client Secret.
+        </p>
+        <p class="small trakt-links">
+            <a href="https://app.trakt.tv/" target="_blank" rel="noopener noreferrer">Create Trakt account</a>
+            <a href="https://trakt.tv/oauth/applications" target="_blank" rel="noopener noreferrer">Create API app</a>
         </p>
         <label for="trakt-client-id">Client ID</label>
         <input id="trakt-client-id" type="text" autocomplete="off" spellcheck="false">
