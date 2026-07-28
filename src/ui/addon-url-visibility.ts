@@ -37,3 +37,18 @@ export function createAddonUrlVisibilityController(
         }
     };
 }
+
+export function bindAddonUrlVisibility(
+    reveal: EventTarget,
+    enabled: EventTarget,
+    controller: AddonUrlVisibilityController,
+    setVisibility: (state: AddonUrlVisibility) => void,
+    onEnabledChange: () => void
+): void {
+    reveal.addEventListener("click", () => setVisibility(controller.toggle()));
+    reveal.addEventListener("blur", () => setVisibility(controller.hide()));
+    enabled.addEventListener("change", () => {
+        setVisibility(controller.hide());
+        onEnabledChange();
+    });
+}

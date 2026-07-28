@@ -1,7 +1,10 @@
 import type { StremioAddon } from "../shared/addons";
 import type { TraktState, TraktTransport } from "../shared/trakt";
 
-import { createAddonUrlVisibilityController } from "./addon-url-visibility";
+import {
+    bindAddonUrlVisibility,
+    createAddonUrlVisibilityController
+} from "./addon-url-visibility";
 
 import {
     canonicalizeManifestUrl,
@@ -157,15 +160,10 @@ function render(): void {
         };
         setVisibility(visibility.state());
 
-        toggle.addEventListener("change", () => {
+        bindAddonUrlVisibility(reveal, toggle, visibility, setVisibility, () => {
             addons[index] = { ...addon, enabled: toggle.checked };
-            setVisibility(visibility.hide());
             save(false);
         });
-        reveal.addEventListener("click", () => {
-            setVisibility(visibility.toggle());
-        });
-        reveal.addEventListener("blur", () => setVisibility(visibility.hide()));
         remove.addEventListener("click", () => {
             addons.splice(index, 1);
             if (addons.length === 0) preferences.set("addonManifestUrl", "");

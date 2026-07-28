@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+    bindAddonUrlVisibility,
     createAddonUrlVisibilityController,
     getAddonUrlVisibility
 } from "./addon-url-visibility";
@@ -44,13 +45,36 @@ test("toggles an addon URL and focuses before revealing it", () => {
     expect(controller.toggle()).toEqual(getAddonUrlVisibility(false));
 });
 
-test("hides a revealed addon URL on blur or addon toggle", () => {
-    const controller = createAddonUrlVisibilityController(() => {});
+test("reveals on bound click after focusing and hides on bound blur", () => {
+    const reveal = new EventTarget();
+    const enabled = new EventTarget();
+    const events: string[] = [];
+    const controller = createAddonUrlVisibilityController(() => events.push("focus"));
+    bindAddonUrlVisibility(reveal, enabled, controller, (state) => {
+        events.push(state.label);
+    }, () => {});
 
-    controller.toggle();
-    expect(controller.hide()).toEqual(getAddonUrlVisibility(false));
-    controller.toggle();
-    expect(controller.hide()).toEqual(getAddonUrlVisibility(false));
+    reveal.dispatchEvent(new Event("click"));
+    expect(events).toEqual(["focus", "Hide"]);
+    reveal.dispatchEvent(new Event("blur"));
+    expect(controller.state()).toEqual(getAddonUrlVisibility(false));
+    expect(events).toEqual(["focus", "Hide", "Reveal"]);
+});
+
+test("hides before the bound enabled-toggle callback", () => {
+    const reveal = new EventTarget();
+    const enabled = new EventTarget();
+    const controller = createAddonUrlVisibilityController(() => {});
+    let applied = getAddonUrlVisibility(false);
+    bindAddonUrlVisibility(reveal, enabled, controller, (state) => {
+        applied = state;
+    }, () => {
+        expect(applied).toEqual(getAddonUrlVisibility(false));
+    });
+
+    reveal.dispatchEvent(new Event("click"));
+    enabled.dispatchEvent(new Event("change"));
+    expect(controller.state()).toEqual(getAddonUrlVisibility(false));
 });
 
 test("keeps addon URL visibility controllers isolated per row", () => {
