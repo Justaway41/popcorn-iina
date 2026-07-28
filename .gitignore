@@ -29,6 +29,7 @@ xyz.brbc.popcorn.iinaplugin/ui/dist/
 # Local tooling
 .direnv/
 .opencode/
+.worktrees/
 
 # IINA artifacts
 *.iinaplgz
