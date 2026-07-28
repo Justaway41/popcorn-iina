@@ -4,6 +4,7 @@ import {
     getAudioBadge,
     getEpisodeOrderButtonId,
     getEpisodeOrderLabel,
+    getOpenSeasonNumbers,
     getProgressDisplay,
     getSubtitleBadge,
     replaceRequest
@@ -17,6 +18,16 @@ test("labels both serial episode orders", () => {
 test("uses stable IDs for re-rendered episode order buttons", () => {
     expect(getEpisodeOrderButtonId("oldest")).toBe("episode-order-oldest");
     expect(getEpisodeOrderButtonId("newest")).toBe("episode-order-newest");
+});
+
+test("keeps expanded numeric seasons for an episode-list re-render", () => {
+    const open = getOpenSeasonNumbers([
+        { open: true, dataset: { season: "1" } },
+        { open: false, dataset: { season: "2" } },
+        { open: true, dataset: { season: "invalid" } }
+    ]);
+
+    expect([...open]).toEqual([1]);
 });
 
 test("replacing a request aborts the previous request only", () => {

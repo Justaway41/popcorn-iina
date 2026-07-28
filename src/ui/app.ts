@@ -77,6 +77,17 @@ export function getEpisodeOrderButtonId(order: EpisodeOrder): string {
     return `episode-order-${order}`;
 }
 
+export function getOpenSeasonNumbers(
+    sections: ArrayLike<{ open: boolean; dataset: { season?: string } }>
+): Set<number> {
+    const openSeasons = new Set<number>();
+    Array.from(sections).forEach((section) => {
+        const season = Number(section.dataset.season);
+        if (section.open && Number.isFinite(season)) openSeasons.add(season);
+    });
+    return openSeasons;
+}
+
 export function initApp(): void {
     iina.onMessage(MESSAGE_NAMES.Configuration, (data) => {
         applyConfiguration(data);
@@ -424,7 +435,12 @@ function getEntryProgress(id: string): number | null {
     return entry ? getResumePercent(entry.progress, entry.watched) : null;
 }
 
-function renderEpisodes(media: Media, episodes: Episode[], focusOrder?: EpisodeOrder): void {
+function renderEpisodes(
+    media: Media,
+    episodes: Episode[],
+    focusOrder?: EpisodeOrder,
+    openSeasons: ReadonlySet<number> = new Set()
+): void {
     if (episodes.length === 0) {
         renderEmpty("No episodes found.");
         return;
@@ -442,9 +458,12 @@ function renderEpisodes(media: Media, episodes: Episode[], focusOrder?: EpisodeO
         button.setAttribute("aria-pressed", String(episodeOrder === value));
         button.addEventListener("click", () => {
             if (episodeOrder === value) return;
+            const expanded = getOpenSeasonNumbers(
+                ui.content.querySelectorAll<HTMLDetailsElement>("details.season")
+            );
             episodeOrder = value;
             iina.postMessage(MESSAGE_NAMES.SetEpisodeOrder, { episodeOrder });
-            renderEpisodes(media, episodes, value);
+            renderEpisodes(media, episodes, value, expanded);
         });
         orderControl.appendChild(button);
     });
@@ -459,6 +478,8 @@ function renderEpisodes(media: Media, episodes: Episode[], focusOrder?: EpisodeO
     seasons.forEach((values, season) => {
         const section = document.createElement("details");
         section.className = "season";
+        section.dataset.season = String(season);
+        section.open = openSeasons.has(season);
         const heading = document.createElement("summary");
         const seasonName = document.createElement("span");
         seasonName.textContent = `Season ${season}`;
