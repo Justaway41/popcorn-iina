@@ -16,11 +16,11 @@
   "preferencesPage": "ui/preferences.html",
   "preferenceDefaults": {
     "addonManifestUrl": "",
-    "addons": "[]",
+    "addons": [],
     "mediaType": "movie",
     "episodeOrder": "oldest",
-    "watchHistory": "[]",
-    "trakt": "{}"
+    "watchHistory": [],
+    "trakt": {}
   },
   "permissions": [
     "network-request",

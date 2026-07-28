@@ -1,7 +1,9 @@
 import { applySplashIcon, formatError, getSplashUrl, logDebug } from "./utils";
+import { migrateStructuredPreferences } from "./preferences";
 
-const { console, global, menu } = iina;
+const { console, global, menu, preferences } = iina;
 
+migrateStructuredPreferences(preferences);
 applySplashIcon();
 let activePlayerId: number | string | null = null;
 

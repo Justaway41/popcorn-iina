@@ -117,7 +117,7 @@ function savePlaybackProgress(percent = mpv.getNumber("percent-pos")): void {
         percent,
         new Date().toISOString()
     );
-    preferences.set("watchHistory", JSON.stringify(watchHistory));
+    preferences.set("watchHistory", watchHistory);
     preferences.sync();
     sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history: watchHistory });
     lastProgressSavedAt = Date.now();
@@ -265,7 +265,7 @@ event.on("iina.window-loaded", () => {
             synced
         );
         watchHistory = history;
-        preferences.set("watchHistory", JSON.stringify(history));
+        preferences.set("watchHistory", history);
         preferences.sync();
         sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history });
     });

@@ -47,7 +47,7 @@ export function createIinaTraktClient(
     const transport = createIinaTransport(http);
     const read = () => parseTraktState(preferences.get("trakt"));
     const save = (state: ReturnType<typeof parseTraktState>) => {
-        preferences.set("trakt", JSON.stringify(state));
+        preferences.set("trakt", state);
         preferences.sync();
     };
     const saveIfCurrent = (

@@ -88,8 +88,7 @@ async function loadPreferences(): Promise<void> {
     const [stored, legacy, storedTrakt] = await Promise.all([
         getPreference("addons"),
         getPreference("addonManifestUrl"),
-        getPreference("trakt"),
-        getPreference("watchHistory")
+        getPreference("trakt")
     ]);
     const storedAddons = parseAddons(stored);
     addons = parseAddons(stored, legacy);
@@ -181,7 +180,7 @@ function render(): void {
 }
 
 function save(shouldRender = true): void {
-    preferences.set("addons", JSON.stringify(addons));
+    preferences.set("addons", addons);
     preferences.sync?.();
     if (shouldRender) render();
 }
@@ -215,7 +214,7 @@ function renderTrakt(): void {
 
 function saveTrakt(next: TraktState): void {
     trakt = next;
-    preferences.set("trakt", JSON.stringify(next));
+    preferences.set("trakt", next);
     preferences.sync?.();
     if (!next.lastError) setTraktError("");
     renderTrakt();
@@ -285,7 +284,7 @@ async function connectTrakt(): Promise<void> {
         const result = await syncTraktHistory(browserTransport, connected, local);
         const latest = parseWatchHistory(await getPreference("watchHistory"));
         if (revision !== traktRevision) return;
-        preferences.set("watchHistory", JSON.stringify(mergeWatchHistory(result.history, latest)));
+        preferences.set("watchHistory", mergeWatchHistory(result.history, latest));
         preferences.sync?.();
         saveTrakt(result.state);
         traktDevice.hidden = true;
@@ -311,7 +310,7 @@ async function syncTraktNow(): Promise<void> {
         const result = await syncTraktHistory(browserTransport, state, local);
         const latest = parseWatchHistory(await getPreference("watchHistory"));
         if (revision !== traktRevision) return;
-        preferences.set("watchHistory", JSON.stringify(mergeWatchHistory(result.history, latest)));
+        preferences.set("watchHistory", mergeWatchHistory(result.history, latest));
         preferences.sync?.();
         saveTrakt(result.state);
     } catch (error) {
