@@ -11,6 +11,7 @@ export interface TraktState {
     clientId: string;
     clientSecret: string;
     tokens: TraktTokens | null;
+    reconnectRequired: boolean;
     initialHistoryUploaded: boolean;
     lastSyncAt: string;
     lastError: string;
@@ -85,6 +86,7 @@ export function parseTraktState(value: unknown): TraktState {
         tokens: accessToken && refreshToken && expiresAt
             ? { accessToken, refreshToken, expiresAt }
             : null,
+        reconnectRequired: item?.reconnectRequired === true,
         initialHistoryUploaded: item?.initialHistoryUploaded === true,
         lastSyncAt: getString(item?.lastSyncAt),
         lastError: getString(item?.lastError),
@@ -160,6 +162,7 @@ export async function pollDeviceToken(
             return {
                 ...state,
                 tokens: parseTokens(response.data),
+                reconnectRequired: false,
                 lastError: "",
                 retryAt: 0
             };
@@ -195,21 +198,32 @@ export async function refreshTraktTokens(
     if (!state.tokens || state.tokens.expiresAt - now >= TOKEN_REFRESH_WINDOW_MS) {
         return state;
     }
-    const data = await request(
-        transport,
-        state,
-        "POST",
-        "/oauth/token",
-        {
-            refresh_token: state.tokens.refreshToken,
-            client_id: state.clientId,
-            client_secret: state.clientSecret,
-            redirect_uri: "urn:ietf:wg:oauth:2.0:oob",
-            grant_type: "refresh_token"
-        },
-        now
-    );
-    return { ...state, tokens: parseTokens(data), lastError: "", retryAt: 0 };
+    try {
+        const data = await request(
+            transport,
+            state,
+            "POST",
+            "/oauth/token",
+            {
+                refresh_token: state.tokens.refreshToken,
+                client_id: state.clientId,
+                client_secret: state.clientSecret,
+                redirect_uri: "urn:ietf:wg:oauth:2.0:oob",
+                grant_type: "refresh_token"
+            },
+            now
+        );
+        return {
+            ...state,
+            tokens: parseTokens(data),
+            reconnectRequired: false,
+            lastError: "",
+            retryAt: 0
+        };
+    } catch (error) {
+        if (isRefreshRejection(error)) return reconnectState(state);
+        throw error;
+    }
 }
 
 export async function scrobble(
@@ -225,7 +239,9 @@ export async function scrobble(
     try {
         current = await refreshTraktTokens(transport, current, now);
         if (!current.tokens) {
-            return { ...current, lastError: "Trakt is not connected." };
+            return current.reconnectRequired
+                ? current
+                : { ...current, lastError: "Trakt is not connected." };
         }
         await request(
             transport,
@@ -237,6 +253,7 @@ export async function scrobble(
         );
         return { ...current, lastError: "", retryAt: 0 };
     } catch (error) {
+        if (isAuthenticationError(error)) return reconnectState(current);
         return {
             ...current,
             lastError: error instanceof Error ? error.message : "Trakt request failed.",
@@ -255,7 +272,14 @@ export async function syncTraktHistory(
     let current = state;
     try {
         current = await refreshTraktTokens(transport, state, now);
-        if (!current.tokens) throw new Error("Trakt is not connected.");
+        if (!current.tokens) {
+            return {
+                state: current.reconnectRequired
+                    ? current
+                    : { ...current, lastError: "Trakt is not connected." },
+                history: local
+            };
+        }
 
         const playback = await request(transport, current, "GET", "/sync/playback", null, now);
         const watched = await request(
@@ -298,12 +322,33 @@ export async function syncTraktHistory(
             history
         };
     } catch (error) {
+        if (isAuthenticationError(error)) {
+            return { state: reconnectState(current), history: local };
+        }
         if (!(error instanceof TraktError) || error.status !== 429) throw error;
         return {
             state: { ...current, lastError: error.message, retryAt: error.retryAt },
             history: local
         };
     }
+}
+
+function isAuthenticationError(error: unknown): error is TraktError {
+    return error instanceof TraktError && error.status === 401;
+}
+
+function isRefreshRejection(error: unknown): error is TraktError {
+    return error instanceof TraktError && (error.status === 400 || error.status === 401);
+}
+
+function reconnectState(state: TraktState): TraktState {
+    return {
+        ...state,
+        tokens: null,
+        reconnectRequired: true,
+        lastError: "Trakt connection expired. Reconnect required.",
+        retryAt: 0
+    };
 }
 
 export function parseTraktHistory(playback: unknown, watched: unknown): WatchHistoryEntry[] {

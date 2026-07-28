@@ -220,6 +220,30 @@ test("refreshes an expiring access token before an authenticated request", async
     expect(calls[1].headers.Authorization).toBe("Bearer new-access");
 });
 
+test("requires reconnect when Trakt rejects an expiring refresh token", async () => {
+    const now = 1_000_000;
+    const state = parseTraktState({
+        clientId: "id",
+        clientSecret: "secret",
+        tokens: {
+            accessToken: "expired-access",
+            refreshToken: "rejected-refresh",
+            expiresAt: now + 1
+        }
+    });
+
+    const result = await scrobble(queueTransport([{
+        status: 400,
+        data: { error: "invalid_grant" },
+        headers: {}
+    }]), state, "pause", { media: movie, episodes: [] }, 42, now);
+
+    expect(result.tokens).toBeNull();
+    expect(result.reconnectRequired).toBe(true);
+    expect(result.lastError).toBe("Trakt connection expired. Reconnect required.");
+    expect(result.retryAt).toBe(0);
+});
+
 test("uses pause below 90 percent and stop at the watched threshold", async () => {
     const state = parseTraktState({
         clientId: "id",

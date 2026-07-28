@@ -9,3 +9,7 @@ export function shouldSaveProgress(
 ): boolean {
     return nowMs - lastSavedAtMs >= intervalMs;
 }
+
+export function shouldSendWatchedStop(progress: number, stopSent: boolean): boolean {
+    return !stopSent && Number.isFinite(progress) && progress >= 90;
+}

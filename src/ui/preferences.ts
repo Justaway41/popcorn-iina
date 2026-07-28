@@ -185,7 +185,7 @@ function renderTrakt(): void {
         ? trakt.lastError
             ? "Connected · Sync failed"
             : `Connected${trakt.lastSyncAt ? ` · Last synced ${new Date(trakt.lastSyncAt).toLocaleString()}` : ""}`
-        : "Not connected";
+        : trakt.reconnectRequired ? "Reconnect required" : "Not connected";
     if (trakt.lastError) setTraktError(trakt.lastError);
 }
 
@@ -208,6 +208,7 @@ function saveTraktCredentials(): void {
         clientId,
         clientSecret,
         tokens: null,
+        reconnectRequired: false,
         initialHistoryUploaded: false,
         lastSyncAt: "",
         lastError: "",
@@ -232,6 +233,7 @@ async function connectTrakt(): Promise<void> {
             clientId,
             clientSecret,
             tokens: null,
+            reconnectRequired: false,
             initialHistoryUploaded: false,
             lastSyncAt: "",
             lastError: "",
@@ -302,6 +304,7 @@ function disconnectTrakt(): void {
     saveTrakt({
         ...trakt,
         tokens: null,
+        reconnectRequired: false,
         lastSyncAt: "",
         lastError: "",
         retryAt: 0

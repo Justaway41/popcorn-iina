@@ -95,3 +95,63 @@ test("serializes client operations and state writes in event order", async () =>
     expect(beforeRelease).toEqual(["request:10"]);
     expect(events).toEqual(["request:10", "write", "request:20", "write"]);
 });
+
+test("does not restore a disconnected account after an in-flight request", async () => {
+    let releaseRequest = () => {};
+    let markRequestStarted = () => {};
+    const requestPending = new Promise<void>((resolve) => {
+        releaseRequest = resolve;
+    });
+    const requestStarted = new Promise<void>((resolve) => {
+        markRequestStarted = resolve;
+    });
+    let traktState = JSON.stringify({
+        clientId: "client",
+        clientSecret: "secret",
+        tokens: {
+            accessToken: "access",
+            refreshToken: "refresh",
+            expiresAt: Date.now() + 3_600_000
+        }
+    });
+    const preferences = {
+        get() {
+            return traktState;
+        },
+        set(_key: string, value: string) {
+            traktState = value;
+        },
+        sync() {}
+    };
+    const http = {
+        async post() {
+            markRequestStarted();
+            await requestPending;
+            return { statusCode: 201, data: {}, text: "", reason: "created" };
+        }
+    };
+    const context = {
+        media: {
+            id: "tt123",
+            imdbId: "tt123",
+            type: "movie" as const,
+            name: "Movie",
+            releaseInfo: "2026",
+            poster: ""
+        },
+        episodes: []
+    };
+    const client = createIinaTraktClient(http as never, preferences as never, () => {});
+
+    const request = client.sendPlayback("pause", context, 42);
+    await requestStarted;
+    traktState = JSON.stringify({
+        clientId: "client",
+        clientSecret: "secret",
+        tokens: null
+    });
+    releaseRequest();
+    await request;
+
+    expect(JSON.parse(traktState).tokens).toBeNull();
+});

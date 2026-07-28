@@ -50,6 +50,12 @@ export function createIinaTraktClient(
         preferences.set("trakt", JSON.stringify(state));
         preferences.sync();
     };
+    const saveIfCurrent = (
+        input: ReturnType<typeof parseTraktState>,
+        output: ReturnType<typeof parseTraktState>
+    ) => {
+        if (sameConnection(read(), input)) save(output);
+    };
     let pending = Promise.resolve();
     const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
         const result = pending.then(operation);
@@ -63,7 +69,10 @@ export function createIinaTraktClient(
                 const state = read();
                 if (!state.tokens) return;
                 try {
-                    save(await scrobble(transport, state, action, context, progress));
+                    saveIfCurrent(
+                        state,
+                        await scrobble(transport, state, action, context, progress)
+                    );
                 } catch (error) {
                     onError(error);
                 }
@@ -75,7 +84,7 @@ export function createIinaTraktClient(
                 if (!state.tokens) return history;
                 try {
                     const result = await syncTraktHistory(transport, state, history);
-                    save(result.state);
+                    saveIfCurrent(state, result.state);
                     return result.history;
                 } catch (error) {
                     onError(error);
@@ -84,4 +93,15 @@ export function createIinaTraktClient(
             });
         }
     };
+}
+
+function sameConnection(
+    current: ReturnType<typeof parseTraktState>,
+    input: ReturnType<typeof parseTraktState>
+): boolean {
+    return current.clientId === input.clientId &&
+        current.clientSecret === input.clientSecret &&
+        current.tokens?.accessToken === input.tokens?.accessToken &&
+        current.tokens?.refreshToken === input.tokens?.refreshToken &&
+        current.tokens?.expiresAt === input.tokens?.expiresAt;
 }

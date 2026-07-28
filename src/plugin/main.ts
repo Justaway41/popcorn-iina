@@ -11,7 +11,11 @@ import {
     SHOW_SIDEBAR_DELAY_MS,
     SPLASH_URL_MARKER
 } from "./constants";
-import { shouldOfferNextEpisode, shouldSaveProgress } from "./playback";
+import {
+    shouldOfferNextEpisode,
+    shouldSaveProgress,
+    shouldSendWatchedStop
+} from "./playback";
 import { keepAwakeTick, startKeepAwake, stopKeepAwake } from "./sleep";
 import { createIinaTraktClient } from "./trakt";
 import { formatError, isHttpUrl, logDebug, sanitizeMediaTitle } from "./utils";
@@ -32,6 +36,7 @@ let pendingResumePercent: number | null = null;
 let lastProgressSavedAt = 0;
 let isReplacingPlayback = false;
 let reachedNaturalEof = false;
+let traktStopSent = false;
 let watchHistory = parseWatchHistory(preferences.get("watchHistory"));
 
 function setPlayerUIHidden(hidden: boolean): void {
@@ -84,6 +89,10 @@ function startPlaybackMonitoring(): void {
     playbackTimer = setInterval(() => {
         const playing = !mpv.getFlag("pause");
         keepAwakeTick(playing);
+        const percent = mpv.getNumber("percent-pos");
+        if (playing && shouldSendWatchedStop(percent, traktStopSent)) {
+            sendTrakt("stop", percent);
+        }
         if (playing && shouldSaveProgress(
             Date.now(),
             lastProgressSavedAt,
@@ -111,7 +120,8 @@ function savePlaybackProgress(percent = mpv.getNumber("percent-pos")): void {
 
 function sendTrakt(action: TraktScrobbleAction, percent: number): void {
     const context = activePlaybackContext;
-    if (!context || !Number.isFinite(percent)) return;
+    if (!context || !Number.isFinite(percent) || traktStopSent) return;
+    if (action === "stop") traktStopSent = true;
     void trakt.sendPlayback(action, context, percent);
 }
 
@@ -121,9 +131,8 @@ function checkpointPlayback(forceStop = false): void {
     const percent = forceStop ? 100 : mpv.getNumber("percent-pos");
     if (!Number.isFinite(percent)) return;
     savePlaybackProgress(percent);
-    void trakt.sendPlayback(
+    sendTrakt(
         forceStop || percent >= 90 ? "stop" : "pause",
-        context,
         percent
     );
 }
@@ -171,6 +180,7 @@ function playItem(payload: PlayItemPayload): void {
     const title = sanitizeMediaTitle(payload.title || "Popcorn");
     checkpointPlayback();
     activePlaybackContext = payload.playbackContext || null;
+    traktStopSent = false;
     pendingResumePercent = typeof payload.resumePercent === "number" &&
         Number.isFinite(payload.resumePercent) &&
         payload.resumePercent >= 0 &&
@@ -259,6 +269,7 @@ event.on("mpv.file-loaded", () => {
     if (path.includes(SPLASH_URL_MARKER)) {
         stopPlaybackMonitoring();
         activePlaybackContext = null;
+        traktStopSent = false;
         pendingResumePercent = null;
         setPlayerUIHidden(true);
         setWindowTitle("Popcorn");
@@ -291,6 +302,7 @@ event.on("iina.window-will-close", () => {
     windowReady = false;
     sidebarVisible = false;
     activePlaybackContext = null;
+    traktStopSent = false;
     pendingResumePercent = null;
     isReplacingPlayback = false;
     reachedNaturalEof = false;
