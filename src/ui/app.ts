@@ -1,7 +1,7 @@
 import type { ConfigurationPayload, HistoryPayload, ShowNextEpisodePayload } from "../shared/messages";
 import type { AddonStream, StremioAddon } from "../shared/addons";
 import type { WatchHistoryEntry } from "../shared/history";
-import type { Episode, EpisodeOrder, Media, MediaType } from "../shared/stremio";
+import type { Episode, EpisodeOrder, Media, MediaType, QualityOrder } from "../shared/stremio";
 
 import { loadAddonStreams, parseAddons } from "../shared/addons";
 import { getResumePercent, parseWatchHistory } from "../shared/history";
@@ -21,7 +21,8 @@ import {
     parseMediaTypePreference,
     parsePlayableStreams,
     parseSeriesEpisodes,
-    sortEpisodes
+    sortEpisodes,
+    sortStreamsByQuality
 } from "../shared/stremio";
 
 type View =
@@ -75,6 +76,14 @@ export function getEpisodeOrderLabel(order: EpisodeOrder): string {
 
 export function getEpisodeOrderButtonId(order: EpisodeOrder): string {
     return `episode-order-${order}`;
+}
+
+export function getQualitySortControl(
+    order: QualityOrder
+): { label: string; next: QualityOrder } {
+    return order === "highest"
+        ? { label: "Highest First", next: "lowest" }
+        : { label: "Lowest First", next: "highest" };
 }
 
 export function getOpenSeasonNumbers(
@@ -528,21 +537,39 @@ function renderStreams(
         warning.textContent = `${failedAddons} ${failedAddons === 1 ? "addon" : "addons"} unavailable`;
         content.appendChild(warning);
     }
+    let qualityOrder: QualityOrder = "highest";
+    const sort = document.createElement("div");
+    sort.className = "stream-sort";
+    const sortButton = document.createElement("button");
+    sortButton.type = "button";
+    sortButton.className = "active";
+    sortButton.title = "Toggle quality sorting";
+    sortButton.setAttribute("data-clickable", "");
+    sort.appendChild(sortButton);
     const list = document.createElement("div");
     list.className = "row-list";
-    streams.forEach((stream) => {
-        list.appendChild(rowButton(stream.title, buildStreamDetails(stream, englishSubtitles), () => {
-            showStreamLoading();
-            const resumePercent = getEntryProgress(episode?.id || media.imdbId);
-            iina.postMessage(MESSAGE_NAMES.PlayItem, {
-                url: stream.url,
-                title: episode ? formatEpisodeTitle(media, episode) : media.name,
-                playbackContext: { media, ...(episode ? { episode } : {}), episodes },
-                ...(resumePercent === null ? {} : { resumePercent })
-            });
-        }));
+    const renderList = () => {
+        const control = getQualitySortControl(qualityOrder);
+        sortButton.textContent = control.label;
+        list.replaceChildren(...sortStreamsByQuality(streams, qualityOrder).map((stream) => (
+            rowButton(stream.title, buildStreamDetails(stream, englishSubtitles), () => {
+                showStreamLoading();
+                const resumePercent = getEntryProgress(episode?.id || media.imdbId);
+                iina.postMessage(MESSAGE_NAMES.PlayItem, {
+                    url: stream.url,
+                    title: episode ? formatEpisodeTitle(media, episode) : media.name,
+                    playbackContext: { media, ...(episode ? { episode } : {}), episodes },
+                    ...(resumePercent === null ? {} : { resumePercent })
+                });
+            })
+        )));
+    };
+    sortButton.addEventListener("click", () => {
+        qualityOrder = getQualitySortControl(qualityOrder).next;
+        renderList();
     });
-    content.appendChild(list);
+    renderList();
+    content.append(sort, list);
     showContent(content);
 }
 
@@ -627,10 +654,12 @@ export function getSubtitleBadge(
 
 function getQualityClass(quality: string): string {
     const normalized = quality.toLowerCase();
-    if (normalized === "4k" || normalized === "2160p") return "stream-quality--uhd";
+    if (normalized === "4k" || normalized === "2160p" || normalized === "1440p") {
+        return "stream-quality--uhd";
+    }
     if (normalized === "1080p") return "stream-quality--fhd";
     if (normalized === "720p") return "stream-quality--hd";
-    if (normalized === "480p") return "stream-quality--sd";
+    if (["576p", "480p", "360p", "240p"].includes(normalized)) return "stream-quality--sd";
     return "stream-quality--other";
 }
 

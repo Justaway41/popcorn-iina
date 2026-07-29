@@ -2,6 +2,7 @@ import { canonicalizeManifestUrl } from "./addons";
 
 export type MediaType = "movie" | "series";
 export type EpisodeOrder = "oldest" | "newest";
+export type QualityOrder = "highest" | "lowest";
 
 export interface Media {
     id: string;
@@ -97,6 +98,19 @@ export function sortEpisodes(episodes: Episode[], order: EpisodeOrder): Episode[
     );
 }
 
+export function sortStreamsByQuality<T extends { quality: string }>(
+    streams: T[],
+    order: QualityOrder
+): T[] {
+    return [...streams].sort((a, b) => {
+        const left = qualityHeight(a.quality);
+        const right = qualityHeight(b.quality);
+        if (left === null) return right === null ? 0 : 1;
+        if (right === null) return -1;
+        return order === "highest" ? right - left : left - right;
+    });
+}
+
 export function parseMediaResponse(value: unknown): Media[] {
     const metas = getRecord(value)?.metas;
     if (!Array.isArray(metas)) {
@@ -165,7 +179,9 @@ export function parsePlayableStreams(value: unknown): PlayableStream[] {
         return [{
             title,
             url,
-            quality: metadata.match(/\b(4K|2160p|1080p|720p|480p|HDRip|BRRip|WEBRip)\b/i)?.[0] || "",
+            quality: metadata.match(
+                /\b(4K|(?:2160|1440|1080|720|576|480|360|240)p|HDRip|BRRip|WEBRip)\b/i
+            )?.[0] || "",
             size: metadata.match(/(?:💾\s*)?([\d.]+\s*[KMGT]B)\b/i)?.[1] || "",
             audioLanguages: parseAudioLanguages(metadata),
             subtitleLanguages: parseSubtitleLanguages(stream?.subtitles)
@@ -221,6 +237,12 @@ function parseAudioLanguages(value: string): string[] {
         : /\bmulti(?:[\s._-]*(?:audio|dub))?\b/i.test(audioMetadata) ? "Multi" : "";
     if (!generic) return languages;
     return languages.length === 0 ? [generic] : [...languages, "Other"];
+}
+
+function qualityHeight(quality: string): number | null {
+    if (/^4k$/i.test(quality)) return 2160;
+    const match = quality.match(/^(\d{3,4})p$/i);
+    return match ? Number(match[1]) : null;
 }
 
 function parseSubtitleLanguages(value: unknown): string[] | null {

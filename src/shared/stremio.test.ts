@@ -13,7 +13,8 @@ import {
     parseMediaTypePreference,
     parsePlayableStreams,
     parseSeriesEpisodes,
-    sortEpisodes
+    sortEpisodes,
+    sortStreamsByQuality
 } from "./stremio";
 
 test("builds a lazy poster fallback for an IMDb item", () => {
@@ -92,6 +93,32 @@ test("keeps only playable HTTP streams", () => {
             audioLanguages: [],
             subtitleLanguages: null
         }
+    ]);
+});
+
+test("extracts numeric quality from an addon stream title", () => {
+    expect(parsePlayableStreams({
+        streams: [{ title: "Release.Name.1440p.WEB", url: "https://cdn.example/1440.mkv" }]
+    })[0]?.quality).toBe("1440p");
+});
+
+test("sorts known stream qualities stably and keeps unknown quality last", () => {
+    const streams = [
+        { title: "720", quality: "720p" },
+        { title: "Unknown", quality: "" },
+        { title: "4K first", quality: "4K" },
+        { title: "4K second", quality: "2160p" },
+        { title: "1080", quality: "1080p" }
+    ];
+
+    expect(sortStreamsByQuality(streams, "highest").map(({ title }) => title)).toEqual([
+        "4K first", "4K second", "1080", "720", "Unknown"
+    ]);
+    expect(sortStreamsByQuality(streams, "lowest").map(({ title }) => title)).toEqual([
+        "720", "1080", "4K first", "4K second", "Unknown"
+    ]);
+    expect(streams.map(({ title }) => title)).toEqual([
+        "720", "Unknown", "4K first", "4K second", "1080"
     ]);
 });
 

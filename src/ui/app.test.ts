@@ -6,6 +6,7 @@ import {
     getEpisodeOrderLabel,
     getOpenSeasonNumbers,
     getProgressDisplay,
+    getQualitySortControl,
     getSubtitleBadge,
     replaceRequest
 } from "./app";
@@ -18,6 +19,17 @@ test("labels both serial episode orders", () => {
 test("uses stable IDs for re-rendered episode order buttons", () => {
     expect(getEpisodeOrderButtonId("oldest")).toBe("episode-order-oldest");
     expect(getEpisodeOrderButtonId("newest")).toBe("episode-order-newest");
+});
+
+test("toggles the stream quality sort label and direction", () => {
+    expect(getQualitySortControl("highest")).toEqual({
+        label: "Highest First",
+        next: "lowest"
+    });
+    expect(getQualitySortControl("lowest")).toEqual({
+        label: "Lowest First",
+        next: "highest"
+    });
 });
 
 test("keeps expanded numeric seasons for an episode-list re-render", () => {
