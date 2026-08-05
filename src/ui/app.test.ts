@@ -6,11 +6,13 @@ import {
     getEpisodeOrderLabel,
     getOpenSeasonNumbers,
     getProgressDisplay,
-    getQualitySortControl,
+    getSizeSortControl,
     getSubtitleBadge,
     mergeSettledCatalogResults,
     replaceRequest
 } from "./app";
+
+const appSource = await Bun.file(new URL("./app.ts", import.meta.url)).text();
 
 test("labels both serial episode orders", () => {
     expect(getEpisodeOrderLabel("oldest")).toBe("Oldest First");
@@ -22,15 +24,20 @@ test("uses stable IDs for re-rendered episode order buttons", () => {
     expect(getEpisodeOrderButtonId("newest")).toBe("episode-order-newest");
 });
 
-test("toggles the stream quality sort label and direction", () => {
-    expect(getQualitySortControl("highest")).toEqual({
-        label: "Highest First",
-        next: "lowest"
+test("toggles the stream file-size sort label and direction", () => {
+    expect(getSizeSortControl("largest")).toEqual({
+        label: "Largest File",
+        next: "smallest"
     });
-    expect(getQualitySortControl("lowest")).toEqual({
-        label: "Lowest First",
-        next: "highest"
+    expect(getSizeSortControl("smallest")).toEqual({
+        label: "Smallest File",
+        next: "largest"
     });
+});
+
+test("keeps the stream list rendered while IINA opens playback", () => {
+    expect(appSource).not.toContain("showStreamLoading()");
+    expect(appSource).not.toContain("Opening stream in IINA...");
 });
 
 test("keeps expanded numeric seasons for an episode-list re-render", () => {

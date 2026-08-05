@@ -223,7 +223,8 @@ function handleEndFile(): void {
     sidebar.postMessage(MESSAGE_NAMES.ShowNextEpisode, {
         media: context.media,
         episode: nextEpisode,
-        episodes: context.episodes
+        episodes: context.episodes,
+        quality: context.quality
     });
 }
 

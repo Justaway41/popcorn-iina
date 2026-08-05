@@ -1,7 +1,7 @@
 import type { ConfigurationPayload, HistoryPayload, ShowNextEpisodePayload } from "../shared/messages";
 import type { AddonManifest, AddonStream, StremioAddon } from "../shared/addons";
 import type { WatchHistoryEntry } from "../shared/history";
-import type { Episode, EpisodeOrder, Media, MediaType, QualityOrder } from "../shared/stremio";
+import type { Episode, EpisodeOrder, Media, MediaType, SizeOrder } from "../shared/stremio";
 
 import { loadAddonStreams, parseAddonManifest, parseAddons } from "../shared/addons";
 import { getResumePercent, parseWatchHistory } from "../shared/history";
@@ -18,6 +18,7 @@ import {
     getSearchableCatalogs,
     isCompatibleSubtitleId,
     isImdbId,
+    findClosestQualityStream,
     isEpisodeAvailable,
     parseEnglishSubtitleAvailability,
     parseEpisodeOrder,
@@ -26,7 +27,7 @@ import {
     parseMediaTypePreference,
     parsePlayableStreams,
     sortEpisodes,
-    sortStreamsByQuality,
+    sortStreamsBySize,
     mergeMediaResults
 } from "../shared/stremio";
 
@@ -95,12 +96,12 @@ export function getEpisodeOrderButtonId(order: EpisodeOrder): string {
     return `episode-order-${order}`;
 }
 
-export function getQualitySortControl(
-    order: QualityOrder
-): { label: string; next: QualityOrder } {
-    return order === "highest"
-        ? { label: "Highest First", next: "lowest" }
-        : { label: "Lowest First", next: "highest" };
+export function getSizeSortControl(
+    order: SizeOrder
+): { label: string; next: SizeOrder } {
+    return order === "largest"
+        ? { label: "Largest File", next: "smallest" }
+        : { label: "Smallest File", next: "largest" };
 }
 
 export function getOpenSeasonNumbers(
@@ -130,7 +131,7 @@ export function initApp(): void {
         if (!payload?.media || !payload?.episode || !Array.isArray(payload?.episodes)) {
             return;
         }
-        void loadStreams(payload.media, payload.episode, payload.episodes);
+        void loadStreams(payload.media, payload.episode, payload.episodes, payload.quality, true);
     });
 
     document.addEventListener("DOMContentLoaded", () => {
@@ -358,14 +359,20 @@ async function loadMovie(media: Media): Promise<void> {
     }
 }
 
-async function loadStreams(media: Media, episode?: Episode, episodes: Episode[] = []): Promise<void> {
+async function loadStreams(
+    media: Media,
+    episode?: Episode,
+    episodes: Episode[] = [],
+    preferredQuality?: string,
+    recommendNext = false
+): Promise<void> {
     const request = replaceRequest(activeRequest);
     activeRequest = request;
     view = { kind: "streams", media, episode, episodes };
     ui.back.classList.remove("hidden");
     ui.title.textContent = episode ? formatEpisodeTitle(media, episode) : media.name;
     setLoading();
-    retryAction = () => loadStreams(media, episode, episodes);
+    retryAction = () => loadStreams(media, episode, episodes, preferredQuality, recommendNext);
 
     try {
         await refreshConfiguration();
@@ -408,7 +415,9 @@ async function loadStreams(media: Media, episode?: Episode, episodes: Episode[] 
             episodes,
             result.streams,
             result.failedAddons + manifestFailures,
-            englishSubtitles
+            englishSubtitles,
+            preferredQuality,
+            recommendNext
         );
     } catch (error) {
         if (!request.signal.aborted) showError(readError(error, "Could not load streams."));
@@ -683,7 +692,9 @@ function renderStreams(
     episodes: Episode[],
     streams: AddonStream[],
     failedAddons: number,
-    englishSubtitles: boolean | null
+    englishSubtitles: boolean | null,
+    preferredQuality?: string,
+    recommendNext = false
 ): void {
     if (streams.length === 0) {
         renderEmpty("No direct HTTP streams. The enabled addons may only return torrent entries.");
@@ -691,53 +702,57 @@ function renderStreams(
     }
     const content = document.createDocumentFragment();
     if (failedAddons > 0) content.appendChild(addonWarning(failedAddons, "addon"));
-    let qualityOrder: QualityOrder = "highest";
+    const playStream = (stream: AddonStream) => {
+        const resumePercent = getEntryProgress(episode?.id || mediaIdentity(media));
+        iina.postMessage(MESSAGE_NAMES.PlayItem, {
+            url: stream.url,
+            title: episode ? formatEpisodeTitle(media, episode) : media.name,
+            playbackContext: {
+                media,
+                ...(episode ? { episode } : {}),
+                episodes,
+                quality: stream.quality
+            },
+            ...(resumePercent === null ? {} : { resumePercent })
+        });
+    };
+    if (recommendNext) {
+        const recommendation = findClosestQualityStream(streams, preferredQuality || "");
+        if (recommendation) {
+            const button = rowButton(
+                "Play Next Episode",
+                buildStreamDetails(recommendation, englishSubtitles),
+                () => playStream(recommendation)
+            );
+            button.classList.add("next-episode");
+            content.appendChild(button);
+        }
+    }
+    let sizeOrder: SizeOrder = "largest";
     const sort = document.createElement("div");
     sort.className = "stream-sort";
     const sortButton = document.createElement("button");
     sortButton.type = "button";
     sortButton.className = "active";
-    sortButton.title = "Toggle quality sorting";
+    sortButton.title = "Toggle file-size sorting";
     sortButton.setAttribute("data-clickable", "");
     sort.appendChild(sortButton);
     const list = document.createElement("div");
     list.className = "row-list";
     const renderList = () => {
-        const control = getQualitySortControl(qualityOrder);
+        const control = getSizeSortControl(sizeOrder);
         sortButton.textContent = control.label;
-        list.replaceChildren(...sortStreamsByQuality(streams, qualityOrder).map((stream) => (
-            rowButton(stream.title, buildStreamDetails(stream, englishSubtitles), () => {
-                showStreamLoading();
-                const resumePercent = getEntryProgress(episode?.id || media.imdbId);
-                iina.postMessage(MESSAGE_NAMES.PlayItem, {
-                    url: stream.url,
-                    title: episode ? formatEpisodeTitle(media, episode) : media.name,
-                    playbackContext: { media, ...(episode ? { episode } : {}), episodes },
-                    ...(resumePercent === null ? {} : { resumePercent })
-                });
-            })
+        list.replaceChildren(...sortStreamsBySize(streams, sizeOrder).map((stream) => (
+            rowButton(stream.title, buildStreamDetails(stream, englishSubtitles), () => playStream(stream))
         )));
     };
     sortButton.addEventListener("click", () => {
-        qualityOrder = getQualitySortControl(qualityOrder).next;
+        sizeOrder = getSizeSortControl(sizeOrder).next;
         renderList();
     });
     renderList();
     content.append(sort, list);
     showContent(content);
-}
-
-function showStreamLoading(): void {
-    ui.back.classList.remove("hidden");
-    ui.title.textContent = "Loading Stream";
-    const message = document.createElement("div");
-    message.className = "stream-loading";
-    const spinner = document.createElement("div");
-    spinner.className = "stream-spinner";
-    const text = document.createElement("p");
-    text.textContent = "Opening stream in IINA...";
-    message.append(spinner, text);
-    showContent(message);
 }
 
 function buildStreamDetails(stream: AddonStream, englishSubtitles: boolean | null): DocumentFragment {

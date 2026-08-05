@@ -16,6 +16,7 @@ export interface PlaybackContext {
     media: Media;
     episode?: Episode;
     episodes: Episode[];
+    quality?: string;
 }
 
 export interface PlayItemPayload {
@@ -48,4 +49,5 @@ export interface ShowNextEpisodePayload {
     media: Media;
     episode: Episode;
     episodes: Episode[];
+    quality?: string;
 }

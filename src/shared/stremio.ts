@@ -3,7 +3,7 @@ import { canonicalizeManifestUrl } from "./addons";
 
 export type MediaType = "movie" | "series";
 export type EpisodeOrder = "oldest" | "newest";
-export type QualityOrder = "highest" | "lowest";
+export type SizeOrder = "largest" | "smallest";
 
 export interface Media {
     id: string;
@@ -129,17 +129,44 @@ export function sortEpisodes(episodes: Episode[], order: EpisodeOrder): Episode[
     );
 }
 
-export function sortStreamsByQuality<T extends { quality: string }>(
+export function sortStreamsBySize<T extends { size: string }>(
     streams: T[],
-    order: QualityOrder
+    order: SizeOrder
 ): T[] {
-    return [...streams].sort((a, b) => {
-        const left = qualityHeight(a.quality);
-        const right = qualityHeight(b.quality);
-        if (left === null) return right === null ? 0 : 1;
-        if (right === null) return -1;
-        return order === "highest" ? right - left : left - right;
+    return streams.map((stream, index) => ({ stream, index, bytes: parseByteSize(stream.size) }))
+        .sort((a, b) => {
+            if (a.bytes === null) return b.bytes === null ? a.index - b.index : 1;
+            if (b.bytes === null) return -1;
+            const difference = order === "largest" ? b.bytes - a.bytes : a.bytes - b.bytes;
+            return difference || a.index - b.index;
+        })
+        .map(({ stream }) => stream);
+}
+
+export function parseByteSize(value: string): number | null {
+    const match = value.trim().match(/^([\d.]+)\s*([KMGT])B$/i);
+    if (!match) return null;
+    const amount = Number(match[1]);
+    const power = ["K", "M", "G", "T"].indexOf(match[2].toUpperCase()) + 1;
+    return Number.isFinite(amount) && amount >= 0 ? amount * 1024 ** power : null;
+}
+
+export function findClosestQualityStream<T extends { quality: string }>(
+    streams: T[],
+    previousQuality: string
+): T | null {
+    const known = streams.flatMap((stream, index) => {
+        const height = qualityHeight(stream.quality);
+        return height === null ? [] : [{ stream, index, height }];
     });
+    if (known.length === 0) return null;
+    const target = qualityHeight(previousQuality);
+    known.sort((a, b) => {
+        if (target === null) return b.height - a.height || a.index - b.index;
+        return Math.abs(a.height - target) - Math.abs(b.height - target) ||
+            b.height - a.height || a.index - b.index;
+    });
+    return known[0].stream;
 }
 
 export function parseMediaResponse(

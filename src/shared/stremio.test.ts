@@ -18,7 +18,8 @@ import {
     parsePlayableStreams,
     parseSeriesEpisodes,
     sortEpisodes,
-    sortStreamsByQuality,
+    sortStreamsBySize,
+    findClosestQualityStream,
     mergeMediaResults
 } from "./stremio";
 import { parseAddonManifest } from "./addons";
@@ -238,24 +239,37 @@ test("extracts numeric quality from an addon stream title", () => {
     })[0]?.quality).toBe("1440p");
 });
 
-test("sorts known stream qualities stably and keeps unknown quality last", () => {
+test("sorts by parsed file size only and keeps unknown sizes last", () => {
     const streams = [
-        { title: "720", quality: "720p" },
-        { title: "Unknown", quality: "" },
-        { title: "4K first", quality: "4K" },
-        { title: "4K second", quality: "2160p" },
-        { title: "1080", quality: "1080p" }
+        { title: "900 MB", size: "900 MB", quality: "4K" },
+        { title: "Unknown", size: "", quality: "1080p" },
+        { title: "12 GB first", size: "12 GB", quality: "720p" },
+        { title: "12 GB second", size: "12.0 GB", quality: "4K" }
     ];
 
-    expect(sortStreamsByQuality(streams, "highest").map(({ title }) => title)).toEqual([
-        "4K first", "4K second", "1080", "720", "Unknown"
+    expect(sortStreamsBySize(streams, "largest").map(({ title }) => title)).toEqual([
+        "12 GB first", "12 GB second", "900 MB", "Unknown"
     ]);
-    expect(sortStreamsByQuality(streams, "lowest").map(({ title }) => title)).toEqual([
-        "720", "1080", "4K first", "4K second", "Unknown"
+    expect(sortStreamsBySize(streams, "smallest").map(({ title }) => title)).toEqual([
+        "900 MB", "12 GB first", "12 GB second", "Unknown"
     ]);
     expect(streams.map(({ title }) => title)).toEqual([
-        "720", "Unknown", "4K first", "4K second", "1080"
+        "900 MB", "Unknown", "12 GB first", "12 GB second"
     ]);
+});
+
+test("recommends the closest resolution with higher quality winning ties", () => {
+    const streams = [
+        { title: "720", quality: "720p" },
+        { title: "1080 first", quality: "1080p" },
+        { title: "1080 second", quality: "1080p" },
+        { title: "4K", quality: "4K" },
+        { title: "Unknown", quality: "" }
+    ];
+    expect(findClosestQualityStream(streams, "1440p")?.title).toBe("1080 first");
+    expect(findClosestQualityStream(streams, "900p")?.title).toBe("1080 first");
+    expect(findClosestQualityStream(streams, "")?.title).toBe("4K");
+    expect(findClosestQualityStream([{ title: "Unknown", quality: "" }], "1080p")).toBeNull();
 });
 
 test("parses multiple audio languages without treating subtitle labels as audio", () => {
