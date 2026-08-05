@@ -3,19 +3,24 @@ import { expect, test } from "bun:test";
 import {
     buildCinemetaPosterUrl,
     buildCinemetaSearchUrl,
+    buildStremioResourceUrl,
     buildOpenSubtitlesUrl,
     buildStremioStreamUrl,
     findNextEpisode,
+    getSearchableCatalogs,
     isEpisodeAvailable,
     parseEnglishSubtitleAvailability,
     parseMediaResponse,
+    parseMediaMetadata,
     parseEpisodeOrder,
     parseMediaTypePreference,
     parsePlayableStreams,
     parseSeriesEpisodes,
     sortEpisodes,
-    sortStreamsByQuality
+    sortStreamsByQuality,
+    mergeMediaResults
 } from "./stremio";
+import { parseAddonManifest } from "./addons";
 
 test("builds a lazy poster fallback for an IMDb item", () => {
     expect(buildCinemetaPosterUrl("tt123")).toBe(
@@ -35,9 +40,108 @@ test("builds encoded Cinemeta and addon endpoints", () => {
     );
 });
 
+test("builds catalog and metadata endpoints from configured manifests", () => {
+    expect(buildStremioResourceUrl(
+        "https://addon.example/config/manifest.json?token=x",
+        "catalog",
+        "anime",
+        "kitsu-anime-list",
+        { search: "Frieren & Fern" }
+    )).toBe(
+        "https://addon.example/config/catalog/anime/kitsu-anime-list/search=Frieren%20%26%20Fern.json?token=x"
+    );
+    expect(buildStremioResourceUrl(
+        "https://addon.example/manifest.json",
+        "meta",
+        "series",
+        "tmdb:123"
+    )).toBe("https://addon.example/meta/series/tmdb%3A123.json");
+});
+
+test("selects movie catalogs or TV and anime catalogs that support search", () => {
+    const manifest = parseAddonManifest({
+        name: "Catalogs",
+        resources: ["catalog"],
+        catalogs: [
+            { id: "movies", type: "movie", extra: [{ name: "search" }] },
+            { id: "shows", type: "series", extra: [{ name: "search" }] },
+            { id: "anime", type: "anime", extra: [{ name: "search" }] },
+            { id: "top", type: "series" }
+        ]
+    });
+    expect(getSearchableCatalogs(manifest, "movie").map(({ id }) => id)).toEqual(["movies"]);
+    expect(getSearchableCatalogs(manifest, "series").map(({ id }) => id)).toEqual(["shows", "anime"]);
+});
+
+test("normalizes provider previews without treating provider IDs as IMDb IDs", () => {
+    expect(parseMediaResponse({
+        metas: [{ id: "kitsu:46474", type: "anime", name: "Frieren", releaseInfo: "2023" }]
+    }, { manifestUrl: "https://anime.example/manifest.json" })).toEqual([{
+        id: "kitsu:46474",
+        imdbId: "",
+        type: "series",
+        name: "Frieren",
+        releaseInfo: "2023",
+        poster: "",
+        sourceManifestUrl: "https://anime.example/manifest.json",
+        providerId: "kitsu:46474",
+        providerType: "anime",
+        malId: ""
+    }]);
+});
+
+test("merges providers in source order by IMDb or normalized title and year", () => {
+    const cinemeta = media("tt1234567", "movie", "Dune", "2021", "tt1234567");
+    const tmdbDuplicate = media("tmdb:438631", "movie", "Dune", "2021", "tt1234567");
+    const kitsuDuplicate = media("kitsu:1", "series", "Frieren: Beyond Journey's End", "2023");
+    const sameKitsuTitle = media("kitsu:2", "series", " frieren beyond journey’s end ", "2023");
+    expect(mergeMediaResults([[cinemeta], [tmdbDuplicate, kitsuDuplicate], [sameKitsuTitle]]))
+        .toEqual([cinemeta, kitsuDuplicate]);
+});
+
+test("normalizes Kitsu metadata and canonical IMDb episode IDs", () => {
+    const preview = media("kitsu:46474", "series", "Frieren", "2023");
+    const result = parseMediaMetadata({
+        meta: {
+            id: "kitsu:46474",
+            type: "anime",
+            name: "Frieren",
+            imdb_id: "tt22248376",
+            mal_id: 52991,
+            videos: [{
+                id: "kitsu:46474:1",
+                title: "The Journey's End",
+                season: 1,
+                number: 1,
+                imdb_id: "tt22248376",
+                imdbSeason: 1,
+                imdbEpisode: 1
+            }]
+        }
+    }, { manifestUrl: "https://anime.example/manifest.json" }, preview);
+    expect(result.media).toMatchObject({
+        imdbId: "tt22248376",
+        providerId: "kitsu:46474",
+        providerType: "anime",
+        malId: "52991"
+    });
+    expect(result.episodes[0]).toMatchObject({ id: "tt22248376:1:1", season: 1, episode: 1 });
+});
+
 test("parses media and episode responses defensively", () => {
-    expect(parseMediaResponse({ metas: [{ id: "tt1", type: "movie", name: "One" }, null] })).toEqual([
-        { id: "tt1", imdbId: "tt1", type: "movie", name: "One", releaseInfo: "", poster: "" }
+    expect(parseMediaResponse({ metas: [{ id: "tt12345", type: "movie", name: "One" }, null] })).toEqual([
+        {
+            id: "tt12345",
+            imdbId: "tt12345",
+            type: "movie",
+            name: "One",
+            releaseInfo: "",
+            poster: "",
+            sourceManifestUrl: "https://v3-cinemeta.strem.io/manifest.json",
+            providerId: "tt12345",
+            providerType: "movie",
+            malId: ""
+        }
     ]);
     expect(parseSeriesEpisodes({
         meta: {
@@ -57,6 +161,30 @@ test("parses media and episode responses defensively", () => {
             thumbnail: ""
         }
     ]);
+});
+
+test("parses current Cinemeta episode field names", () => {
+    expect(parseSeriesEpisodes({
+        meta: {
+            videos: [{
+                id: "tt40856520:1:1",
+                title: "Illiterate Goldy",
+                season: 1,
+                number: 1,
+                released: "2026-07-24T00:00:00.000Z",
+                overview: "The students do not attend school.",
+                thumbnail: "https://episodes.metahub.space/episode.jpg"
+            }]
+        }
+    })).toEqual([{
+        id: "tt40856520:1:1",
+        name: "Illiterate Goldy",
+        season: 1,
+        episode: 1,
+        aired: "2026-07-24T00:00:00.000Z",
+        description: "The students do not attend school.",
+        thumbnail: "https://episodes.metahub.space/episode.jpg"
+    }]);
 });
 
 test("keeps only playable HTTP streams", () => {
@@ -222,5 +350,20 @@ function episode(id: string, season: number, episodeNumber: number) {
         aired: "",
         description: "",
         thumbnail: ""
+    };
+}
+
+function media(id: string, type: "movie" | "series", name: string, releaseInfo: string, imdbId = "") {
+    return {
+        id,
+        imdbId,
+        type,
+        name,
+        releaseInfo,
+        poster: "",
+        sourceManifestUrl: "https://source.example/manifest.json",
+        providerId: id,
+        providerType: type,
+        malId: ""
     };
 }

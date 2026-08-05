@@ -1,3 +1,4 @@
+import type { AddonManifest, StremioCatalog } from "./addons";
 import { canonicalizeManifestUrl } from "./addons";
 
 export type MediaType = "movie" | "series";
@@ -11,6 +12,10 @@ export interface Media {
     name: string;
     releaseInfo: string;
     poster: string;
+    sourceManifestUrl?: string;
+    providerId?: string;
+    providerType?: string;
+    malId?: string;
 }
 
 export interface Episode {
@@ -33,6 +38,7 @@ export interface PlayableStream {
 }
 
 const CINEMETA_BASE_URL = "https://v3-cinemeta.strem.io";
+const CINEMETA_MANIFEST_URL = `${CINEMETA_BASE_URL}/manifest.json`;
 const OPEN_SUBTITLES_BASE_URL = "https://opensubtitles-v3.strem.io";
 
 const LANGUAGE_ALIASES: Array<[string, string[]]> = [
@@ -73,14 +79,39 @@ export function buildOpenSubtitlesUrl(type: MediaType, videoId: string): string 
 }
 
 export function buildStremioStreamUrl(manifestUrl: string, type: MediaType, videoId: string): string {
+    return buildStremioResourceUrl(manifestUrl, "stream", type, videoId);
+}
+
+export function buildStremioResourceUrl(
+    manifestUrl: string,
+    resource: "catalog" | "meta" | "stream" | "subtitles",
+    type: string,
+    id: string,
+    extra: Record<string, string> = {}
+): string {
     const canonical = canonicalizeManifestUrl(manifestUrl);
     const queryIndex = canonical.indexOf("?");
     const path = queryIndex === -1 ? canonical : canonical.slice(0, queryIndex);
     const query = queryIndex === -1 ? "" : canonical.slice(queryIndex);
+    const extraPath = Object.entries(extra).map(([name, value]) => (
+        `${encodeURIComponent(name)}=${encodeURIComponent(value)}`
+    ));
     return path.replace(
         /\/manifest\.json$/i,
-        `/stream/${type}/${encodeURIComponent(videoId)}.json`
+        `/${resource}/${encodeURIComponent(type)}/${encodeURIComponent(id)}${
+            extraPath.length ? `/${extraPath.join("/")}` : ""
+        }.json`
     ) + query;
+}
+
+export function getSearchableCatalogs(
+    manifest: AddonManifest,
+    mediaType: MediaType
+): StremioCatalog[] {
+    const types = mediaType === "movie" ? new Set(["movie"]) : new Set(["series", "anime"]);
+    return manifest.catalogs.filter((catalog) => (
+        types.has(catalog.type) && catalog.extra.some((extra) => extra.name === "search")
+    ));
 }
 
 export function parseMediaTypePreference(value: unknown): MediaType {
@@ -111,7 +142,10 @@ export function sortStreamsByQuality<T extends { quality: string }>(
     });
 }
 
-export function parseMediaResponse(value: unknown): Media[] {
+export function parseMediaResponse(
+    value: unknown,
+    source: { manifestUrl: string } = { manifestUrl: CINEMETA_MANIFEST_URL }
+): Media[] {
     const metas = getRecord(value)?.metas;
     if (!Array.isArray(metas)) {
         return [];
@@ -119,20 +153,64 @@ export function parseMediaResponse(value: unknown): Media[] {
     return metas.flatMap((entry) => {
         const item = getRecord(entry);
         const id = getString(item?.id);
-        const type = item?.type === "movie" || item?.type === "series" ? item.type : null;
+        const providerType = getString(item?.type);
+        const type = providerType === "movie"
+            ? "movie"
+            : providerType === "series" || providerType === "anime" ? "series" : null;
         const name = getString(item?.name);
         if (!id || !type || !name) {
             return [];
         }
+        const imdbId = firstImdbId(item?.imdb_id, id, getRecord(item?.behaviorHints)?.defaultVideoId);
         return [{
             id,
-            imdbId: getString(item?.imdb_id) || id,
+            imdbId,
             type,
             name,
-            releaseInfo: getString(item?.releaseInfo),
-            poster: getString(item?.poster)
+            releaseInfo: getString(item?.releaseInfo) || getStringOrNumber(item?.year),
+            poster: getString(item?.poster),
+            sourceManifestUrl: source.manifestUrl,
+            providerId: id,
+            providerType,
+            malId: getStringOrNumber(item?.mal_id)
         }];
     });
+}
+
+export function parseMediaMetadata(
+    value: unknown,
+    source: { manifestUrl: string },
+    preview: Media
+): { media: Media; episodes: Episode[] } {
+    const meta = getRecord(getRecord(value)?.meta);
+    if (!meta) return { media: preview, episodes: [] };
+    const parsed = parseMediaResponse({ metas: [meta] }, source)[0];
+    const media = parsed ? {
+        ...preview,
+        ...parsed,
+        name: parsed.name || preview.name,
+        releaseInfo: parsed.releaseInfo || preview.releaseInfo,
+        poster: parsed.poster || preview.poster,
+        imdbId: parsed.imdbId || preview.imdbId,
+        malId: parsed.malId || preview.malId || ""
+    } : preview;
+    return { media, episodes: parseSeriesEpisodes(value) };
+}
+
+export function mergeMediaResults(groups: Media[][]): Media[] {
+    const seen = new Set<string>();
+    return groups.flatMap((group) => group.flatMap((media) => {
+        const key = isImdbId(media.imdbId)
+            ? `imdb:${media.imdbId.toLowerCase()}`
+            : `title:${media.type}:${normalizeTitle(media.name)}:${releaseYear(media.releaseInfo)}`;
+        if (seen.has(key)) return [];
+        seen.add(key);
+        return [media];
+    }));
+}
+
+export function isImdbId(value: string): boolean {
+    return /^tt\d{5,}$/i.test(value.trim());
 }
 
 export function parseSeriesEpisodes(value: unknown): Episode[] {
@@ -142,20 +220,26 @@ export function parseSeriesEpisodes(value: unknown): Episode[] {
     }
     return videos.flatMap((entry) => {
         const item = getRecord(entry);
-        const id = getString(item?.id);
-        const name = getString(item?.name);
+        const providerId = getString(item?.id);
+        const name = getString(item?.name) || getString(item?.title);
         const season = getNumber(item?.season);
         const episode = getNumber(item?.number);
-        if (!id || !name || season === null || episode === null) {
+        if (!providerId || !name || season === null || episode === null) {
             return [];
         }
+        const imdbId = firstImdbId(item?.imdb_id);
+        const imdbSeason = getNumber(item?.imdbSeason);
+        const imdbEpisode = getNumber(item?.imdbEpisode);
+        const id = imdbId && imdbSeason !== null && imdbEpisode !== null
+            ? `${imdbId}:${imdbSeason}:${imdbEpisode}`
+            : providerId;
         return [{
             id,
             name,
             season,
             episode,
-            aired: getString(item?.firstAired),
-            description: getString(item?.description),
+            aired: getString(item?.firstAired) || getString(item?.released),
+            description: getString(item?.description) || getString(item?.overview),
             thumbnail: getString(item?.thumbnail)
         }];
     });
@@ -269,6 +353,24 @@ function getRecord(value: unknown): Record<string, unknown> | null {
 
 function getString(value: unknown): string {
     return typeof value === "string" ? value : "";
+}
+
+function getStringOrNumber(value: unknown): string {
+    return typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value)
+        ? String(value)
+        : "";
+}
+
+function firstImdbId(...values: unknown[]): string {
+    return values.map(getString).find(isImdbId) || "";
+}
+
+function normalizeTitle(value: string): string {
+    return value.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function releaseYear(value: string): string {
+    return value.match(/\b\d{4}\b/)?.[0] || "";
 }
 
 function getNumber(value: unknown): number | null {
