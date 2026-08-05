@@ -23,9 +23,16 @@ import {
 } from "./playback";
 import { keepAwakeTick, startKeepAwake, stopKeepAwake } from "./sleep";
 import { createIinaTraktClient } from "./trakt";
+import {
+    findChapterIntro,
+    isInsideIntro,
+    parseAniSkipInterval,
+    parseKitsuMalId,
+    type IntroInterval
+} from "./intro";
 import { formatError, isHttpUrl, logDebug, sanitizeMediaTitle } from "./utils";
 
-const { core, event, global, http, mpv, preferences, sidebar, utils } = iina;
+const { core, event, global, http, mpv, overlay, preferences, sidebar, utils } = iina;
 const trakt = createIinaTraktClient(http, preferences, (error) => {
     logDebug("Popcorn: Trakt request failed:", formatError(error));
 });
@@ -43,6 +50,9 @@ let isReplacingPlayback = false;
 let reachedNaturalEof = false;
 let traktStopSent = false;
 let watchHistory = parseWatchHistory(preferences.get("watchHistory"));
+let introInterval: IntroInterval | null = null;
+let introRevision = 0;
+const kitsuMalIds = new Map<string, string>();
 
 function setPlayerUIHidden(hidden: boolean): void {
     const api = core as typeof core & { setUIVisibility?: (hidden: boolean) => void };
@@ -194,12 +204,14 @@ function playItem(payload: PlayItemPayload): void {
         : null;
     isReplacingPlayback = true;
     reachedNaturalEof = false;
+    clearIntro();
     core.osd("Loading stream...");
     mpv.command("loadfile", [url, "replace", "-1", `force-media-title=${title}`]);
 }
 
 function handleEndFile(): void {
     stopPlaybackMonitoring();
+    clearIntro();
     const offerNextEpisode = shouldOfferNextEpisode(isReplacingPlayback, reachedNaturalEof);
     const naturalEof = reachedNaturalEof;
     reachedNaturalEof = false;
@@ -228,11 +240,94 @@ function handleEndFile(): void {
     });
 }
 
+function clearIntro(): void {
+    introRevision += 1;
+    introInterval = null;
+    overlay.hide();
+}
+
+function updateIntroOverlay(): void {
+    if (isInsideIntro(mpv.getNumber("time-pos"), introInterval)) overlay.show();
+    else overlay.hide();
+}
+
+async function resolveIntro(): Promise<void> {
+    const revision = ++introRevision;
+    introInterval = null;
+    overlay.hide();
+    const chapterInterval = findChapterIntro(core.getChapters());
+    if (chapterInterval) {
+        if (revision === introRevision) {
+            introInterval = chapterInterval;
+            updateIntroOverlay();
+        }
+        return;
+    }
+
+    const context = activePlaybackContext;
+    const episode = context?.episode;
+    const providerId = context?.media.providerId || context?.media.id || "";
+    if (!context || !episode || !(context.media.providerType === "anime" || providerId.startsWith("kitsu:"))) {
+        return;
+    }
+    try {
+        const malId = context.media.malId || await loadKitsuMalId(providerId);
+        const duration = mpv.getNumber("duration");
+        if (!malId || !Number.isFinite(duration) || duration <= 0 || revision !== introRevision) return;
+        const response = await http.get(
+            `https://api.aniskip.com/v2/skip-times/${encodeURIComponent(malId)}/${episode.episode}` +
+                `?types=op&episodeLength=${encodeURIComponent(String(duration))}`,
+            { params: {}, headers: { Accept: "application/json" }, data: {} }
+        );
+        if (response.statusCode < 200 || response.statusCode >= 300 || revision !== introRevision) return;
+        const interval = parseAniSkipInterval(response.data ?? safeJson(response.text));
+        if (!interval || interval.end > duration) return;
+        introInterval = interval;
+        updateIntroOverlay();
+    } catch (error) {
+        logDebug("Popcorn: Skip Intro lookup failed:", formatError(error));
+    }
+}
+
+async function loadKitsuMalId(providerId: string): Promise<string> {
+    const kitsuId = providerId.match(/^kitsu:(\d+)$/i)?.[1] || "";
+    if (!kitsuId) return "";
+    const cached = kitsuMalIds.get(kitsuId);
+    if (cached !== undefined) return cached;
+    const response = await http.get(
+        `https://kitsu.io/api/edge/anime/${encodeURIComponent(kitsuId)}/mappings`,
+        { params: {}, headers: { Accept: "application/vnd.api+json" }, data: {} }
+    );
+    const malId = response.statusCode >= 200 && response.statusCode < 300
+        ? parseKitsuMalId(response.data ?? safeJson(response.text))
+        : "";
+    kitsuMalIds.set(kitsuId, malId);
+    return malId;
+}
+
+function safeJson(value: string): unknown {
+    try {
+        return JSON.parse(value) as unknown;
+    } catch {
+        return null;
+    }
+}
+
 prepareSplash();
 global.onMessage("showPopcornSidebar", toggleSidebar);
 
 event.on("iina.window-loaded", () => {
     sidebar.loadFile("ui/sidebar.html");
+    overlay.loadFile("ui/overlay.html");
+    overlay.setClickable(true);
+    overlay.hide();
+    overlay.onMessage("skipIntro", () => {
+        const interval = introInterval;
+        if (!interval) return;
+        introInterval = null;
+        overlay.hide();
+        core.seekTo(interval.end);
+    });
     sidebar.onMessage(MESSAGE_NAMES.PlayItem, playItem);
     sidebar.onMessage(MESSAGE_NAMES.SetMediaType, (data) => {
         const mediaType = parseMediaTypePreference((data as SetMediaTypePayload)?.mediaType);
@@ -281,6 +376,7 @@ event.on("mpv.file-loaded", () => {
     isReplacingPlayback = false;
     reachedNaturalEof = false;
     if (path.includes(SPLASH_URL_MARKER)) {
+        clearIntro();
         stopPlaybackMonitoring();
         activePlaybackContext = null;
         traktStopSent = false;
@@ -299,6 +395,7 @@ event.on("mpv.file-loaded", () => {
         pendingResumePercent = null;
     }
     sendTrakt("start", mpv.getNumber("percent-pos"));
+    void resolveIntro();
 });
 
 event.on("mpv.pause.changed", () => {
@@ -309,9 +406,11 @@ event.on("mpv.pause.changed", () => {
 event.on("mpv.eof-reached.changed", () => {
     if (mpv.getFlag("eof-reached")) reachedNaturalEof = true;
 });
+event.on("mpv.time-pos.changed", updateIntroOverlay);
 event.on("mpv.end-file", handleEndFile);
 event.on("iina.window-will-close", () => {
     stopPlaybackMonitoring();
+    clearIntro();
     checkpointPlayback();
     windowReady = false;
     sidebarVisible = false;

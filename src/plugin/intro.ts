@@ -1,0 +1,61 @@
+export interface IntroInterval {
+    start: number;
+    end: number;
+}
+
+export function findChapterIntro(
+    chapters: Array<{ title: string; start: number }>
+): IntroInterval | null {
+    const sorted = chapters
+        .filter((chapter) => Number.isFinite(chapter.start))
+        .sort((a, b) => a.start - b.start);
+    const index = sorted.findIndex((chapter) => /^(intro|opening|op)$/i.test(chapter.title.trim()));
+    if (index === -1) return null;
+    const next = sorted.slice(index + 1).find((chapter) => chapter.start > sorted[index].start);
+    return next ? { start: sorted[index].start, end: next.start } : null;
+}
+
+export function parseKitsuMalId(value: unknown): string {
+    const data = record(value)?.data;
+    if (!Array.isArray(data)) return "";
+    for (const entry of data) {
+        const attributes = record(record(entry)?.attributes);
+        if (attributes?.externalSite === "myanimelist/anime") {
+            const id = stringValue(attributes.externalId);
+            if (/^\d+$/.test(id)) return id;
+        }
+    }
+    return "";
+}
+
+export function parseAniSkipInterval(value: unknown): IntroInterval | null {
+    const response = record(value);
+    if (response?.found !== true || !Array.isArray(response.results)) return null;
+    for (const result of response.results) {
+        const item = record(result);
+        if (item?.skipType !== "op") continue;
+        const interval = record(item.interval);
+        const start = numberValue(interval?.startTime);
+        const end = numberValue(interval?.endTime);
+        if (start !== null && end !== null && start >= 0 && start < end) return { start, end };
+    }
+    return null;
+}
+
+export function isInsideIntro(time: number, interval: IntroInterval | null): boolean {
+    return Boolean(interval && Number.isFinite(time) && time >= interval.start && time < interval.end);
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : null;
+}
+
+function stringValue(value: unknown): string {
+    return typeof value === "string" ? value.trim() : "";
+}
+
+function numberValue(value: unknown): number | null {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+}

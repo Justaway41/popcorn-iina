@@ -26,6 +26,7 @@
     "network-request",
     "show-osd",
     "show-alert",
+    "video-overlay",
     "sidebar",
     "file-system"
   ],
