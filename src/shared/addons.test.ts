@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
     canonicalizeManifestUrl,
     getAddonHostname,
+    loadEnabledAddonStreams,
     loadAddonStreams,
     parseAddonManifest,
     parseAddons
@@ -104,4 +105,39 @@ test("merges successful addons in order and reports failures", async () => {
         ["Duplicate", "One"]
     ]);
     expect(result).toMatchObject({ failedAddons: 1, successfulAddons: 2 });
+});
+
+test("loads streams only from enabled addons that declare stream capability", async () => {
+    const addons = [
+        { name: "Catalog", manifestUrl: "https://catalog.example/manifest.json", enabled: true },
+        { name: "Playable", manifestUrl: "https://play.example/manifest.json", enabled: true },
+        { name: "Broken", manifestUrl: "https://broken.example/manifest.json", enabled: true },
+        { name: "Disabled", manifestUrl: "https://disabled.example/manifest.json", enabled: false }
+    ];
+    const streamCalls: string[] = [];
+    const result = await loadEnabledAddonStreams(
+        addons,
+        async (addon) => {
+            if (addon.name === "Broken") throw new Error("offline");
+            return parseAddonManifest({
+                name: addon.name,
+                resources: addon.name === "Catalog" ? ["catalog"] : ["stream"]
+            });
+        },
+        async (addon) => {
+            streamCalls.push(addon.name);
+            return [{
+                title: addon.name,
+                url: `https://${addon.name}.example/video`,
+                quality: "1080p",
+                size: "1 GB",
+                audioLanguages: [],
+                subtitleLanguages: null
+            }];
+        }
+    );
+
+    expect(streamCalls).toEqual(["Playable"]);
+    expect(result.streams.map(({ title }) => title)).toEqual(["Playable"]);
+    expect(result).toMatchObject({ failedAddons: 1, successfulAddons: 1 });
 });

@@ -3,7 +3,7 @@ import type { AddonManifest, AddonStream, StremioAddon } from "../shared/addons"
 import type { WatchHistoryEntry } from "../shared/history";
 import type { Episode, EpisodeOrder, Media, MediaType, SizeOrder } from "../shared/stremio";
 
-import { loadAddonStreams, parseAddonManifest, parseAddons } from "../shared/addons";
+import { loadEnabledAddonStreams, parseAddonManifest, parseAddons } from "../shared/addons";
 import { getResumePercent, parseWatchHistory } from "../shared/history";
 import { MESSAGE_NAMES } from "../shared/messages";
 import { CLIENT_VERSION } from "../shared/version";
@@ -377,28 +377,16 @@ async function loadStreams(
     try {
         await refreshConfiguration();
         if (request.signal.aborted) return;
-        const enabledAddons = addons.filter((addon) => addon.enabled);
-        const manifests = await Promise.allSettled(enabledAddons.map(async (addon) => ({
-            addon,
-            manifest: await loadAddonManifest(addon, request.signal)
-        })));
-        const streamAddons = manifests.flatMap((result) => (
-            result.status === "fulfilled" && result.value.manifest.resources.includes("stream")
-                ? [result.value.addon]
-                : []
-        ));
-        const manifestFailures = manifests.filter((result) => result.status === "rejected").length;
-        if (streamAddons.length === 0) {
-            throw new Error("Enable a Stremio addon in IINA Settings → Plugins → Popcorn for IINA.");
-        }
         const videoId = episode?.id || media.imdbId || media.providerId || media.id;
         const [result, englishSubtitles] = await Promise.all([
-            loadAddonStreams(streamAddons, async (addon) => (
-                parsePlayableStreams(await fetchJson(
+            loadEnabledAddonStreams(
+                addons,
+                (addon) => loadAddonManifest(addon, request.signal),
+                async (addon) => parsePlayableStreams(await fetchJson(
                     buildStremioStreamUrl(addon.manifestUrl, media.type, videoId),
                     request.signal
                 ))
-            )),
+            ),
             isCompatibleSubtitleId(videoId)
                 ? fetchJson(buildOpenSubtitlesUrl(media.type, videoId), request.signal)
                     .then(parseEnglishSubtitleAvailability)
@@ -407,14 +395,14 @@ async function loadStreams(
         ]);
         if (request.signal.aborted) return;
         if (result.successfulAddons === 0) {
-            throw new Error("Could not load streams from any enabled addon.");
+            throw new Error("Enable a stream addon in IINA Settings → Plugins → Popcorn for IINA.");
         }
         renderStreams(
             media,
             episode,
             episodes,
             result.streams,
-            result.failedAddons + manifestFailures,
+            result.failedAddons,
             englishSubtitles,
             preferredQuality,
             recommendNext

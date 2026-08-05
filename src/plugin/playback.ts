@@ -2,6 +2,10 @@ export function shouldOfferNextEpisode(isReplacingPlayback: boolean, reachedNatu
     return !isReplacingPlayback && reachedNaturalEof;
 }
 
+export function isCurrentRequest(expectedRevision: number, currentRevision: number): boolean {
+    return expectedRevision === currentRevision;
+}
+
 export function shouldSaveProgress(
     nowMs: number,
     lastSavedAtMs: number,

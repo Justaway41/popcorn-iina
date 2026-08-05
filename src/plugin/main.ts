@@ -4,11 +4,19 @@ import type {
     SetEpisodeOrderPayload,
     SetMediaTypePayload
 } from "../shared/messages";
+import type { AddonManifest, StremioAddon } from "../shared/addons";
 
 import { MESSAGE_NAMES } from "../shared/messages";
-import { parseAddons } from "../shared/addons";
+import { loadEnabledAddonStreams, parseAddonManifest, parseAddons } from "../shared/addons";
 import { parseWatchHistory, recordPlayback } from "../shared/history";
-import { findNextEpisode, parseEpisodeOrder, parseMediaTypePreference } from "../shared/stremio";
+import {
+    buildStremioStreamUrl,
+    findClosestQualityStream,
+    findNextEpisode,
+    parseEpisodeOrder,
+    parseMediaTypePreference,
+    parsePlayableStreams
+} from "../shared/stremio";
 import { mergeWatchHistory, type TraktScrobbleAction } from "../shared/trakt";
 import {
     PLAYBACK_TICK_INTERVAL_MS,
@@ -17,6 +25,7 @@ import {
     SPLASH_URL_MARKER
 } from "./constants";
 import {
+    isCurrentRequest,
     shouldOfferNextEpisode,
     shouldSaveProgress,
     shouldSendWatchedStop
@@ -24,8 +33,9 @@ import {
 import { keepAwakeTick, startKeepAwake, stopKeepAwake } from "./sleep";
 import { createIinaTraktClient } from "./trakt";
 import {
+    findChapterCredits,
     findChapterIntro,
-    isInsideIntro,
+    getOverlayAction,
     parseAniSkipInterval,
     parseKitsuMalId,
     type IntroInterval
@@ -51,8 +61,12 @@ let reachedNaturalEof = false;
 let traktStopSent = false;
 let watchHistory = parseWatchHistory(preferences.get("watchHistory"));
 let introInterval: IntroInterval | null = null;
-let introRevision = 0;
+let creditsInterval: IntroInterval | null = null;
+let playbackRevision = 0;
+let overlayAction: "intro" | "next" | null = null;
+let prefetchedNextEpisode: PlayItemPayload | null = null;
 const kitsuMalIds = new Map<string, string>();
+const addonManifests = new Map<string, AddonManifest>();
 
 function setPlayerUIHidden(hidden: boolean): void {
     const api = core as typeof core & { setUIVisibility?: (hidden: boolean) => void };
@@ -241,28 +255,46 @@ function handleEndFile(): void {
 }
 
 function clearIntro(): void {
-    introRevision += 1;
+    playbackRevision += 1;
     introInterval = null;
+    creditsInterval = null;
+    prefetchedNextEpisode = null;
+    overlayAction = null;
+    overlay.setClickable(false);
     overlay.hide();
 }
 
 function updateIntroOverlay(): void {
-    if (isInsideIntro(mpv.getNumber("time-pos"), introInterval)) overlay.show();
-    else overlay.hide();
-}
-
-async function resolveIntro(): Promise<void> {
-    const revision = ++introRevision;
-    introInterval = null;
-    overlay.hide();
-    const chapterInterval = findChapterIntro(core.getChapters());
-    if (chapterInterval) {
-        if (revision === introRevision) {
-            introInterval = chapterInterval;
-            updateIntroOverlay();
-        }
+    const action = getOverlayAction(
+        mpv.getNumber("time-pos"),
+        introInterval,
+        creditsInterval,
+        prefetchedNextEpisode !== null
+    );
+    if (action === overlayAction) return;
+    overlayAction = action;
+    if (!action) {
+        overlay.setClickable(false);
+        overlay.hide();
         return;
     }
+    overlay.postMessage("setAction", {
+        label: action === "intro" ? "Skip Intro" : "Next Episode"
+    });
+    overlay.setClickable(true);
+    overlay.show();
+}
+
+async function resolvePlaybackIntervals(revision: number): Promise<void> {
+    const duration = mpv.getNumber("duration");
+    const chapters = core.getChapters();
+    const chapterIntro = findChapterIntro(chapters);
+    const chapterCredits = findChapterCredits(chapters, duration);
+    if (!isCurrentRequest(revision, playbackRevision)) return;
+    introInterval = chapterIntro;
+    creditsInterval = chapterCredits;
+    updateIntroOverlay();
+    if (chapterIntro && chapterCredits) return;
 
     const context = activePlaybackContext;
     const episode = context?.episode;
@@ -272,21 +304,81 @@ async function resolveIntro(): Promise<void> {
     }
     try {
         const malId = context.media.malId || await loadKitsuMalId(providerId);
-        const duration = mpv.getNumber("duration");
-        if (!malId || !Number.isFinite(duration) || duration <= 0 || revision !== introRevision) return;
+        if (!malId || !Number.isFinite(duration) || duration <= 0 ||
+            !isCurrentRequest(revision, playbackRevision)) return;
         const response = await http.get(
             `https://api.aniskip.com/v2/skip-times/${encodeURIComponent(malId)}/${episode.episode}` +
-                `?types=op&episodeLength=${encodeURIComponent(String(duration))}`,
+                `?types=op&types=ed&episodeLength=${encodeURIComponent(String(duration))}`,
             { params: {}, headers: { Accept: "application/json" }, data: {} }
         );
-        if (response.statusCode < 200 || response.statusCode >= 300 || revision !== introRevision) return;
-        const interval = parseAniSkipInterval(response.data ?? safeJson(response.text));
-        if (!interval || interval.end > duration) return;
-        introInterval = interval;
+        if (response.statusCode < 200 || response.statusCode >= 300 ||
+            !isCurrentRequest(revision, playbackRevision)) return;
+        const data = safeJson(response.data ?? response.text);
+        const intro = chapterIntro || parseAniSkipInterval(data);
+        const credits = chapterCredits || parseAniSkipInterval(data, "ed");
+        introInterval = intro && intro.end <= duration ? intro : null;
+        creditsInterval = credits && credits.end <= duration ? credits : null;
         updateIntroOverlay();
     } catch (error) {
-        logDebug("Popcorn: Skip Intro lookup failed:", formatError(error));
+        logDebug("Popcorn: Skip interval lookup failed:", formatError(error));
     }
+}
+
+async function prefetchNextEpisode(revision: number): Promise<void> {
+    const context = activePlaybackContext;
+    const current = context?.episode;
+    if (!context || !current) return;
+    const next = findNextEpisode(context.episodes, current);
+    if (!next) return;
+
+    try {
+        const result = await loadEnabledAddonStreams(
+            parseAddons(preferences.get("addons"), preferences.get("addonManifestUrl")),
+            loadAddonManifest,
+            async (addon) => parsePlayableStreams(await requestJson(
+                buildStremioStreamUrl(addon.manifestUrl, context.media.type, next.id)
+            ))
+        );
+        if (!isCurrentRequest(revision, playbackRevision)) return;
+        const stream = findClosestQualityStream(result.streams, context.quality || "");
+        if (!stream) return;
+        prefetchedNextEpisode = {
+            url: stream.url,
+            title: `${context.media.name} · S${String(next.season).padStart(2, "0")}` +
+                `E${String(next.episode).padStart(2, "0")} · ${next.name}`,
+            playbackContext: {
+                media: context.media,
+                episode: next,
+                episodes: context.episodes,
+                quality: stream.quality
+            }
+        };
+        updateIntroOverlay();
+    } catch (error) {
+        logDebug("Popcorn: Next episode prefetch failed:", formatError(error));
+    }
+}
+
+async function loadAddonManifest(addon: StremioAddon): Promise<AddonManifest> {
+    const cached = addonManifests.get(addon.manifestUrl);
+    if (cached) return cached;
+    const manifest = parseAddonManifest(await requestJson(addon.manifestUrl));
+    addonManifests.set(addon.manifestUrl, manifest);
+    return manifest;
+}
+
+async function requestJson(url: string): Promise<unknown> {
+    const response = await http.get(url, {
+        params: {},
+        headers: { Accept: "application/json" },
+        data: {}
+    });
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw new Error(`Request failed with HTTP ${response.statusCode}.`);
+    }
+    const data = safeJson(response.data ?? response.text);
+    if (data === null) throw new Error("Response was not valid JSON.");
+    return data;
 }
 
 async function loadKitsuMalId(providerId: string): Promise<string> {
@@ -305,7 +397,8 @@ async function loadKitsuMalId(providerId: string): Promise<string> {
     return malId;
 }
 
-function safeJson(value: string): unknown {
+function safeJson(value: unknown): unknown {
+    if (typeof value !== "string") return value ?? null;
     try {
         return JSON.parse(value) as unknown;
     } catch {
@@ -319,14 +412,23 @@ global.onMessage("showPopcornSidebar", toggleSidebar);
 event.on("iina.window-loaded", () => {
     sidebar.loadFile("ui/sidebar.html");
     overlay.loadFile("ui/overlay.html");
-    overlay.setClickable(true);
+    overlay.setClickable(false);
     overlay.hide();
-    overlay.onMessage("skipIntro", () => {
-        const interval = introInterval;
-        if (!interval) return;
-        introInterval = null;
-        overlay.hide();
-        core.seekTo(interval.end);
+    overlay.onMessage("overlayAction", () => {
+        if (overlayAction === "intro" && introInterval) {
+            const end = introInterval.end;
+            introInterval = null;
+            overlayAction = null;
+            overlay.setClickable(false);
+            overlay.hide();
+            core.seekTo(end);
+            return;
+        }
+        if (overlayAction === "next" && prefetchedNextEpisode) {
+            const next = prefetchedNextEpisode;
+            prefetchedNextEpisode = null;
+            playItem(next);
+        }
     });
     sidebar.onMessage(MESSAGE_NAMES.PlayItem, playItem);
     sidebar.onMessage(MESSAGE_NAMES.SetMediaType, (data) => {
@@ -386,6 +488,7 @@ event.on("mpv.file-loaded", () => {
         showSidebar();
         return;
     }
+    clearIntro();
     restorePlayerOptions();
     setPlayerUIHidden(false);
     hideSidebar();
@@ -395,7 +498,9 @@ event.on("mpv.file-loaded", () => {
         pendingResumePercent = null;
     }
     sendTrakt("start", mpv.getNumber("percent-pos"));
-    void resolveIntro();
+    const revision = playbackRevision;
+    void resolvePlaybackIntervals(revision);
+    void prefetchNextEpisode(revision);
 });
 
 event.on("mpv.pause.changed", () => {

@@ -123,6 +123,28 @@ export async function loadAddonStreams(
     return { streams, failedAddons, successfulAddons };
 }
 
+export async function loadEnabledAddonStreams(
+    addons: StremioAddon[],
+    loadManifest: (addon: StremioAddon) => Promise<AddonManifest>,
+    loadStreams: (addon: StremioAddon) => Promise<PlayableStream[]>
+): Promise<AddonStreamLoadResult> {
+    const enabled = addons.filter((addon) => addon.enabled);
+    const manifests = await Promise.allSettled(enabled.map(async (addon) => ({
+        addon,
+        manifest: await loadManifest(addon)
+    })));
+    const streamAddons = manifests.flatMap((result) => (
+        result.status === "fulfilled" && result.value.manifest.resources.includes("stream")
+            ? [result.value.addon]
+            : []
+    ));
+    const result = await loadAddonStreams(streamAddons, loadStreams);
+    return {
+        ...result,
+        failedAddons: result.failedAddons + manifests.filter((item) => item.status === "rejected").length
+    };
+}
+
 function getRecord(value: unknown): Record<string, unknown> | null {
     return typeof value === "object" && value !== null && !Array.isArray(value)
         ? value as Record<string, unknown>

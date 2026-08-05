@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import {
+    isCurrentRequest,
     shouldSendWatchedStop,
     shouldOfferNextEpisode,
     shouldSaveProgress
@@ -10,6 +11,11 @@ test("offers the next episode only after natural EOF", () => {
     expect(shouldOfferNextEpisode(false, true)).toBe(true);
     expect(shouldOfferNextEpisode(false, false)).toBe(false);
     expect(shouldOfferNextEpisode(true, true)).toBe(false);
+});
+
+test("accepts only results from the current playback request", () => {
+    expect(isCurrentRequest(2, 2)).toBe(true);
+    expect(isCurrentRequest(2, 3)).toBe(false);
 });
 
 test("saves local progress every 30 seconds", () => {
