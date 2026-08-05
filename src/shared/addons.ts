@@ -6,6 +6,22 @@ export interface StremioAddon {
     enabled: boolean;
 }
 
+export type AddonResource = "catalog" | "meta" | "stream" | "subtitles";
+
+export interface StremioCatalog {
+    id: string;
+    type: string;
+    name?: string;
+    extra: Array<{ name: string; isRequired?: boolean }>;
+}
+
+export interface AddonManifest {
+    name: string;
+    resources: AddonResource[];
+    types: string[];
+    catalogs: StremioCatalog[];
+}
+
 export interface AddonStream extends PlayableStream {
     addonName: string;
 }
@@ -62,16 +78,23 @@ export function parseAddons(value: unknown, legacyUrl?: unknown): StremioAddon[]
     }
 }
 
-export function parseAddonManifest(value: unknown): string {
+export function parseAddonManifest(value: unknown): AddonManifest {
     const manifest = getRecord(value);
     const name = typeof manifest?.name === "string" ? manifest.name.trim() : "";
     if (!name) throw new Error("Manifest is missing a name.");
-    const resources = Array.isArray(manifest?.resources) ? manifest.resources : [];
-    const providesStreams = resources.some((resource) => (
-        resource === "stream" || getRecord(resource)?.name === "stream"
-    ));
-    if (!providesStreams) throw new Error("Manifest does not provide streams.");
-    return name;
+    const supported = new Set<AddonResource>(["catalog", "meta", "stream", "subtitles"]);
+    const resources = [...new Set((Array.isArray(manifest?.resources) ? manifest.resources : [])
+        .map((resource) => typeof resource === "string" ? resource : getString(getRecord(resource)?.name))
+        .filter((resource): resource is AddonResource => supported.has(resource as AddonResource)))];
+    if (resources.length === 0) throw new Error("Manifest does not provide a supported resource.");
+    return {
+        name,
+        resources,
+        types: Array.isArray(manifest?.types)
+            ? manifest.types.filter((type): type is string => typeof type === "string" && Boolean(type))
+            : [],
+        catalogs: Array.isArray(manifest?.catalogs) ? manifest.catalogs.flatMap(parseCatalog) : []
+    };
 }
 
 export async function loadAddonStreams(
@@ -104,6 +127,27 @@ function getRecord(value: unknown): Record<string, unknown> | null {
     return typeof value === "object" && value !== null && !Array.isArray(value)
         ? value as Record<string, unknown>
         : null;
+}
+
+function getString(value: unknown): string {
+    return typeof value === "string" ? value.trim() : "";
+}
+
+function parseCatalog(value: unknown): StremioCatalog[] {
+    const item = getRecord(value);
+    const id = getString(item?.id);
+    const type = getString(item?.type);
+    if (!id || !type) return [];
+    return [{
+        id,
+        type,
+        ...(getString(item?.name) ? { name: getString(item?.name) } : {}),
+        extra: Array.isArray(item?.extra) ? item.extra.flatMap((value) => {
+            const extra = getRecord(value);
+            const name = getString(extra?.name);
+            return name ? [{ name, ...(extra?.isRequired === true ? { isRequired: true } : {}) }] : [];
+        }) : []
+    }];
 }
 
 function parseUrl(value: string): {

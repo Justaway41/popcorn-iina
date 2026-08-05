@@ -42,6 +42,13 @@ test("defines a private addon URL and reveal control in each row", () => {
     expect(preferencesHtml).toContain('class="addon-reveal"');
 });
 
+test("offers TMDB and Anime Kitsu presets with capability badges", () => {
+    expect(preferencesHtml).toContain('data-url="https://94c8cb9f702d-tmdb-addon.baby-beamup.club/manifest.json"');
+    expect(preferencesHtml).toContain('data-url="https://anime-kitsu.strem.fun/manifest.json"');
+    expect(preferencesHtml).toContain('class="addon-capabilities"');
+    expect(preferencesSource).toContain("manifest?.resources");
+});
+
 test("toggles an addon URL and focuses before revealing it", () => {
     let controller = createAddonUrlVisibilityController(() => {
         expect(controller.state()).toEqual(getAddonUrlVisibility(false));

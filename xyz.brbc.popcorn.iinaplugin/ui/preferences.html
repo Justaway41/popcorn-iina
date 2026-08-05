@@ -8,6 +8,7 @@
         * { box-sizing: border-box; }
         body { margin: 0; }
         .addon-form { display: grid; gap: 6px; }
+        .addon-presets { display: flex; flex-wrap: wrap; gap: 6px; }
         .addon-entry { display: flex; gap: 6px; }
         .addon-entry input { min-width: 0; flex: 1; }
         .addon-entry button { flex: none; }
@@ -27,6 +28,13 @@
         .addon-name, .addon-host { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .addon-name { font-weight: 600; }
         .addon-host { opacity: .62; font-size: 11px; }
+        .addon-capabilities { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+        .addon-capabilities span {
+            padding: 1px 5px;
+            border-radius: 999px;
+            background: rgba(128, 128, 128, .18);
+            font-size: 9px;
+        }
         .addon-url {
             display: block;
             overflow: hidden;
@@ -57,6 +65,12 @@
                 <button id="add-addon" type="submit">Add Addon</button>
             </div>
             <p id="addon-error" class="addon-error" role="alert" hidden></p>
+            <div class="addon-presets" aria-label="Recommended addons">
+                <button class="addon-preset" type="button" data-name="TMDB"
+                        data-url="https://94c8cb9f702d-tmdb-addon.baby-beamup.club/manifest.json">Add TMDB</button>
+                <button class="addon-preset" type="button" data-name="Anime Kitsu"
+                        data-url="https://anime-kitsu.strem.fun/manifest.json">Add Anime Kitsu</button>
+            </div>
             <p class="small secondary pref-help">
                 Enabled addons are searched together. Private URL details are blurred until you reveal them.
             </p>
@@ -94,6 +108,7 @@
             <div class="addon-copy">
                 <strong class="addon-name"></strong>
                 <span class="addon-host"></span>
+                <span class="addon-capabilities" aria-label="Capabilities"></span>
                 <span class="addon-url is-blurred" aria-hidden="true"></span>
             </div>
             <button class="addon-reveal" type="button">Reveal</button>

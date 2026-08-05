@@ -48,13 +48,26 @@ test("parses, deduplicates, and migrates addon preferences", () => {
     ]);
 });
 
-test("requires a named stream addon manifest", () => {
-    expect(parseAddonManifest({ name: "Debrid", resources: ["stream"] })).toBe("Debrid");
-    expect(parseAddonManifest({ name: "Debrid", resources: [{ name: "stream", types: ["movie"] }] })).toBe(
-        "Debrid"
-    );
-    expect(() => parseAddonManifest({ name: "Catalog", resources: ["catalog"] })).toThrow(
-        "Manifest does not provide streams."
+test("accepts named manifests with any supported resource", () => {
+    expect(parseAddonManifest({ name: "Catalog", resources: ["catalog"] })).toEqual({
+        name: "Catalog",
+        resources: ["catalog"],
+        types: [],
+        catalogs: []
+    });
+    expect(parseAddonManifest({
+        name: "Mixed",
+        resources: [{ name: "meta", types: ["movie"] }, "stream", "stream"],
+        types: ["movie", "series"],
+        catalogs: [{ id: "search", type: "movie", extra: [{ name: "search" }] }]
+    })).toEqual({
+        name: "Mixed",
+        resources: ["meta", "stream"],
+        types: ["movie", "series"],
+        catalogs: [{ id: "search", type: "movie", extra: [{ name: "search" }] }]
+    });
+    expect(() => parseAddonManifest({ name: "Unsupported", resources: ["addon_catalog"] })).toThrow(
+        "Manifest does not provide a supported resource."
     );
     expect(() => parseAddonManifest({ name: "", resources: ["stream"] })).toThrow(
         "Manifest is missing a name."

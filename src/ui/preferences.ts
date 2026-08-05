@@ -1,4 +1,4 @@
-import type { StremioAddon } from "../shared/addons";
+import type { AddonManifest, StremioAddon } from "../shared/addons";
 import type { TraktState, TraktTransport } from "../shared/trakt";
 
 import {
@@ -37,6 +37,7 @@ declare global {
 let addons: StremioAddon[] = [];
 let trakt = parseTraktState(null);
 let traktRevision = 0;
+const manifests = new Map<string, AddonManifest>();
 
 document.documentElement.dataset.version = CLIENT_VERSION;
 const preferences = window.iina.preferences as unknown as WebviewPreferences;
@@ -47,6 +48,7 @@ const errorMessage = element<HTMLParagraphElement>("addon-error");
 const list = element<HTMLDivElement>("addon-list");
 const empty = element<HTMLParagraphElement>("addon-empty");
 const template = element<HTMLTemplateElement>("addon-row-template");
+const presetButtons = [...document.querySelectorAll<HTMLButtonElement>(".addon-preset")];
 const traktClientId = element<HTMLInputElement>("trakt-client-id");
 const traktClientSecret = element<HTMLInputElement>("trakt-client-secret");
 const traktConnect = element<HTMLButtonElement>("trakt-connect");
@@ -76,6 +78,9 @@ form.addEventListener("submit", (event) => {
     event.preventDefault();
     void addAddon();
 });
+presetButtons.forEach((button) => {
+    button.addEventListener("click", () => void addAddon(button.dataset.url || "", button));
+});
 traktClientId.addEventListener("change", saveTraktCredentials);
 traktClientSecret.addEventListener("change", saveTraktCredentials);
 traktConnect.addEventListener("click", () => void connectTrakt());
@@ -98,10 +103,25 @@ async function loadPreferences(): Promise<void> {
     render();
     renderTrakt();
 
+    const loaded = await Promise.allSettled(addons.map(async (addon) => {
+        const manifest = await fetchManifest(addon.manifestUrl);
+        manifests.set(addon.manifestUrl, manifest);
+        return { addon, manifest };
+    }));
+    let changed = false;
+    loaded.forEach((result) => {
+        if (result.status !== "fulfilled" || result.value.addon.name === result.value.manifest.name) return;
+        const index = addons.indexOf(result.value.addon);
+        if (index !== -1) addons[index] = { ...addons[index], name: result.value.manifest.name };
+        changed = true;
+    });
+    if (changed) save();
+    else render();
+
     if (storedAddons.length === 0 && addons.length === 1) {
         try {
-            const name = await fetchManifestName(addons[0].manifestUrl);
-            addons[0] = { ...addons[0], name };
+            const manifest = await fetchManifest(addons[0].manifestUrl);
+            addons[0] = { ...addons[0], name: manifest.name };
             save();
         } catch {
             // The legacy addon remains usable and can be replaced from this page.
@@ -109,28 +129,31 @@ async function loadPreferences(): Promise<void> {
     }
 }
 
-async function addAddon(): Promise<void> {
+async function addAddon(value = input.value, trigger = addButton): Promise<void> {
     setError("");
-    addButton.disabled = true;
-    addButton.textContent = "Adding…";
+    trigger.disabled = true;
+    const originalLabel = trigger.textContent;
+    trigger.textContent = "Adding…";
     try {
-        const manifestUrl = canonicalizeManifestUrl(input.value);
+        const manifestUrl = canonicalizeManifestUrl(value);
         if (addons.some((addon) => addon.manifestUrl === manifestUrl)) {
             throw new Error("This addon is already added.");
         }
-        const name = await fetchManifestName(manifestUrl);
-        addons.push({ name, manifestUrl, enabled: true });
-        input.value = "";
+        const manifest = await fetchManifest(manifestUrl);
+        manifests.set(manifestUrl, manifest);
+        addons.push({ name: manifest.name, manifestUrl, enabled: true });
+        if (trigger === addButton) input.value = "";
         save();
     } catch (error) {
         setError(error instanceof Error ? error.message : "Could not add this addon.");
     } finally {
-        addButton.disabled = false;
-        addButton.textContent = "Add Addon";
+        trigger.disabled = false;
+        trigger.textContent = originalLabel;
+        renderPresetButtons();
     }
 }
 
-async function fetchManifestName(manifestUrl: string): Promise<string> {
+async function fetchManifest(manifestUrl: string): Promise<AddonManifest> {
     const response = await fetch(manifestUrl, { headers: { Accept: "application/json" } });
     if (!response.ok) throw new Error(`Manifest request failed with HTTP ${response.status}.`);
     return parseAddonManifest(await response.json() as unknown);
@@ -144,9 +167,10 @@ function render(): void {
         const name = row.querySelector<HTMLElement>(".addon-name");
         const host = row.querySelector<HTMLElement>(".addon-host");
         const url = row.querySelector<HTMLElement>(".addon-url");
+        const capabilities = row.querySelector<HTMLElement>(".addon-capabilities");
         const reveal = row.querySelector<HTMLButtonElement>(".addon-reveal");
         const remove = row.querySelector<HTMLButtonElement>(".addon-remove");
-        if (!toggle || !name || !host || !url || !reveal || !remove) {
+        if (!toggle || !name || !host || !url || !capabilities || !reveal || !remove) {
             throw new Error("Invalid addon row template.");
         }
 
@@ -155,6 +179,14 @@ function render(): void {
         name.textContent = addon.name;
         host.textContent = getAddonHostname(addon.manifestUrl);
         url.textContent = addon.manifestUrl;
+        const manifest = manifests.get(addon.manifestUrl);
+        capabilities.replaceChildren(...(manifest?.resources || []).map((resource) => {
+            const badge = document.createElement("span");
+            badge.textContent = resource === "meta"
+                ? "Metadata"
+                : resource[0].toUpperCase() + resource.slice(1);
+            return badge;
+        }));
         remove.setAttribute("aria-label", `Remove ${addon.name}`);
         const visibility = createAddonUrlVisibilityController(() => reveal.focus());
         const setVisibility = (state: ReturnType<typeof visibility.state>) => {
@@ -177,6 +209,16 @@ function render(): void {
         return row;
     }));
     empty.hidden = addons.length > 0;
+    renderPresetButtons();
+}
+
+function renderPresetButtons(): void {
+    presetButtons.forEach((button) => {
+        const presetUrl = canonicalizeManifestUrl(button.dataset.url || "");
+        const added = addons.some((addon) => addon.manifestUrl === presetUrl);
+        button.disabled = added;
+        button.textContent = added ? "Added" : `Add ${button.dataset.name}`;
+    });
 }
 
 function save(shouldRender = true): void {
