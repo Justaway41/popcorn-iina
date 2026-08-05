@@ -4,6 +4,7 @@ import type { PlaybackContext } from "./messages";
 import {
     buildScrobblePayload,
     mergeWatchHistory,
+    parseTraktExternalLinkRequest,
     parseTraktHistory,
     parseTraktState,
     pollDeviceToken,
@@ -13,6 +14,16 @@ import {
     type TraktResponse,
     type TraktTransport
 } from "./trakt";
+
+test("allows only Popcorn's Trakt browser destinations", () => {
+    expect(parseTraktExternalLinkRequest({ url: "https://trakt.tv/join" }))
+        .toBe("https://trakt.tv/join");
+    expect(parseTraktExternalLinkRequest({ url: "https://app.trakt.tv/settings/apps/api" }))
+        .toBe("https://app.trakt.tv/settings/apps/api");
+    expect(parseTraktExternalLinkRequest({ url: "https://trakt.tv/activate/ABCD1234" }))
+        .toBe("https://trakt.tv/activate/ABCD1234");
+    expect(parseTraktExternalLinkRequest({ url: "https://example.com" })).toBe("");
+});
 
 const movie = {
     id: "tt123",

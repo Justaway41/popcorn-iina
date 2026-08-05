@@ -61,9 +61,17 @@ export class TraktError extends Error {
 }
 
 const TRAKT_API = "https://api.trakt.tv";
+const TRAKT_ACCOUNT_URL = "https://trakt.tv/join";
+const TRAKT_APPLICATIONS_URL = "https://app.trakt.tv/settings/apps/api";
 const MAX_HISTORY_ITEMS = 100;
 const TOKEN_REFRESH_WINDOW_MS = 60_000;
 const DEFAULT_RETRY_MS = 60_000;
+
+export function parseTraktExternalLinkRequest(value: unknown): string {
+    const url = getString(getRecord(value)?.url);
+    if (url === TRAKT_ACCOUNT_URL || url === TRAKT_APPLICATIONS_URL) return url;
+    return /^https:\/\/trakt\.tv\/activate\/[A-Za-z0-9_-]+$/.test(url) ? url : "";
+}
 
 function apiHeaders(state: TraktState): Record<string, string> {
     return {

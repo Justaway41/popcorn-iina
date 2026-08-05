@@ -57,6 +57,7 @@ const traktDisconnect = element<HTMLButtonElement>("trakt-disconnect");
 const traktDevice = element<HTMLParagraphElement>("trakt-device");
 const traktStatus = element<HTMLParagraphElement>("trakt-status");
 const traktError = element<HTMLParagraphElement>("trakt-error");
+const externalLinks = [...document.querySelectorAll<HTMLAnchorElement>("[data-external-url]")];
 
 const browserTransport: TraktTransport = async (method, url, body, headers) => {
     const response = await fetch(url, {
@@ -86,6 +87,10 @@ traktClientSecret.addEventListener("change", saveTraktCredentials);
 traktConnect.addEventListener("click", () => void connectTrakt());
 traktSync.addEventListener("click", () => void syncTraktNow());
 traktDisconnect.addEventListener("click", disconnectTrakt);
+externalLinks.forEach((link) => link.addEventListener("click", (event) => {
+    event.preventDefault();
+    requestExternalLink(link.href);
+}));
 
 void loadPreferences();
 
@@ -310,7 +315,7 @@ async function connectTrakt(): Promise<void> {
         traktDevice.hidden = false;
         traktDevice.textContent = `Enter ${code.userCode} at trakt.tv/activate`;
         const activation = `${code.verificationUrl.replace(/\/$/, "")}/${encodeURIComponent(code.userCode)}`;
-        window.open(activation, "_blank");
+        requestExternalLink(activation);
         traktStatus.textContent = "Waiting for Trakt authorization…";
         const connected = await pollDeviceToken(
             browserTransport,
@@ -338,6 +343,10 @@ async function connectTrakt(): Promise<void> {
         traktConnect.disabled = false;
         if (revision === traktRevision) renderTrakt();
     }
+}
+
+function requestExternalLink(url: string): void {
+    preferences.set("externalLinkRequest", { url });
 }
 
 async function syncTraktNow(): Promise<void> {

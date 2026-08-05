@@ -1,11 +1,20 @@
 import { applySplashIcon, formatError, getSplashUrl, logDebug } from "./utils";
 import { migrateStructuredPreferences } from "./preferences";
+import { parseTraktExternalLinkRequest } from "../shared/trakt";
 
-const { console, global, menu, preferences } = iina;
+const { console, global, menu, preferences, utils } = iina;
 
 migrateStructuredPreferences(preferences);
 applySplashIcon();
 let activePlayerId: number | string | null = null;
+
+setInterval(() => {
+    const url = parseTraktExternalLinkRequest(preferences.get("externalLinkRequest"));
+    if (!url) return;
+    preferences.set("externalLinkRequest", {});
+    preferences.sync();
+    utils.open(url);
+}, 250);
 
 function playerIdsMatch(a: number | string, b: number | string): boolean {
     return String(a).split("-")[0] === String(b).split("-")[0];
