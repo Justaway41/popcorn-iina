@@ -1,9 +1,9 @@
 import type { ConfigurationPayload, HistoryPayload, ShowNextEpisodePayload } from "../shared/messages";
-import type { AddonStream, StremioAddon } from "../shared/addons";
+import type { AddonManifest, AddonStream, StremioAddon } from "../shared/addons";
 import type { WatchHistoryEntry } from "../shared/history";
 import type { Episode, EpisodeOrder, Media, MediaType, QualityOrder } from "../shared/stremio";
 
-import { loadAddonStreams, parseAddons } from "../shared/addons";
+import { loadAddonStreams, parseAddonManifest, parseAddons } from "../shared/addons";
 import { getResumePercent, parseWatchHistory } from "../shared/history";
 import { MESSAGE_NAMES } from "../shared/messages";
 import { CLIENT_VERSION } from "../shared/version";
@@ -14,15 +14,20 @@ import {
     buildCinemetaTrendingUrl,
     buildOpenSubtitlesUrl,
     buildStremioStreamUrl,
+    buildStremioResourceUrl,
+    getSearchableCatalogs,
+    isCompatibleSubtitleId,
+    isImdbId,
     isEpisodeAvailable,
     parseEnglishSubtitleAvailability,
     parseEpisodeOrder,
     parseMediaResponse,
+    parseMediaMetadata,
     parseMediaTypePreference,
     parsePlayableStreams,
-    parseSeriesEpisodes,
     sortEpisodes,
-    sortStreamsByQuality
+    sortStreamsByQuality,
+    mergeMediaResults
 } from "../shared/stremio";
 
 type View =
@@ -55,10 +60,22 @@ let view: View = { kind: "home", query: "" };
 let retryAction: (() => Promise<void>) | null = null;
 let pendingConfigurationResolvers: Array<() => void> = [];
 let activeRequest: AbortController | null = null;
+const addonManifests = new Map<string, AddonManifest>();
 
 export function replaceRequest(previous: AbortController | null): AbortController {
     previous?.abort();
     return new AbortController();
+}
+
+export function mergeSettledCatalogResults(
+    results: PromiseSettledResult<Media[]>[]
+): { items: Media[]; failedSources: number; successfulSources: number } {
+    const groups = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+    return {
+        items: mergeMediaResults(groups),
+        failedSources: results.length - groups.length,
+        successfulSources: groups.length
+    };
 }
 
 export function getProgressDisplay(
@@ -203,14 +220,106 @@ async function loadHome(query: string): Promise<void> {
     retryAction = () => loadHome(query);
 
     try {
-        const url = query
-            ? buildCinemetaSearchUrl(mediaType, query)
-            : buildCinemetaTrendingUrl(mediaType);
-        const items = parseMediaResponse(await fetchJson(url, request.signal));
-        renderMedia(items, query);
+        if (!query) {
+            const items = parseMediaResponse(await fetchJson(
+                buildCinemetaTrendingUrl(mediaType),
+                request.signal
+            ));
+            renderMedia(items, query);
+            return;
+        }
+        const result = await searchCatalogs(query, request.signal);
+        if (result.successfulSources === 0) {
+            throw new Error("Could not search any catalog.");
+        }
+        renderMedia(result.items, query, result.failedSources);
     } catch (error) {
         if (!request.signal.aborted) showError(readError(error, "Could not load Cinemeta."));
     }
+}
+
+async function searchCatalogs(
+    query: string,
+    signal: AbortSignal
+): Promise<{ items: Media[]; failedSources: number; successfulSources: number }> {
+    await refreshConfiguration();
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    const enabledAddons = addons.filter((addon) => addon.enabled);
+    const [cinemetaResults, manifestResults] = await Promise.all([
+        Promise.allSettled([
+            fetchJson(buildCinemetaSearchUrl(mediaType, query), signal).then(parseMediaResponse)
+        ]),
+        Promise.allSettled(enabledAddons.map(async (addon) => ({
+            addon,
+            manifest: await loadAddonManifest(addon, signal)
+        })))
+    ]);
+    const sources = manifestResults.flatMap((result) => result.status === "fulfilled"
+        ? getSearchableCatalogs(result.value.manifest, mediaType).map((catalog) => ({
+            addon: result.value.addon,
+            catalog
+        }))
+        : []
+    );
+    const catalogResults = await Promise.allSettled(sources.map(({ addon, catalog }) => (
+        fetchJson(buildStremioResourceUrl(
+            addon.manifestUrl,
+            "catalog",
+            catalog.type,
+            catalog.id,
+            { search: query }
+        ), signal).then((value) => parseMediaResponse(value, { manifestUrl: addon.manifestUrl }))
+    )));
+    const result = mergeSettledCatalogResults([...cinemetaResults, ...catalogResults]);
+    return {
+        ...result,
+        failedSources: result.failedSources + manifestResults.filter((item) => item.status === "rejected").length
+    };
+}
+
+async function loadAddonManifest(addon: StremioAddon, signal: AbortSignal): Promise<AddonManifest> {
+    const cached = addonManifests.get(addon.manifestUrl);
+    if (cached) return cached;
+    const manifest = parseAddonManifest(await fetchJson(addon.manifestUrl, signal));
+    addonManifests.set(addon.manifestUrl, manifest);
+    return manifest;
+}
+
+async function loadMediaDetails(
+    media: Media,
+    signal: AbortSignal
+): Promise<{ media: Media; episodes: Episode[]; metadataAvailable: boolean }> {
+    const sourceUrl = media.sourceManifestUrl || "";
+    const providerId = media.providerId || media.id;
+    const providerType = media.providerType || media.type;
+    if (!sourceUrl || sourceUrl.includes("v3-cinemeta.strem.io")) {
+        if (media.type === "movie") return { media, episodes: [], metadataAvailable: true };
+        const value = await fetchJson(buildCinemetaSeriesUrl(media.imdbId || providerId), signal);
+        const details = parseMediaMetadata(value, { manifestUrl: sourceUrl }, media);
+        return { ...details, metadataAvailable: true };
+    }
+
+    const addon = addons.find((item) => item.manifestUrl === sourceUrl) || {
+        name: media.name,
+        manifestUrl: sourceUrl,
+        enabled: true
+    };
+    const manifest = await loadAddonManifest(addon, signal);
+    if (manifest.resources.includes("meta")) {
+        const value = await fetchJson(buildStremioResourceUrl(
+            sourceUrl,
+            "meta",
+            providerType,
+            providerId
+        ), signal);
+        const details = parseMediaMetadata(value, { manifestUrl: sourceUrl }, media);
+        return { ...details, metadataAvailable: true };
+    }
+    if (media.type === "movie") return { media, episodes: [], metadataAvailable: true };
+    if (!isImdbId(media.imdbId)) return { media, episodes: [], metadataAvailable: false };
+    const value = await fetchJson(buildCinemetaSeriesUrl(media.imdbId), signal);
+    const details = parseMediaMetadata(value, { manifestUrl: sourceUrl }, media);
+    return { ...details, metadataAvailable: true };
 }
 
 async function loadEpisodes(media: Media): Promise<void> {
@@ -223,10 +332,29 @@ async function loadEpisodes(media: Media): Promise<void> {
     retryAction = () => loadEpisodes(media);
 
     try {
-        const episodes = parseSeriesEpisodes(await fetchJson(buildCinemetaSeriesUrl(media.imdbId), request.signal));
-        renderEpisodes(media, episodes);
+        const details = await loadMediaDetails(media, request.signal);
+        if (!details.metadataAvailable) {
+            renderEmpty("Episode metadata unavailable.");
+            return;
+        }
+        renderEpisodes(details.media, details.episodes);
     } catch (error) {
         if (!request.signal.aborted) showError(readError(error, "Could not load episodes."));
+    }
+}
+
+async function loadMovie(media: Media): Promise<void> {
+    const request = replaceRequest(activeRequest);
+    activeRequest = request;
+    ui.back.classList.remove("hidden");
+    ui.title.textContent = media.name;
+    setLoading();
+    retryAction = () => loadMovie(media);
+    try {
+        const details = await loadMediaDetails(media, request.signal);
+        if (!request.signal.aborted) await loadStreams(details.media);
+    } catch (error) {
+        if (!request.signal.aborted) showError(readError(error, "Could not load metadata."));
     }
 }
 
@@ -243,26 +371,45 @@ async function loadStreams(media: Media, episode?: Episode, episodes: Episode[] 
         await refreshConfiguration();
         if (request.signal.aborted) return;
         const enabledAddons = addons.filter((addon) => addon.enabled);
-        if (enabledAddons.length === 0) {
+        const manifests = await Promise.allSettled(enabledAddons.map(async (addon) => ({
+            addon,
+            manifest: await loadAddonManifest(addon, request.signal)
+        })));
+        const streamAddons = manifests.flatMap((result) => (
+            result.status === "fulfilled" && result.value.manifest.resources.includes("stream")
+                ? [result.value.addon]
+                : []
+        ));
+        const manifestFailures = manifests.filter((result) => result.status === "rejected").length;
+        if (streamAddons.length === 0) {
             throw new Error("Enable a Stremio addon in IINA Settings → Plugins → Popcorn for IINA.");
         }
-        const videoId = episode?.id || media.imdbId;
+        const videoId = episode?.id || media.imdbId || media.providerId || media.id;
         const [result, englishSubtitles] = await Promise.all([
-            loadAddonStreams(enabledAddons, async (addon) => (
+            loadAddonStreams(streamAddons, async (addon) => (
                 parsePlayableStreams(await fetchJson(
                     buildStremioStreamUrl(addon.manifestUrl, media.type, videoId),
                     request.signal
                 ))
             )),
-            fetchJson(buildOpenSubtitlesUrl(media.type, videoId), request.signal)
-                .then(parseEnglishSubtitleAvailability)
-                .catch(() => null)
+            isCompatibleSubtitleId(videoId)
+                ? fetchJson(buildOpenSubtitlesUrl(media.type, videoId), request.signal)
+                    .then(parseEnglishSubtitleAvailability)
+                    .catch(() => null)
+                : Promise.resolve(null)
         ]);
         if (request.signal.aborted) return;
         if (result.successfulAddons === 0) {
             throw new Error("Could not load streams from any enabled addon.");
         }
-        renderStreams(media, episode, episodes, result.streams, result.failedAddons, englishSubtitles);
+        renderStreams(
+            media,
+            episode,
+            episodes,
+            result.streams,
+            result.failedAddons + manifestFailures,
+            englishSubtitles
+        );
     } catch (error) {
         if (!request.signal.aborted) showError(readError(error, "Could not load streams."));
     }
@@ -280,12 +427,13 @@ async function goBack(): Promise<void> {
     }
 }
 
-function renderMedia(items: Media[], query: string): void {
+function renderMedia(items: Media[], query: string, failedSources = 0): void {
     if (items.length === 0) {
         renderEmpty("No titles found.");
         return;
     }
     const fragment = document.createDocumentFragment();
+    if (failedSources > 0) fragment.appendChild(addonWarning(failedSources, "catalog"));
     if (!query && watchHistory.length > 0) {
         fragment.appendChild(historySection(watchHistory.slice(0, 6), true));
         fragment.appendChild(contentHeading("Trending"));
@@ -296,9 +444,9 @@ function renderMedia(items: Media[], query: string): void {
         media.releaseInfo,
         () => {
             if (media.type === "series") void loadEpisodes(media);
-            else void loadStreams(media);
+            else void loadMovie(media);
         },
-        isWatched(media.imdbId),
+        isWatched(mediaIdentity(media)),
         null
     ))));
     showContent(fragment);
@@ -374,12 +522,15 @@ function mediaCard(
 
     const poster = document.createElement("div");
     poster.className = "poster";
-    const image = document.createElement("img");
-    image.src = media.poster || buildCinemetaPosterUrl(media.imdbId);
-    image.alt = "";
-    image.loading = "lazy";
-    image.addEventListener("error", () => image.remove(), { once: true });
-    poster.appendChild(image);
+    const posterUrl = media.poster || (isImdbId(media.imdbId) ? buildCinemetaPosterUrl(media.imdbId) : "");
+    if (posterUrl) {
+        const image = document.createElement("img");
+        image.src = posterUrl;
+        image.alt = "";
+        image.loading = "lazy";
+        image.addEventListener("error", () => image.remove(), { once: true });
+        poster.appendChild(image);
+    }
     if (watched) {
         const badge = document.createElement("span");
         badge.className = "watched-badge";
@@ -424,15 +575,19 @@ async function openHistoryEntry(entry: WatchHistoryEntry): Promise<void> {
     const request = replaceRequest(activeRequest);
     activeRequest = request;
     try {
-        const episodes = parseSeriesEpisodes(await fetchJson(
-            buildCinemetaSeriesUrl(entry.media.imdbId),
-            request.signal
-        ));
-        const episode = episodes.find((item) => item.id === entry.episode?.id) || entry.episode;
-        await loadStreams(entry.media, episode, episodes);
+        const details = await loadMediaDetails(entry.media, request.signal);
+        const episode = details.episodes.find((item) => item.id === entry.episode?.id) || entry.episode;
+        await loadStreams(details.media, episode, details.episodes);
     } catch (error) {
         if (!request.signal.aborted) showError(readError(error, "Could not open this episode."));
     }
+}
+
+function addonWarning(count: number, subject: string): HTMLElement {
+    const warning = document.createElement("div");
+    warning.className = "addon-warning";
+    warning.textContent = `${count} ${subject}${count === 1 ? "" : "s"} unavailable`;
+    return warning;
 }
 
 function isWatched(id: string): boolean {
@@ -442,6 +597,10 @@ function isWatched(id: string): boolean {
 function getEntryProgress(id: string): number | null {
     const entry = watchHistory.find((item) => item.id === id);
     return entry ? getResumePercent(entry.progress, entry.watched) : null;
+}
+
+function mediaIdentity(media: Media): string {
+    return media.imdbId || media.providerId || media.id;
 }
 
 function renderEpisodes(
@@ -531,12 +690,7 @@ function renderStreams(
         return;
     }
     const content = document.createDocumentFragment();
-    if (failedAddons > 0) {
-        const warning = document.createElement("div");
-        warning.className = "addon-warning";
-        warning.textContent = `${failedAddons} ${failedAddons === 1 ? "addon" : "addons"} unavailable`;
-        content.appendChild(warning);
-    }
+    if (failedAddons > 0) content.appendChild(addonWarning(failedAddons, "addon"));
     let qualityOrder: QualityOrder = "highest";
     const sort = document.createElement("div");
     sort.className = "stream-sort";

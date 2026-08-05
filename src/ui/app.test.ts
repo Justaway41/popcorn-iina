@@ -8,6 +8,7 @@ import {
     getProgressDisplay,
     getQualitySortControl,
     getSubtitleBadge,
+    mergeSettledCatalogResults,
     replaceRequest
 } from "./app";
 
@@ -48,6 +49,17 @@ test("replacing a request aborts the previous request only", () => {
 
     expect(previous.signal.aborted).toBe(true);
     expect(current.signal.aborted).toBe(false);
+});
+
+test("keeps ordered catalog results when another provider fails", () => {
+    const one = { id: "one", imdbId: "", type: "movie" as const, name: "One", releaseInfo: "", poster: "" };
+    const two = { id: "two", imdbId: "", type: "movie" as const, name: "Two", releaseInfo: "", poster: "" };
+    const result = mergeSettledCatalogResults([
+        { status: "fulfilled", value: [one] },
+        { status: "rejected", reason: new Error("offline") },
+        { status: "fulfilled", value: [two] }
+    ]);
+    expect(result).toEqual({ items: [one, two], failedSources: 1, successfulSources: 2 });
 });
 
 test("formats single, multiple, and unknown audio languages", () => {

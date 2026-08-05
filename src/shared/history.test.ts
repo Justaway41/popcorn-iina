@@ -120,6 +120,21 @@ test("finds movie and episode history by playback context", () => {
     expect(getHistoryEntry(entries, context)?.progress).toBe(35);
 });
 
+test("tracks provider-only movies locally by provider ID", () => {
+    const providerMovie = {
+        ...movie,
+        id: "kitsu:123",
+        providerId: "kitsu:123",
+        imdbId: "",
+        name: "Provider Movie"
+    };
+    const context: PlaybackContext = { media: providerMovie, episodes: [] };
+    const entries = recordPlayback([], context, 25, "now");
+    expect(entries[0].id).toBe("kitsu:123");
+    expect(parseWatchHistory(entries)).toEqual(entries);
+    expect(getHistoryEntry(entries, context)).toEqual(entries[0]);
+});
+
 test("resumes only unfinished meaningful progress", () => {
     expect(getResumePercent(null, false)).toBeNull();
     expect(getResumePercent(4.9, false)).toBeNull();

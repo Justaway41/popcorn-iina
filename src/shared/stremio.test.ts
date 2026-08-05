@@ -9,6 +9,7 @@ import {
     findNextEpisode,
     getSearchableCatalogs,
     isEpisodeAvailable,
+    isCompatibleSubtitleId,
     parseEnglishSubtitleAvailability,
     parseMediaResponse,
     parseMediaMetadata,
@@ -38,6 +39,13 @@ test("builds encoded Cinemeta and addon endpoints", () => {
     expect(buildOpenSubtitlesUrl("series", "tt123:1:2")).toBe(
         "https://opensubtitles-v3.strem.io/subtitles/series/tt123%3A1%3A2.json"
     );
+});
+
+test("queries subtitles only for IMDb-compatible video IDs", () => {
+    expect(isCompatibleSubtitleId("tt1234567")).toBe(true);
+    expect(isCompatibleSubtitleId("tt1234567:1:2")).toBe(true);
+    expect(isCompatibleSubtitleId("kitsu:46474")).toBe(false);
+    expect(isCompatibleSubtitleId("tmdb:438631")).toBe(false);
 });
 
 test("builds catalog and metadata endpoints from configured manifests", () => {

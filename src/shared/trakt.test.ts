@@ -269,6 +269,25 @@ test("uses pause below 90 percent and stop at the watched threshold", async () =
     ]);
 });
 
+test("skips scrobbling provider-only media without an IMDb ID", async () => {
+    const state = parseTraktState({
+        clientId: "id",
+        clientSecret: "secret",
+        tokens: { accessToken: "access", refreshToken: "refresh", expiresAt: 2_000_000 }
+    });
+    const calls: RecordedRequest[] = [];
+    const result = await scrobble(
+        recordingTransport([], calls),
+        state,
+        "pause",
+        { media: { ...movie, id: "kitsu:1", imdbId: "" }, episodes: [] },
+        42,
+        1_000_000
+    );
+    expect(calls).toEqual([]);
+    expect(result).toBe(state);
+});
+
 test("merges fetched playback and watched history and uploads local watched once", async () => {
     const state = parseTraktState({
         clientId: "id",

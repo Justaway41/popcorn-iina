@@ -210,7 +210,11 @@ export function mergeMediaResults(groups: Media[][]): Media[] {
 }
 
 export function isImdbId(value: string): boolean {
-    return /^tt\d{5,}$/i.test(value.trim());
+    return /^tt\d+$/i.test(value.trim());
+}
+
+export function isCompatibleSubtitleId(value: string): boolean {
+    return /^tt\d+(?::\d+:\d+)?$/i.test(value.trim());
 }
 
 export function parseSeriesEpisodes(value: unknown): Episode[] {

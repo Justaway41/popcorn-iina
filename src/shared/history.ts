@@ -29,7 +29,7 @@ export function recordPlayback(
     playedAt: string
 ): WatchHistoryEntry[] {
     if (!Number.isFinite(percent) || percent < 5) return entries;
-    const id = context.episode?.id || context.media.imdbId;
+    const id = historyContextId(context);
     const existing = entries.find((entry) => entry.id === id);
     const progress = Math.max(0, Math.min(100, percent));
     const entry: WatchHistoryEntry = {
@@ -47,7 +47,7 @@ export function getHistoryEntry(
     entries: WatchHistoryEntry[],
     context: PlaybackContext
 ): WatchHistoryEntry | null {
-    const id = context.episode?.id || context.media.imdbId;
+    const id = historyContextId(context);
     return entries.find((entry) => entry.id === id) || null;
 }
 
@@ -67,7 +67,7 @@ function parseEntry(value: unknown): WatchHistoryEntry[] {
     if (!item || !media || (item.episode != null && !episode) || !id || !lastPlayedAt || typeof watched !== "boolean") {
         return [];
     }
-    if (id !== (episode?.id || media.imdbId)) return [];
+    if (id !== (episode?.id || media.imdbId || media.providerId || media.id)) return [];
     return [{
         id,
         media,
@@ -91,15 +91,23 @@ function parseMedia(value: unknown): Media | null {
     const id = getString(item?.id);
     const imdbId = getString(item?.imdbId);
     const name = getString(item?.name);
-    if (!item || !type || !id || !imdbId || !name) return null;
+    if (!item || !type || !id || !(imdbId || getString(item.providerId)) || !name) return null;
     return {
         id,
         imdbId,
         type,
         name,
         releaseInfo: getString(item.releaseInfo),
-        poster: getString(item.poster)
+        poster: getString(item.poster),
+        ...(getString(item.sourceManifestUrl) ? { sourceManifestUrl: getString(item.sourceManifestUrl) } : {}),
+        ...(getString(item.providerId) ? { providerId: getString(item.providerId) } : {}),
+        ...(getString(item.providerType) ? { providerType: getString(item.providerType) } : {}),
+        ...(getString(item.malId) ? { malId: getString(item.malId) } : {})
     };
+}
+
+export function historyContextId(context: PlaybackContext): string {
+    return context.episode?.id || context.media.imdbId || context.media.providerId || context.media.id;
 }
 
 function parseEpisode(value: unknown): Episode | null {

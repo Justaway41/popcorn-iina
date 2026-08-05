@@ -1,5 +1,6 @@
 import type { WatchHistoryEntry } from "./history";
 import type { PlaybackContext } from "./messages";
+import { isImdbId } from "./stremio";
 
 export interface TraktTokens {
     accessToken: string;
@@ -234,6 +235,7 @@ export async function scrobble(
     progress: number,
     now = Date.now()
 ): Promise<TraktState> {
+    if (!isImdbId(context.media.imdbId)) return state;
     if (state.retryAt > now) return state;
     let current = state;
     try {
@@ -297,7 +299,7 @@ export async function syncTraktHistory(
                 parseTraktHistory([], watched).map(historyKey)
             );
             const pending = local.filter(
-                (entry) => entry.watched && !remoteWatched.has(historyKey(entry))
+                (entry) => entry.watched && isImdbId(entry.media.imdbId) && !remoteWatched.has(historyKey(entry))
             );
             if (pending.length > 0) {
                 await request(
