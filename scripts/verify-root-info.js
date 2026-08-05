@@ -1,47 +1,26 @@
 import { existsSync, readFileSync } from "fs";
 
-const pluginInfoPath = "xyz.brbc.popcorn.iinaplugin/Info.json";
-const rootInfoPath = "Info.json";
+const infoPath = "Info.json";
+const info = JSON.parse(readFileSync(infoPath, "utf8"));
+const requiredStrings = ["name", "identifier", "version", "entry"];
 
-if (!existsSync(rootInfoPath)) {
-    console.error(`Missing ${rootInfoPath}. Run: bun run sync:root-info`);
-    process.exit(1);
-}
-
-const pluginInfo = JSON.parse(readFileSync(pluginInfoPath, "utf8"));
-const rootInfo = JSON.parse(readFileSync(rootInfoPath, "utf8"));
-
-const expected = {
-    identifier: pluginInfo.identifier,
-    version: pluginInfo.version,
-    ghVersion: pluginInfo.ghVersion
-};
-
-const isObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
-
-if (!isObject(rootInfo)) {
-    console.error(`${rootInfoPath} must be a JSON object.`);
-    process.exit(1);
-}
-
-const rootKeys = Object.keys(rootInfo).sort();
-const expectedKeys = Object.keys(expected).sort();
-if (JSON.stringify(rootKeys) !== JSON.stringify(expectedKeys)) {
-    console.error(
-        `${rootInfoPath} must only contain keys: ${expectedKeys.join(", ")}. ` +
-        "Run: bun run sync:root-info"
-    );
-    process.exit(1);
-}
-
-for (const [key, value] of Object.entries(expected)) {
-    if (rootInfo[key] !== value) {
-        console.error(
-            `${rootInfoPath} ${key} mismatch (expected ${value}, got ${rootInfo[key]}). ` +
-            "Run: bun run sync:root-info"
-        );
+for (const key of requiredStrings) {
+    if (typeof info[key] !== "string" || info[key].trim() === "") {
+        console.error(`Missing or invalid ${key} in ${infoPath}.`);
         process.exit(1);
     }
 }
 
-console.log(`${rootInfoPath} is in sync with ${pluginInfoPath}.`);
+if (typeof info.author?.name !== "string" || !Number.isInteger(info.ghVersion)) {
+    console.error(`Missing or invalid author or ghVersion in ${infoPath}.`);
+    process.exit(1);
+}
+
+for (const key of ["entry", "globalEntry", "preferencesPage"]) {
+    if (typeof info[key] !== "string" || !existsSync(info[key])) {
+        console.error(`Missing ${key} target: ${info[key] ?? "undefined"}`);
+        process.exit(1);
+    }
+}
+
+console.log(`${infoPath} is directly installable by IINA.`);

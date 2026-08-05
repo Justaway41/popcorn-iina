@@ -6,7 +6,7 @@ import {
 } from "./addon-url-visibility";
 
 const preferencesHtml = await Bun.file(
-    new URL("../../xyz.brbc.popcorn.iinaplugin/ui/preferences.html", import.meta.url)
+    new URL("../../ui/preferences.html", import.meta.url)
 ).text();
 const preferencesSource = await Bun.file(new URL("./preferences.ts", import.meta.url)).text();
 

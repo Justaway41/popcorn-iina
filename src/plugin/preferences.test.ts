@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { migrateStructuredPreferences } from "./preferences";
 
 const info = await Bun.file(
-    new URL("../../xyz.brbc.popcorn.iinaplugin/Info.json", import.meta.url)
+    new URL("../../Info.json", import.meta.url)
 ).json() as { preferenceDefaults: Record<string, unknown> };
 const preferenceWriters = await Promise.all([
     "../ui/preferences.ts",

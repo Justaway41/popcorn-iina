@@ -18,8 +18,11 @@ node_modules/
 # Build artifacts
 build/
 dist/
-xyz.brbc.popcorn.iinaplugin/dist/
-xyz.brbc.popcorn.iinaplugin/ui/dist/
+# IINA installs GitHub repositories from source when release downloads fail.
+!dist/
+!dist/*.js
+!ui/dist/
+!ui/dist/*.js
 
 # Env files
 .env

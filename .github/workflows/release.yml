@@ -38,9 +38,7 @@ jobs:
         run: bun run verify:built-client-version
 
       - name: Create plugin archive
-        run: |
-          zip -FSr ../xyz.brbc.popcorn.iinaplugin.iinaplgz .
-        working-directory: xyz.brbc.popcorn.iinaplugin
+        run: zip -FSr xyz.brbc.popcorn.iinaplugin.iinaplgz Info.json assets dist ui
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2

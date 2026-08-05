@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "fs";
 
-const infoPath = "xyz.brbc.popcorn.iinaplugin/Info.json";
+const infoPath = "Info.json";
 const infoRaw = readFileSync(infoPath, "utf8");
 const info = JSON.parse(infoRaw);
 
@@ -13,10 +13,10 @@ const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const pattern = new RegExp(`version\\s*:\\s*"${escapeRegExp(info.version)}"`);
 
 const files = [
-    "xyz.brbc.popcorn.iinaplugin/dist/main.js",
-    "xyz.brbc.popcorn.iinaplugin/dist/global.js",
-    "xyz.brbc.popcorn.iinaplugin/ui/dist/sidebar.js",
-    "xyz.brbc.popcorn.iinaplugin/ui/dist/preferences.js",
+    "dist/main.js",
+    "dist/global.js",
+    "ui/dist/sidebar.js",
+    "ui/dist/preferences.js",
 ];
 
 let ok = true;
