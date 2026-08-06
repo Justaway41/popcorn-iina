@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
     getAudioBadge,
+    getCacheBadge,
     getEpisodeOrderButtonId,
     getEpisodeOrderLabel,
     getOpenSeasonNumbers,
@@ -95,6 +96,30 @@ test("combines embedded and external English subtitle availability", () => {
         title: "Subtitle availability unknown",
         state: "unknown"
     });
+});
+
+test("labels verified and unknown cache states", () => {
+    expect(getCacheBadge(true)).toEqual({
+        label: "Cached",
+        title: "Ready to play from debrid cache",
+        state: "cached"
+    });
+    expect(getCacheBadge(false)).toEqual({
+        label: "Uncached",
+        title: "Not currently available in debrid cache",
+        state: "uncached"
+    });
+    expect(getCacheBadge(null)).toEqual({
+        label: "Cache ?",
+        title: "Cache status not provided",
+        state: "unknown"
+    });
+});
+
+test("keeps raw stream titles as tooltips and explicit zero seeders visible", () => {
+    expect(appSource).toContain("stream.rawTitle");
+    expect(appSource).toContain("stream.seeders !== null");
+    expect(appSource).toContain("`${stream.seeders} seeders`");
 });
 
 test("shows progress only for unfinished entries with an exact position", () => {

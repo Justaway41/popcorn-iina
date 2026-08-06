@@ -710,7 +710,10 @@ function renderStreams(
             const button = rowButton(
                 "Play Next Episode",
                 buildStreamDetails(recommendation, englishSubtitles),
-                () => playStream(recommendation)
+                () => playStream(recommendation),
+                false,
+                false,
+                recommendation.rawTitle
             );
             button.classList.add("next-episode");
             content.appendChild(button);
@@ -731,7 +734,14 @@ function renderStreams(
         const control = getSizeSortControl(sizeOrder);
         sortButton.textContent = control.label;
         list.replaceChildren(...sortStreamsBySize(streams, sizeOrder).map((stream) => (
-            rowButton(stream.title, buildStreamDetails(stream, englishSubtitles), () => playStream(stream))
+            rowButton(
+                stream.title,
+                buildStreamDetails(stream, englishSubtitles),
+                () => playStream(stream),
+                false,
+                false,
+                stream.rawTitle
+            )
         )));
     };
     sortButton.addEventListener("click", () => {
@@ -749,6 +759,19 @@ function buildStreamDetails(stream: AddonStream, englishSubtitles: boolean | nul
     addon.className = "stream-addon";
     addon.textContent = stream.addonName;
     fragment.appendChild(addon);
+    const cacheDetails = getCacheBadge(stream.cached);
+    const cache = document.createElement("span");
+    cache.className = `stream-meta-badge stream-cache--${cacheDetails.state}`;
+    cache.textContent = cacheDetails.label;
+    cache.title = cacheDetails.title;
+    fragment.appendChild(cache);
+    if (stream.seeders !== null) {
+        const seeders = document.createElement("span");
+        seeders.className = "stream-meta-badge stream-seeders";
+        seeders.textContent = `${stream.seeders} seeders`;
+        seeders.title = "Reported torrent seeders";
+        fragment.appendChild(seeders);
+    }
     if (stream.quality) {
         const quality = document.createElement("span");
         quality.className = `stream-quality ${getQualityClass(stream.quality)}`;
@@ -809,6 +832,20 @@ export function getSubtitleBadge(
     return { label: "Subs ?", title: "Subtitle availability unknown", state: "unknown" };
 }
 
+export function getCacheBadge(cached: boolean | null): {
+    label: string;
+    title: string;
+    state: "cached" | "uncached" | "unknown";
+} {
+    if (cached === true) {
+        return { label: "Cached", title: "Ready to play from debrid cache", state: "cached" };
+    }
+    if (cached === false) {
+        return { label: "Uncached", title: "Not currently available in debrid cache", state: "uncached" };
+    }
+    return { label: "Cache ?", title: "Cache status not provided", state: "unknown" };
+}
+
 function getQualityClass(quality: string): string {
     const normalized = quality.toLowerCase();
     if (normalized === "4k" || normalized === "2160p" || normalized === "1440p") {
@@ -825,7 +862,8 @@ function rowButton(
     subtitle: string | Node,
     action: () => void,
     disabled = false,
-    watched = false
+    watched = false,
+    titleTooltip = ""
 ): HTMLButtonElement {
     const button = document.createElement("button");
     button.type = "button";
@@ -837,6 +875,7 @@ function rowButton(
     const heading = document.createElement("span");
     heading.className = "row-title";
     heading.textContent = title;
+    if (titleTooltip) heading.title = titleTooltip;
     const detail = document.createElement("span");
     detail.className = "row-detail";
     if (typeof subtitle === "string") {
