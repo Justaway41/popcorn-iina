@@ -101,6 +101,7 @@ Subtitle availability combines embedded stream metadata with OpenSubtitles resul
 - Keep unknown states distinct from negative states.
 - Preserve request cancellation/revision guards in UI search, playback prefetch, and Trakt flows.
 - Keep generated bundles consistent with sources. Never hand-edit `dist/` or `ui/dist/`.
+- Do not predict which generated bundles should change. Run `bun run build` or `bun run package`, review the diff, and keep every tracked bundle the build regenerates.
 - Add or update the smallest colocated regression test for every nontrivial branch, parser, lifecycle fix, or state transition.
 - Preserve unrelated dirty files. Never reset, clean, overwrite, or stage them.
 - Do not add dependencies when platform APIs, the standard library, or existing code covers the requirement.
