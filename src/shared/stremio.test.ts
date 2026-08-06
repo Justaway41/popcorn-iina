@@ -207,28 +207,95 @@ test("keeps only playable HTTP streams", () => {
         ]
     })).toEqual([
         {
-            title: "4K WEB English\n💾 12 GB",
+            title: "WEB English",
+            rawTitle: "4K WEB English\n💾 12 GB",
             url: "https://cdn.example/movie.mkv",
             quality: "4K",
             size: "12 GB",
             audioLanguages: ["English"],
-            subtitleLanguages: null
+            subtitleLanguages: null,
+            cached: null,
+            seeders: null
         },
         {
-            title: "Release.Group",
+            title: "Release Group",
+            rawTitle: "Release.Group",
             url: "https://cdn.example/multi.mkv",
             quality: "1080p",
             size: "",
             audioLanguages: ["Multi"],
-            subtitleLanguages: null
+            subtitleLanguages: null,
+            cached: null,
+            seeders: null
         },
         {
             title: "LAN",
+            rawTitle: "LAN",
             url: "http://192.168.1.2/movie.mp4",
             quality: "",
             size: "",
             audioLanguages: [],
-            subtitleLanguages: null
+            subtitleLanguages: null,
+            cached: null,
+            seeders: null
+        }
+    ]);
+});
+
+test("normalizes AIOStreams and Comet display metadata conservatively", () => {
+    expect(parsePlayableStreams({
+        streams: [
+            {
+                name: "[TB+] AIOStreams 2160p",
+                description: "🎬 Dark 🐒 S03 🎞 E03 🎥 WEBRip",
+                url: "https://cdn.example/dark.mkv",
+                behaviorHints: {
+                    filename: "Dark.S03E03.2160p.WEBRip.H.265.mkv",
+                    videoSize: 65_928_328_806
+                },
+                streamData: { service: { cached: true }, torrent: { seeders: 42 } }
+            },
+            {
+                name: "[torbox⬇️] Comet 1080p",
+                description: "📄 Dark.S03E03.1080p.WEB-DL\n👤 0",
+                url: "https://cdn.example/comet.mkv",
+                behaviorHints: { filename: "Dark.S03E03.1080p.WEB-DL.x264.mkv" }
+            },
+            {
+                name: "[TB+] AIOStreams",
+                description: "⏳ Dark.S03E03",
+                url: "https://cdn.example/conflict.mkv"
+            },
+            {
+                description: "🎬 Dark 🐒 S03 🎞 E03 🎥 WEBRip",
+                url: "https://cdn.example/unknown.mkv"
+            }
+        ]
+    })).toMatchObject([
+        {
+            title: "Dark · S03E03 · WEBRip · H.265",
+            rawTitle: "Dark.S03E03.2160p.WEBRip.H.265.mkv",
+            size: "61.4 GB",
+            cached: true,
+            seeders: 42
+        },
+        {
+            title: "Dark · S03E03 · WEB-DL · x264",
+            rawTitle: "Dark.S03E03.1080p.WEB-DL.x264.mkv",
+            cached: false,
+            seeders: 0
+        },
+        {
+            title: "Dark · S03E03",
+            rawTitle: "⏳ Dark.S03E03",
+            cached: null,
+            seeders: null
+        },
+        {
+            title: "Dark · S03E03 · WEBRip",
+            rawTitle: "🎬 Dark 🐒 S03 🎞 E03 🎥 WEBRip",
+            cached: null,
+            seeders: null
         }
     ]);
 });
