@@ -471,15 +471,27 @@
       }
       const name = getString3(stream?.name);
       const description = getString3(stream?.description);
-      const title = getString3(stream?.title) || description || name || "Stream";
-      const metadata = [name, title, description].join(" ");
+      const providerTitle = getString3(stream?.title) || description || name || "Stream";
+      const behaviorHints = getRecord3(stream?.behaviorHints);
+      const streamData = getRecord3(stream?.streamData);
+      const service = getRecord3(streamData?.service);
+      const torrent = getRecord3(streamData?.torrent);
+      const filename = getString3(behaviorHints?.filename) || getString3(streamData?.filename);
+      const rawTitle = filename || providerTitle;
+      const metadata = [name, providerTitle, description, filename].join(" ");
+      const structuredCached = getBoolean(service?.cached) ?? getBoolean(streamData?.cached);
+      const structuredSeeders = getNonNegativeInteger(torrent?.seeders) ?? getNonNegativeInteger(streamData?.seeders);
+      const structuredSize = formatByteSize(getPositiveNumber(behaviorHints?.videoSize) ?? getPositiveNumber(streamData?.size));
       return [{
-        title,
+        title: cleanStreamTitle(rawTitle),
+        rawTitle,
         url,
         quality: metadata.match(/\b(4K|(?:2160|1440|1080|720|576|480|360|240)p|HDRip|BRRip|WEBRip)\b/i)?.[0] || "",
-        size: metadata.match(/(?:💾\s*)?([\d.]+\s*[KMGT]B)\b/i)?.[1] || "",
+        size: structuredSize || metadata.match(/(?:💾\s*)?([\d.]+\s*[KMGT]B)\b/i)?.[1] || "",
         audioLanguages: parseAudioLanguages(metadata),
-        subtitleLanguages: parseSubtitleLanguages(stream?.subtitles)
+        subtitleLanguages: parseSubtitleLanguages(stream?.subtitles),
+        cached: structuredCached ?? parseCacheStatus(metadata),
+        seeders: structuredSeeders ?? parseSeeders(metadata)
       }];
     });
   }
@@ -492,6 +504,29 @@
   }
   function isHttpUrl(value) {
     return /^https?:\/\/[^/]+/i.test(value.trim());
+  }
+  function cleanStreamTitle(value) {
+    const firstLine = value.split(/\r?\n/).find((line) => line.trim())?.trim() || value.trim();
+    const cleaned = firstLine.replace(/\.(?:mkv|mp4|avi|mov|m4v|ts|m2ts|webm|iso)$/i, "").replace(/\p{Extended_Pictographic}|[\uFE0F\u200D]/gu, " ").replace(/[._]+/g, " ").replace(/\bH\s*26([45])\b/gi, "H.26$1").replace(/\bS(\d{1,2})\s+E(\d{1,3})\b/gi, "S$1E$2").replace(/\bWEB\s+DL\b/gi, "WEB-DL").replace(/\b(?:4K|(?:2160|1440|1080|720|576|480|360|240)p)\b/gi, " ").replace(/\b\d+(?:\.\d+)?\s*[KMGT]B\b/gi, " ").replace(/[|•]+/g, " ").replace(/\s+/g, " ").trim().replace(/\s+(?=(?:S\d{1,2}E\d{1,3}|WEB(?:-?DL|Rip)|BluRay|REMUX|HDR(?:10\+?)?|DV|DoVi|HEVC|AVC|AV1|x26[45]|H\.26[45])\b)/gi, " · ");
+    return cleaned || firstLine || "Stream";
+  }
+  function parseCacheStatus(value) {
+    const cached = /⚡|🚀|\[[^\]\r\n]{1,20}\+\]|\bcached\b|\binstant\b/i.test(value);
+    const uncached = /⬇|⏳|\buncached\b|\bnot\s+ready\b|\bdownload(?:ing)?\b/i.test(value);
+    return cached === uncached ? null : cached;
+  }
+  function parseSeeders(value) {
+    const match = value.match(/(?:\bseeders?\s*[:=]?\s*|[👤👥🌱⇄⇋]\s*)(\d+)\b/iu) ?? value.match(/\bS:\s*(\d+)\b/i);
+    return match ? Number(match[1]) : null;
+  }
+  function formatByteSize(value) {
+    if (value === null)
+      return "";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const exponent = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+    const amount = value / 1024 ** exponent;
+    const precision = amount >= 10 || exponent === 0 ? 1 : 2;
+    return `${Number(amount.toFixed(precision))} ${units[exponent]}`;
   }
   function parseAudioLanguages(value) {
     let audioMetadata = value.replace(/\be[\s._-]*subs?\b/gi, " ");
@@ -535,6 +570,15 @@
   }
   function getString3(value) {
     return typeof value === "string" ? value : "";
+  }
+  function getBoolean(value) {
+    return typeof value === "boolean" ? value : null;
+  }
+  function getPositiveNumber(value) {
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+  }
+  function getNonNegativeInteger(value) {
+    return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
   }
   function getStringOrNumber(value) {
     return typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value) ? String(value) : "";
@@ -1082,7 +1126,7 @@
     if (recommendNext) {
       const recommendation = findClosestQualityStream(streams, preferredQuality || "");
       if (recommendation) {
-        const button = rowButton("Play Next Episode", buildStreamDetails(recommendation, englishSubtitles), () => playStream(recommendation));
+        const button = rowButton("Play Next Episode", buildStreamDetails(recommendation, englishSubtitles), () => playStream(recommendation), false, false, recommendation.rawTitle);
         button.classList.add("next-episode");
         content.appendChild(button);
       }
@@ -1101,7 +1145,7 @@
     const renderList = () => {
       const control = getSizeSortControl(sizeOrder);
       sortButton.textContent = control.label;
-      list.replaceChildren(...sortStreamsBySize(streams, sizeOrder).map((stream) => rowButton(stream.title, buildStreamDetails(stream, englishSubtitles), () => playStream(stream))));
+      list.replaceChildren(...sortStreamsBySize(streams, sizeOrder).map((stream) => rowButton(stream.title, buildStreamDetails(stream, englishSubtitles), () => playStream(stream), false, false, stream.rawTitle)));
     };
     sortButton.addEventListener("click", () => {
       sizeOrder = getSizeSortControl(sizeOrder).next;
@@ -1117,6 +1161,19 @@
     addon.className = "stream-addon";
     addon.textContent = stream.addonName;
     fragment.appendChild(addon);
+    const cacheDetails = getCacheBadge(stream.cached);
+    const cache = document.createElement("span");
+    cache.className = `stream-meta-badge stream-cache--${cacheDetails.state}`;
+    cache.textContent = cacheDetails.label;
+    cache.title = cacheDetails.title;
+    fragment.appendChild(cache);
+    if (stream.seeders !== null) {
+      const seeders = document.createElement("span");
+      seeders.className = "stream-meta-badge stream-seeders";
+      seeders.textContent = `${stream.seeders} seeders`;
+      seeders.title = "Reported torrent seeders";
+      fragment.appendChild(seeders);
+    }
     if (stream.quality) {
       const quality = document.createElement("span");
       quality.className = `stream-quality ${getQualityClass(stream.quality)}`;
@@ -1166,6 +1223,15 @@
     }
     return { label: "Subs ?", title: "Subtitle availability unknown", state: "unknown" };
   }
+  function getCacheBadge(cached) {
+    if (cached === true) {
+      return { label: "Cached", title: "Ready to play from debrid cache", state: "cached" };
+    }
+    if (cached === false) {
+      return { label: "Uncached", title: "Not currently available in debrid cache", state: "uncached" };
+    }
+    return { label: "Cache ?", title: "Cache status not provided", state: "unknown" };
+  }
   function getQualityClass(quality) {
     const normalized = quality.toLowerCase();
     if (normalized === "4k" || normalized === "2160p" || normalized === "1440p") {
@@ -1179,7 +1245,7 @@
       return "stream-quality--sd";
     return "stream-quality--other";
   }
-  function rowButton(title, subtitle, action, disabled = false, watched = false) {
+  function rowButton(title, subtitle, action, disabled = false, watched = false, titleTooltip = "") {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "row";
@@ -1191,6 +1257,8 @@
     const heading = document.createElement("span");
     heading.className = "row-title";
     heading.textContent = title;
+    if (titleTooltip)
+      heading.title = titleTooltip;
     const detail = document.createElement("span");
     detail.className = "row-detail";
     if (typeof subtitle === "string") {
