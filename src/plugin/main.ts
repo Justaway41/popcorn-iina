@@ -14,9 +14,12 @@ import {
     buildStremioStreamUrl,
     findClosestQualityStream,
     findNextEpisode,
+    isImdbId,
     parseEpisodeOrder,
     parseMediaTypePreference,
-    parsePlayableStreams
+    parsePlayableStreams,
+    parseSkipSegments,
+    type Episode
 } from "../shared/stremio";
 import { mergeWatchHistory, type TraktScrobbleAction } from "../shared/trakt";
 import {
@@ -38,8 +41,10 @@ import {
     findChapterIntro,
     getOverlayAction,
     parseAniSkipInterval,
+    parseIntroDbSegment,
     parseKitsuMalId,
-    type IntroInterval
+    type IntroInterval,
+    type OverlayAction
 } from "./intro";
 import { formatError, isHttpUrl, logDebug, sanitizeMediaTitle } from "./utils";
 
@@ -62,9 +67,13 @@ let reachedNaturalEof = false;
 let traktStopSent = false;
 let watchHistory = parseWatchHistory(preferences.get("watchHistory"));
 let introInterval: IntroInterval | null = null;
+let recapInterval: IntroInterval | null = null;
 let creditsInterval: IntroInterval | null = null;
 let playbackRevision = 0;
-let overlayAction: "intro" | "next" | null = null;
+let overlayAction: OverlayAction | null = null;
+let overlayVisible = false;
+let overlayLabel = "";
+let overlayHandlerRegistered = false;
 let prefetchedNextEpisode: PlayItemPayload | null = null;
 const kitsuMalIds = new Map<string, string>();
 const addonManifests = new Map<string, AddonManifest>();
@@ -256,32 +265,133 @@ function handleEndFile(): void {
 function clearIntro(): void {
     playbackRevision += 1;
     introInterval = null;
+    recapInterval = null;
     creditsInterval = null;
     prefetchedNextEpisode = null;
     overlayAction = null;
-    overlay.setClickable(false);
-    overlay.hide();
+    // Force the hide through rather than trusting the cached flag: the overlay belongs to the
+    // window, and a file change must never leave a stale control from the previous one.
+    overlayVisible = true;
+    applyOverlayState();
+}
+
+const OVERLAY_LABELS: Record<OverlayAction, string> = {
+    recap: "Skip Recap",
+    intro: "Skip Intro",
+    next: "Next Episode"
+};
+
+// Sized in vmin so the control tracks the smaller window dimension and stays proportional in a
+// small window as well as fullscreen. The bottom inset never drops below the height of IINA's
+// playback controls, which would otherwise cover the button in a short window.
+const OVERLAY_STYLE = `
+    .skip-overlay {
+        position: fixed;
+        right: clamp(12px, 6vmin, 120px);
+        bottom: clamp(64px, 12vmin, 120px);
+        z-index: 1000;
+    }
+    .skip-button {
+        padding: clamp(7px, 1.6vmin, 13px) clamp(13px, 3vmin, 24px);
+        border: none;
+        border-radius: 999px;
+        background: #ffffff;
+        color: #000000;
+        font: 600 clamp(12px, 2.6vmin, 20px) -apple-system, BlinkMacSystemFont, sans-serif;
+        white-space: nowrap;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+        cursor: pointer;
+    }
+    .skip-button:active { transform: scale(0.98); }
+`;
+
+/**
+ * Simple mode rather than `loadFile`: loading a page is asynchronous, so clickability set while
+ * it is still loading is lost, which silently breaks any interval starting near zero. Simple mode
+ * has no load to race. The click is an inline handler for the same reason - it is evaluated when
+ * the button is pressed rather than bound during a parse that may precede the bridge.
+ */
+function renderOverlayButton(action: OverlayAction, label: string): string {
+    return `<div class="skip-overlay">` +
+        `<button class="skip-button" data-clickable type="button" ` +
+        `onclick="iina.postMessage('overlayAction', { action: '${action}' })">${label}</button>` +
+        `</div>`;
+}
+
+function handleOverlayAction(data: unknown): void {
+    // The click carries the action it was showing. A message that lands just after the
+    // interval elapsed still does what the user clicked, rather than being discarded.
+    const requested = (data as { action?: OverlayAction } | undefined)?.action || overlayAction;
+    // The interval is kept, not discarded: seeking back into it must offer the skip again.
+    // Hiding now only keeps the click responsive; the next position update recomputes from
+    // the real time, and the seek target already sits outside the interval.
+    if (requested === "recap" && recapInterval) {
+        const end = recapInterval.end;
+        overlayAction = null;
+        applyOverlayState();
+        seekToSeconds(end);
+        return;
+    }
+    if (requested === "intro" && introInterval) {
+        const end = introInterval.end;
+        overlayAction = null;
+        applyOverlayState();
+        seekToSeconds(end);
+        return;
+    }
+    if (requested === "next" && prefetchedNextEpisode) {
+        const next = prefetchedNextEpisode;
+        prefetchedNextEpisode = null;
+        playItem(next);
+    }
+}
+
+/**
+ * Activating a mode clears the overlay, which discards any message handler registered before it.
+ * So the mode is activated exactly once and the handler registered immediately afterwards; later
+ * updates only replace content. Registering in `window-loaded`, before any `simpleMode()` call,
+ * left the button rendering and clickable with nothing listening for its message.
+ */
+function ensureOverlayInitialized(): void {
+    if (overlayHandlerRegistered) return;
+    overlay.simpleMode();
+    overlay.setStyle(OVERLAY_STYLE);
+    overlay.onMessage("overlayAction", handleOverlayAction);
+    overlayHandlerRegistered = true;
+}
+
+function applyOverlayState(): void {
+    if (!overlayAction) {
+        if (!overlayVisible) return;
+        overlay.hide();
+        overlay.setClickable(false);
+        overlayVisible = false;
+        overlayLabel = "";
+        return;
+    }
+    ensureOverlayInitialized();
+    const label = OVERLAY_LABELS[overlayAction];
+    if (label !== overlayLabel) {
+        overlay.setContent(renderOverlayButton(overlayAction, label));
+        overlayLabel = label;
+    }
+    if (overlayVisible) return;
+    // Clickable before visible, matching the ordering that is known to work in practice.
+    overlay.setClickable(true);
+    overlay.show();
+    overlayVisible = true;
 }
 
 function updateIntroOverlay(): void {
     const action = getOverlayAction(
         mpv.getNumber("time-pos"),
-        introInterval,
-        creditsInterval,
-        prefetchedNextEpisode !== null
+        { intro: introInterval, recap: recapInterval, credits: creditsInterval },
+        prefetchedNextEpisode !== null,
+        mpv.getNumber("duration")
     );
     if (action === overlayAction) return;
     overlayAction = action;
-    if (!action) {
-        overlay.setClickable(false);
-        overlay.hide();
-        return;
-    }
-    overlay.postMessage("setAction", {
-        label: action === "intro" ? "Skip Intro" : "Next Episode"
-    });
-    overlay.setClickable(true);
-    overlay.show();
+    applyOverlayState();
 }
 
 function handleTimePositionChanged(): void {
@@ -289,42 +399,129 @@ function handleTimePositionChanged(): void {
     updatePlaybackMonitoring();
 }
 
+interface SegmentSources {
+    intro: IntroInterval | null;
+    recap: IntroInterval | null;
+    credits: IntroInterval | null;
+}
+
+/**
+ * Sources are consulted in order of trustworthiness and only fill what the previous one left
+ * missing: chapters come from the file itself, AniSkip covers anime, IntroDB covers live action.
+ */
 async function resolvePlaybackIntervals(revision: number): Promise<void> {
     const duration = mpv.getNumber("duration");
     const chapters = core.getChapters();
-    const chapterIntro = findChapterIntro(chapters);
-    const chapterCredits = findChapterCredits(chapters, duration);
+    const found: SegmentSources = {
+        intro: findChapterIntro(chapters),
+        recap: null,
+        credits: findChapterCredits(chapters, duration)
+    };
     if (!isCurrentRequest(revision, playbackRevision)) return;
-    introInterval = chapterIntro;
-    creditsInterval = chapterCredits;
-    updateIntroOverlay();
-    if (chapterIntro && chapterCredits) return;
+    applySegments(found, duration);
+    if (found.intro && found.credits) return;
 
     const context = activePlaybackContext;
     const episode = context?.episode;
-    const providerId = context?.media.providerId || context?.media.id || "";
-    if (!context || !episode || !(context.media.providerType === "anime" || providerId.startsWith("kitsu:"))) {
-        return;
+    if (!context || !episode) return;
+    if (!parseSkipSegments(preferences.get("skipSegments"))) return;
+
+    const providerId = context.media.providerId || context.media.id || "";
+    if (context.media.providerType === "anime" || providerId.startsWith("kitsu:")) {
+        const anime = await loadAniSkipSegments(revision, context.media.malId || "", providerId, episode, duration);
+        if (!isCurrentRequest(revision, playbackRevision)) return;
+        if (anime) {
+            found.intro = found.intro || anime.intro;
+            found.credits = found.credits || anime.credits;
+            applySegments(found, duration);
+        }
     }
+    if (found.intro && found.recap && found.credits) return;
+
+    const db = await loadIntroDbSegments(revision, context.media.imdbId, episode);
+    if (!db || !isCurrentRequest(revision, playbackRevision)) return;
+    found.intro = found.intro || db.intro;
+    found.recap = found.recap || db.recap;
+    found.credits = found.credits || db.credits;
+    applySegments(found, duration);
+}
+
+/**
+ * Sets `time-pos` directly rather than using `core.seekTo` or the mpv `seek` command; this is the
+ * form that works reliably from an overlay click. The half second lands past the boundary so the
+ * control does not immediately re-appear on the last frame of the interval it just skipped.
+ */
+function seekToSeconds(seconds: number): void {
+    if (!Number.isFinite(seconds) || seconds < 0) return;
     try {
-        const malId = context.media.malId || await loadKitsuMalId(providerId);
+        mpv.set("time-pos", Math.max(0, seconds + 0.5));
+    } catch (error) {
+        logDebug("Popcorn: Seek failed:", formatError(error));
+    }
+}
+
+/** An interval running past the end of the file is bad data, whatever supplied it. */
+function applySegments(found: SegmentSources, duration: number): void {
+    const known = Number.isFinite(duration) && duration > 0;
+    const within = (interval: IntroInterval | null) =>
+        interval && (!known || interval.end <= duration) ? interval : null;
+    introInterval = within(found.intro);
+    recapInterval = within(found.recap);
+    creditsInterval = within(found.credits);
+    updateIntroOverlay();
+}
+
+async function loadAniSkipSegments(
+    revision: number,
+    knownMalId: string,
+    providerId: string,
+    episode: Episode,
+    duration: number
+): Promise<{ intro: IntroInterval | null; credits: IntroInterval | null } | null> {
+    try {
+        const malId = knownMalId || await loadKitsuMalId(providerId);
         if (!malId || !Number.isFinite(duration) || duration <= 0 ||
-            !isCurrentRequest(revision, playbackRevision)) return;
+            !isCurrentRequest(revision, playbackRevision)) return null;
         const response = await http.get(
             `https://api.aniskip.com/v2/skip-times/${encodeURIComponent(malId)}/${episode.episode}` +
                 `?types=op&types=ed&episodeLength=${encodeURIComponent(String(duration))}`,
             { params: {}, headers: { Accept: "application/json" }, data: {} }
         );
-        if (response.statusCode < 200 || response.statusCode >= 300 ||
-            !isCurrentRequest(revision, playbackRevision)) return;
+        if (response.statusCode < 200 || response.statusCode >= 300) return null;
         const data = safeJson(response.data ?? response.text);
-        const intro = chapterIntro || parseAniSkipInterval(data);
-        const credits = chapterCredits || parseAniSkipInterval(data, "ed");
-        introInterval = intro && intro.end <= duration ? intro : null;
-        creditsInterval = credits && credits.end <= duration ? credits : null;
-        updateIntroOverlay();
+        return { intro: parseAniSkipInterval(data), credits: parseAniSkipInterval(data, "ed") };
     } catch (error) {
         logDebug("Popcorn: Skip interval lookup failed:", formatError(error));
+        return null;
+    }
+}
+
+/**
+ * IntroDB is keyed on the series IMDb id plus season and episode, and answers 200 with null
+ * segments when it holds nothing, so an empty answer is not an error.
+ */
+async function loadIntroDbSegments(
+    revision: number,
+    imdbId: string,
+    episode: Episode
+): Promise<SegmentSources | null> {
+    if (!isImdbId(imdbId) || !(episode.season >= 1) || !(episode.episode >= 1)) return null;
+    try {
+        const data = await requestJson(
+            `https://api.introdb.app/segments?imdb_id=${encodeURIComponent(imdbId)}` +
+                `&season=${encodeURIComponent(String(episode.season))}` +
+                `&episode=${encodeURIComponent(String(episode.episode))}`
+        );
+        if (!isCurrentRequest(revision, playbackRevision)) return null;
+        return {
+            intro: parseIntroDbSegment(data, "intro"),
+            recap: parseIntroDbSegment(data, "recap"),
+            credits: parseIntroDbSegment(data, "outro")
+        };
+    } catch (error) {
+        // Log the failure only; the id and URL identify what is being watched.
+        logDebug("Popcorn: Segment lookup failed:", formatError(error));
+        return null;
     }
 }
 
@@ -415,25 +612,8 @@ global.onMessage("showPopcornSidebar", toggleSidebar);
 
 event.on("iina.window-loaded", () => {
     sidebar.loadFile("ui/sidebar.html");
-    overlay.loadFile("ui/overlay.html");
     overlay.setClickable(false);
     overlay.hide();
-    overlay.onMessage("overlayAction", () => {
-        if (overlayAction === "intro" && introInterval) {
-            const end = introInterval.end;
-            introInterval = null;
-            overlayAction = null;
-            overlay.setClickable(false);
-            overlay.hide();
-            core.seekTo(end);
-            return;
-        }
-        if (overlayAction === "next" && prefetchedNextEpisode) {
-            const next = prefetchedNextEpisode;
-            prefetchedNextEpisode = null;
-            playItem(next);
-        }
-    });
     sidebar.onMessage(MESSAGE_NAMES.PlayItem, playItem);
     sidebar.onMessage(MESSAGE_NAMES.SetMediaType, (data) => {
         const mediaType = parseMediaTypePreference((data as SetMediaTypePayload)?.mediaType);

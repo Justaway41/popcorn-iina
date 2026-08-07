@@ -21,7 +21,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.0.0`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.1.0`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -54,7 +54,7 @@ Open the owner file and its test first. Follow imports only when the actual flow
 | Plugin manifest, permissions, defaults, version | `Info.json` | `scripts/verify-root-info.js`, `scripts/verify-built-client-version.js`, `src/shared/version.ts` |
 | Global menu, `Shift+P`, managed player creation | `src/plugin/global.ts` | `src/plugin/global.test.ts` |
 | Player lifecycle, sidebar messages, playback orchestration | `src/plugin/main.ts` | `src/plugin/playback.ts`, `src/plugin/playback.test.ts` |
-| Skip intro and credit intervals | `src/plugin/intro.ts` | `src/plugin/intro.test.ts`, `ui/overlay.html` |
+| Skip intro/recap/credits intervals, next-episode tail | `src/plugin/intro.ts` | `src/plugin/intro.test.ts`, overlay rendering in `src/plugin/main.ts` |
 | Display sleep prevention | `src/plugin/sleep.ts` | `src/plugin/constants.ts` |
 | IINA-side Trakt transport and serialization | `src/plugin/trakt.ts` | `src/plugin/trakt.test.ts` |
 | IINA preference migration | `src/plugin/preferences.ts` | `src/plugin/preferences.test.ts` |
@@ -119,6 +119,50 @@ no dot at all.
 ### Playback and next episode
 
 `src/ui/app.ts` posts a `PlayItem` message. `src/plugin/main.ts` validates the URL, replaces playback through mpv, applies the media title, restores progress, records local history, and scrobbles when Trakt is connected. mpv events drive progress, watched thresholds, intro/credit controls, EOF handling, and next-episode presentation. The prefetched next stream uses the closest resolution to the current stream, with higher quality winning ties.
+
+### Skip segments and next episode
+
+`src/plugin/intro.ts` owns the interval logic; `resolvePlaybackIntervals` in `src/plugin/main.ts`
+consults sources in order of trustworthiness, each filling only what the previous one left missing:
+
+1. **mpv chapters** named `intro`/`opening`/`op` and `ending`/`credits`/`outro`/`ed` — from the file
+   itself, so always preferred and never needs a network call.
+2. **AniSkip** — anime only, via a Kitsu→MAL mapping.
+3. **IntroDB** (`https://api.introdb.app/segments?imdb_id=&season=&episode=`) — covers live action.
+   No API key. Keyed on the **series** IMDb id plus season and episode, all of which
+   `PlaybackContext` already carries. It answers **200 with null segments** when it holds nothing,
+   so an empty answer is normal and must never be treated as an error.
+4. **Tail fallback** — when no source supplied a credits interval, Next Episode appears in the last
+   `NEXT_EPISODE_TAIL_SEC` seconds. It never widens a known credits interval, and is suppressed
+   below `MIN_TAIL_DURATION_SEC` so short clips do not become one long tail.
+
+Measured IntroDB coverage over 36 episodes of 12 popular shows: intro 92%, outro 97%, **recap 14%**.
+Skip Recap is wired end to end, but the database rarely holds recap entries, so it seldom appears.
+
+`applySegments` drops any interval ending past the file duration, whatever supplied it. Overlay
+precedence is recap → intro → next, since a recap runs before the intro.
+
+The overlay uses **simple mode** (`overlay.simpleMode()` + `setStyle` + `setContent`), not
+`overlay.loadFile`. Loading a page is asynchronous, and clickability set while it is still loading
+is silently lost, which breaks every interval starting near zero — a very common intro shape. Simple
+mode has no load to race.
+
+**`overlay.onMessage` must be registered after `overlay.simpleMode()`.** Activating a mode clears
+the overlay and discards handlers registered beforehand, so a handler registered in
+`iina.window-loaded` is wiped by the first `simpleMode()` call: the button renders, reports itself
+clickable, posts its message, and nothing is listening. `ensureOverlayInitialized` therefore
+activates the mode exactly once and registers the handler immediately after; later updates only
+call `setContent`. Do not move `simpleMode()` back into the show path — repeating it would clear
+the handler again.
+
+Also keep the click an inline `onclick` in the rendered markup rather than a bound listener, call
+`setClickable(true)` **before** `show()`, and seek with `mpv.set("time-pos", …)`; `core.seekTo` and
+the mpv `seek` command were both unreliable here. This mirrors the arrangement proven in the sibling
+`jellyfin-iina` plugin.
+
+Lookups are gated on the `skipSegments` preference (default **on**; `parseSkipSegments` treats an
+absent value as on so existing installs keep the feature). Per the security rules below, failures log
+`formatError(error)` only — never the id, URL, or response, which identify what is being watched.
 
 ### Watch history removal
 
@@ -224,21 +268,17 @@ git var GIT_COMMITTER_IDENT
 
 As of 2026-08-07:
 
-- `main` contains version `2.0.0`, which bundles two changes that were developed separately but
-  shipped together because they touch the same files (`src/plugin/main.ts`, `Info.json`, and the
-  built bundles):
-  - The sidebar declutter, planned in `docs/superpowers/plans/2026-08-06-sidebar-declutter.md` and
-    measured against a live AIOStreams response. It splits `quality` into `resolution` + `source`,
-    makes cache parsing collision-proof, groups streams into resolution tiers with cached-first
-    ordering, replaces the season accordions with a season chip strip, and renames the `quality`
-    field on `PlaybackContext` / `ShowNextEpisodePayload` to `resolution`. `getOpenSeasonNumbers`,
-    `getSubtitleBadge`, `getQualityClass`, and `buildStreamDetails` were removed with their tests;
-    the stream badge CSS they used is gone.
-  - The uninstall-crash fix. It removes repeating timers from both plugin runtime entries, moves
-    playback monitoring to mpv events, and changes approved Trakt links in Settings to
-    copy-to-clipboard because the preference webview has no safe native-open event.
-  - Watch-history removal, described under its own runtime-flow section above.
-- The uninstall symptom was confirmed as an IINA 1.4.4 `SIGTRAP` in `JavascriptAPIPreferences.get(_:)` invoked by the old global polling timer during plugin teardown.
+- `2.0.0` is released: the sidebar declutter (resolution tiers, season chip strip, `quality` split
+  into `resolution` + `source`) and the uninstall-crash fix.
+- `2.1.0` adds skip segments backed by IntroDB with a next-episode tail fallback, watch-history
+  removal, and navigation fixes: the season is restored when returning from a stream list, a search
+  query survives a Movies/TV switch, and the search field has a clear control. All are described in
+  their runtime-flow sections above and verified in IINA.
+- `SetMediaType` and `RequestConfiguration` are independent messages with no ordering guarantee, so
+  a configuration reply can still carry the previous media type. `applyConfiguration` holds a local
+  switch in `pendingMediaType` until the plugin echoes it back; without that, switching type while a
+  search is showing flips straight back, because only the search path refreshes configuration.
+- The uninstall symptom was confirmed as an IINA 1.4.4 `SIGTRAP` in `JavascriptAPIPreferences.get(_:)` invoked by the old global polling timer during plugin teardown. IINA also quits when the plugin is uninstalled while its window is open; that window is a plugin-created player instance, so this is expected and is not the crash.
 - `.media-card` must keep `display: block` and `width: 100%`. It is a `<button>`, so as soon as it
   stops being the direct grid item (as it does inside `.card-slot`) an intrinsic width takes over
   and the poster image's natural size blows out the grid. Chrome shrink-to-fits and hides this;

@@ -13,6 +13,7 @@ import {
     parseAddons
 } from "../shared/addons";
 import { parseWatchHistory } from "../shared/history";
+import { parseSkipSegments } from "../shared/stremio";
 import {
     mergeWatchHistory,
     parseTraktExternalLinkRequest,
@@ -50,6 +51,7 @@ const list = element<HTMLDivElement>("addon-list");
 const empty = element<HTMLParagraphElement>("addon-empty");
 const template = element<HTMLTemplateElement>("addon-row-template");
 const presetButtons = [...document.querySelectorAll<HTMLButtonElement>(".addon-preset")];
+const skipSegments = element<HTMLInputElement>("skip-segments");
 const traktClientId = element<HTMLInputElement>("trakt-client-id");
 const traktClientSecret = element<HTMLInputElement>("trakt-client-secret");
 const traktConnect = element<HTMLButtonElement>("trakt-connect");
@@ -97,16 +99,22 @@ externalLinks.forEach((link) => link.addEventListener("click", (event) => {
     });
 }));
 
+skipSegments.addEventListener("change", () => {
+    preferences.set("skipSegments", skipSegments.checked);
+});
+
 void loadPreferences();
 
 async function loadPreferences(): Promise<void> {
-    const [stored, legacy, storedTrakt] = await Promise.all([
+    const [stored, legacy, storedTrakt, storedSkipSegments] = await Promise.all([
         getPreference("addons"),
         getPreference("addonManifestUrl"),
-        getPreference("trakt")
+        getPreference("trakt"),
+        getPreference("skipSegments")
     ]);
     const storedAddons = parseAddons(stored);
     addons = parseAddons(stored, legacy);
+    skipSegments.checked = parseSkipSegments(storedSkipSegments);
     trakt = parseTraktState(storedTrakt);
     traktClientId.value = trakt.clientId;
     traktClientSecret.value = trakt.clientSecret;

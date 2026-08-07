@@ -15,6 +15,7 @@ import {
     parseMediaMetadata,
     parseEpisodeOrder,
     parseMediaTypePreference,
+    parseSkipSegments,
     parsePlayableStreams,
     parseSeriesEpisodes,
     sortEpisodes,
@@ -413,6 +414,14 @@ test("restores only supported media type preferences", () => {
     expect(parseMediaTypePreference("movie")).toBe("movie");
     expect(parseMediaTypePreference("invalid")).toBe("movie");
     expect(parseMediaTypePreference(null)).toBe("movie");
+});
+
+test("keeps segment lookups on unless they were explicitly turned off", () => {
+    expect(parseSkipSegments(false)).toBe(false);
+    expect(parseSkipSegments(true)).toBe(true);
+    // an install predating the setting stores nothing and must still get the feature
+    expect(parseSkipSegments(undefined)).toBe(true);
+    expect(parseSkipSegments(null)).toBe(true);
 });
 
 test("restores only supported episode order preferences", () => {

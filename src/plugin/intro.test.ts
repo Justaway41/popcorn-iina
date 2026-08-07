@@ -5,7 +5,9 @@ import {
     findChapterIntro,
     getOverlayAction,
     isInsideIntro,
+    NEXT_EPISODE_TAIL_SEC,
     parseAniSkipInterval,
+    parseIntroDbSegment,
     parseKitsuMalId
 } from "./intro";
 
@@ -79,10 +81,75 @@ test("shows the control from the intro start until just before its end", () => {
 });
 
 test("prioritizes Skip Intro over a ready Next Episode action", () => {
-    const intro = { start: 10, end: 100 };
-    const credits = { start: 90, end: 150 };
-    expect(getOverlayAction(95, intro, credits, true)).toBe("intro");
-    expect(getOverlayAction(120, intro, credits, true)).toBe("next");
-    expect(getOverlayAction(120, intro, credits, false)).toBeNull();
-    expect(getOverlayAction(160, intro, credits, true)).toBeNull();
+    const segments = { intro: { start: 10, end: 100 }, recap: null, credits: { start: 90, end: 150 } };
+    expect(getOverlayAction(95, segments, true)).toBe("intro");
+    expect(getOverlayAction(120, segments, true)).toBe("next");
+    expect(getOverlayAction(120, segments, false)).toBeNull();
+    expect(getOverlayAction(160, segments, true)).toBeNull();
+});
+
+test("offers Skip Recap ahead of the intro that follows it", () => {
+    const segments = {
+        intro: { start: 100, end: 190 },
+        recap: { start: 10, end: 100 },
+        credits: null
+    };
+    expect(getOverlayAction(50, segments, true)).toBe("recap");
+    expect(getOverlayAction(100, segments, true)).toBe("intro");
+    // overlapping data must not let a recap mask the intro past its own end
+    expect(getOverlayAction(150, { ...segments, recap: { start: 10, end: 900 } }, true)).toBe("recap");
+});
+
+test("falls back to the tail of the file when no credits interval was found", () => {
+    const duration = 3000;
+    const bare = { intro: null, recap: null, credits: null };
+    expect(getOverlayAction(duration - NEXT_EPISODE_TAIL_SEC - 1, bare, true, duration)).toBeNull();
+    expect(getOverlayAction(duration - NEXT_EPISODE_TAIL_SEC, bare, true, duration)).toBe("next");
+    // nothing to play next means nothing to offer
+    expect(getOverlayAction(duration - 1, bare, false, duration)).toBeNull();
+    // a known credits interval wins; the tail must not widen it
+    const withCredits = { ...bare, credits: { start: 100, end: 200 } };
+    expect(getOverlayAction(duration - 1, withCredits, true, duration)).toBeNull();
+    expect(getOverlayAction(150, withCredits, true, duration)).toBe("next");
+    // short clips are not episodes; the whole file would otherwise be "the tail"
+    expect(getOverlayAction(120, bare, true, 130)).toBeNull();
+    // an unknown duration must not trigger anything
+    expect(getOverlayAction(120, bare, true, 0)).toBeNull();
+});
+
+test("offers the skip again after seeking back into an interval already skipped", () => {
+    const segments = { intro: { start: 0, end: 32 }, recap: null, credits: null };
+    expect(getOverlayAction(10, segments, false)).toBe("intro");
+    // skipping seeks just past the end, so the control falls away on its own
+    expect(getOverlayAction(32.5, segments, false)).toBeNull();
+    // and the interval must survive that, or rewinding leaves nothing to offer
+    expect(getOverlayAction(10, segments, false)).toBe("intro");
+});
+
+test("reads an IntroDB segment, treating an absent one as no data", () => {
+    // captured from api.introdb.app for Dark S01E01
+    const dark = {
+        imdb_id: "tt5753856",
+        season: 1,
+        episode: 1,
+        intro: { start_sec: 192, end_sec: 276, start_ms: 192000, end_ms: 276000, confidence: 1, submission_count: 1 },
+        recap: null,
+        outro: { start_sec: 2907, end_sec: 3092, start_ms: 2907000, end_ms: 3092000, confidence: 1, submission_count: 1 }
+    };
+    expect(parseIntroDbSegment(dark, "intro")).toEqual({ start: 192, end: 276 });
+    expect(parseIntroDbSegment(dark, "outro")).toEqual({ start: 2907, end: 3092 });
+    expect(parseIntroDbSegment(dark, "recap")).toBeNull();
+    // fractional seconds are real: Game of Thrones S01E01 outro
+    expect(parseIntroDbSegment({ outro: { start_sec: 3631.5, end_sec: 3699.5 } }, "outro"))
+        .toEqual({ start: 3631.5, end: 3699.5 });
+    // an intro starting at zero is valid, as on Friends
+    expect(parseIntroDbSegment({ intro: { start_sec: 0, end_sec: 47 } }, "intro"))
+        .toEqual({ start: 0, end: 47 });
+    // an unknown title still answers 200 with nulls rather than 404
+    expect(parseIntroDbSegment({ imdb_id: "tt9999999", intro: null, recap: null, outro: null }, "intro"))
+        .toBeNull();
+    expect(parseIntroDbSegment({ intro: { start_sec: 200, end_sec: 100 } }, "intro")).toBeNull();
+    expect(parseIntroDbSegment({ intro: { start_sec: -5, end_sec: 100 } }, "intro")).toBeNull();
+    expect(parseIntroDbSegment({ intro: { end_sec: 100 } }, "intro")).toBeNull();
+    expect(parseIntroDbSegment(null, "intro")).toBeNull();
 });

@@ -128,6 +128,11 @@ export function parseEpisodeOrder(value: unknown): EpisodeOrder {
     return value === "newest" ? "newest" : "oldest";
 }
 
+/** Absent means an install that predates the setting, so segment lookups stay on. */
+export function parseSkipSegments(value: unknown): boolean {
+    return value !== false;
+}
+
 export function sortEpisodes(episodes: Episode[], order: EpisodeOrder): Episode[] {
     const direction = order === "newest" ? -1 : 1;
     return [...episodes].sort((a, b) =>

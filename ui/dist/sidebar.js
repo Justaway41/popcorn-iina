@@ -238,9 +238,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.0.0",
+    version: "2.1.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 7,
+    ghVersion: 8,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -257,7 +257,8 @@
       mediaType: "movie",
       episodeOrder: "oldest",
       watchHistory: [],
-      trakt: {}
+      trakt: {},
+      skipSegments: true
     },
     permissions: [
       "network-request",
@@ -330,6 +331,9 @@
   }
   function parseEpisodeOrder(value) {
     return value === "newest" ? "newest" : "oldest";
+  }
+  function parseSkipSegments(value) {
+    return value !== false;
   }
   function sortEpisodes(episodes, order) {
     const direction = order === "newest" ? -1 : 1;
@@ -642,6 +646,7 @@
   // src/ui/app.ts
   var ui;
   var mediaType = "movie";
+  var pendingMediaType = null;
   var episodeOrder = "oldest";
   var addons = [];
   var watchHistory = [];
@@ -707,6 +712,7 @@
         loading: element("loading"),
         movies: element("movies-btn"),
         retry: element("retry-btn"),
+        searchClear: element("search-clear"),
         searchForm: element("search-form"),
         searchInput: element("search-input"),
         title: element("section-title"),
@@ -715,6 +721,14 @@
       ui.searchForm.addEventListener("submit", (event) => {
         event.preventDefault();
         loadHome(ui.searchInput.value.trim());
+      });
+      ui.searchInput.addEventListener("input", updateSearchClear);
+      ui.searchClear.addEventListener("click", () => {
+        ui.searchInput.value = "";
+        updateSearchClear();
+        ui.searchInput.focus();
+        if (homeQuery)
+          loadHome("");
       });
       ui.movies.addEventListener("click", () => switchType("movie"));
       ui.tv.addEventListener("click", () => switchType("series"));
@@ -727,7 +741,11 @@
   function applyConfiguration(data) {
     const payload = data;
     addons = parseAddons(payload?.addons);
-    mediaType = parseMediaTypePreference(payload?.mediaType);
+    const incoming = parseMediaTypePreference(payload?.mediaType);
+    if (pendingMediaType === null || incoming === pendingMediaType) {
+      pendingMediaType = null;
+      mediaType = incoming;
+    }
     episodeOrder = parseEpisodeOrder(payload?.episodeOrder);
     watchHistory = parseWatchHistory(payload?.history);
     updateTypeButtons();
@@ -758,14 +776,17 @@
     if (mediaType === type && view.kind === "home")
       return;
     mediaType = type;
-    ui.searchInput.value = "";
+    pendingMediaType = type;
     updateTypeButtons();
     iina.postMessage(MESSAGE_NAMES.SetMediaType, { mediaType });
-    loadHome("");
+    loadHome(ui.searchInput.value.trim());
   }
   function updateTypeButtons() {
     ui.movies.classList.toggle("active", mediaType === "movie");
     ui.tv.classList.toggle("active", mediaType === "series");
+  }
+  function updateSearchClear() {
+    ui.searchClear.classList.toggle("hidden", ui.searchInput.value.length === 0);
   }
   async function loadHome(query) {
     const request = replaceRequest(activeRequest);
@@ -773,6 +794,7 @@
     homeQuery = query;
     view = { kind: "home", query };
     ui.searchInput.value = query;
+    updateSearchClear();
     ui.back.classList.add("hidden");
     ui.title.textContent = query ? "Search Results" : watchHistory.length > 0 ? "Browse" : "Trending";
     setLoading("grid");
@@ -856,21 +878,21 @@
     const details = parseMediaMetadata(value, { manifestUrl: sourceUrl }, media);
     return { ...details, metadataAvailable: true };
   }
-  async function loadEpisodes(media) {
+  async function loadEpisodes(media, season) {
     const request = replaceRequest(activeRequest);
     activeRequest = request;
     view = { kind: "episodes", media };
     ui.back.classList.remove("hidden");
     ui.title.textContent = media.name;
     setLoading("episodes");
-    retryAction = () => loadEpisodes(media);
+    retryAction = () => loadEpisodes(media, season);
     try {
       const details = await loadMediaDetails(media, request.signal);
       if (!details.metadataAvailable) {
         renderEmpty("Episode metadata unavailable.");
         return;
       }
-      renderEpisodes(details.media, details.episodes);
+      renderEpisodes(details.media, details.episodes, undefined, season);
     } catch (error) {
       if (!request.signal.aborted)
         showError(readError(error, "Could not load episodes."));
@@ -924,7 +946,7 @@
     if (view.kind === "episodes") {
       await loadHome(homeQuery);
     } else if (view.kind === "streams" && view.episode) {
-      await loadEpisodes(view.media);
+      await loadEpisodes(view.media, view.episode.season);
     } else if (view.kind === "streams") {
       await loadHome(homeQuery);
     } else if (view.kind === "history") {

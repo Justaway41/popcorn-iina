@@ -292,6 +292,9 @@
   function parseEpisodeOrder(value) {
     return value === "newest" ? "newest" : "oldest";
   }
+  function parseSkipSegments(value) {
+    return value !== false;
+  }
   function findClosestQualityStream(streams, previousQuality) {
     const known = streams.flatMap((stream, index) => {
       const height = qualityHeight(stream.resolution);
@@ -821,9 +824,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.0.0",
+    version: "2.1.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 7,
+    ghVersion: 8,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -840,7 +843,8 @@
       mediaType: "movie",
       episodeOrder: "oldest",
       watchHistory: [],
-      trakt: {}
+      trakt: {},
+      skipSegments: true
     },
     permissions: [
       "network-request",
@@ -1038,6 +1042,8 @@
   }
 
   // src/plugin/intro.ts
+  var NEXT_EPISODE_TAIL_SEC = 60;
+  var MIN_TAIL_DURATION_SEC = 300;
   function findChapterIntro(chapters) {
     return findChapterInterval(chapters, /^(intro|opening|op)$/i);
   }
@@ -1083,15 +1089,32 @@
     }
     return null;
   }
+  function parseIntroDbSegment(value, type) {
+    const segment = record(record(value)?.[type]);
+    const start = numberValue(segment?.start_sec);
+    const end = numberValue(segment?.end_sec);
+    return start !== null && end !== null && start >= 0 && start < end ? { start, end } : null;
+  }
   function isInsideIntro(time, interval) {
     return Boolean(interval && Number.isFinite(time) && time >= interval.start && time < interval.end);
   }
-  function getOverlayAction(time, intro, credits, nextReady) {
-    if (isInsideIntro(time, intro))
+  function isInsideTail(time, duration) {
+    if (!Number.isFinite(time) || !Number.isFinite(duration))
+      return false;
+    if (duration < MIN_TAIL_DURATION_SEC)
+      return false;
+    return time >= duration - NEXT_EPISODE_TAIL_SEC;
+  }
+  function getOverlayAction(time, segments, nextReady, duration = 0) {
+    if (isInsideIntro(time, segments.recap))
+      return "recap";
+    if (isInsideIntro(time, segments.intro))
       return "intro";
-    if (nextReady && isInsideIntro(time, credits))
+    if (!nextReady)
+      return null;
+    if (isInsideIntro(time, segments.credits))
       return "next";
-    return null;
+    return !segments.credits && isInsideTail(time, duration) ? "next" : null;
   }
   function record(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
@@ -1122,9 +1145,13 @@
   var traktStopSent = false;
   var watchHistory = parseWatchHistory(preferences.get("watchHistory"));
   var introInterval = null;
+  var recapInterval = null;
   var creditsInterval = null;
   var playbackRevision = 0;
   var overlayAction = null;
+  var overlayVisible = false;
+  var overlayLabel = "";
+  var overlayHandlerRegistered = false;
   var prefetchedNextEpisode = null;
   var kitsuMalIds = new Map;
   var addonManifests = new Map;
@@ -1297,27 +1324,99 @@
   function clearIntro() {
     playbackRevision += 1;
     introInterval = null;
+    recapInterval = null;
     creditsInterval = null;
     prefetchedNextEpisode = null;
     overlayAction = null;
-    overlay.setClickable(false);
-    overlay.hide();
+    overlayVisible = true;
+    applyOverlayState();
+  }
+  var OVERLAY_LABELS = {
+    recap: "Skip Recap",
+    intro: "Skip Intro",
+    next: "Next Episode"
+  };
+  var OVERLAY_STYLE = `
+    .skip-overlay {
+        position: fixed;
+        right: clamp(12px, 6vmin, 120px);
+        bottom: clamp(64px, 12vmin, 120px);
+        z-index: 1000;
+    }
+    .skip-button {
+        padding: clamp(7px, 1.6vmin, 13px) clamp(13px, 3vmin, 24px);
+        border: none;
+        border-radius: 999px;
+        background: #ffffff;
+        color: #000000;
+        font: 600 clamp(12px, 2.6vmin, 20px) -apple-system, BlinkMacSystemFont, sans-serif;
+        white-space: nowrap;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+        cursor: pointer;
+    }
+    .skip-button:active { transform: scale(0.98); }
+`;
+  function renderOverlayButton(action, label) {
+    return `<div class="skip-overlay">` + `<button class="skip-button" data-clickable type="button" ` + `onclick="iina.postMessage('overlayAction', { action: '${action}' })">${label}</button>` + `</div>`;
+  }
+  function handleOverlayAction(data) {
+    const requested = data?.action || overlayAction;
+    if (requested === "recap" && recapInterval) {
+      const end = recapInterval.end;
+      overlayAction = null;
+      applyOverlayState();
+      seekToSeconds(end);
+      return;
+    }
+    if (requested === "intro" && introInterval) {
+      const end = introInterval.end;
+      overlayAction = null;
+      applyOverlayState();
+      seekToSeconds(end);
+      return;
+    }
+    if (requested === "next" && prefetchedNextEpisode) {
+      const next = prefetchedNextEpisode;
+      prefetchedNextEpisode = null;
+      playItem(next);
+    }
+  }
+  function ensureOverlayInitialized() {
+    if (overlayHandlerRegistered)
+      return;
+    overlay.simpleMode();
+    overlay.setStyle(OVERLAY_STYLE);
+    overlay.onMessage("overlayAction", handleOverlayAction);
+    overlayHandlerRegistered = true;
+  }
+  function applyOverlayState() {
+    if (!overlayAction) {
+      if (!overlayVisible)
+        return;
+      overlay.hide();
+      overlay.setClickable(false);
+      overlayVisible = false;
+      overlayLabel = "";
+      return;
+    }
+    ensureOverlayInitialized();
+    const label = OVERLAY_LABELS[overlayAction];
+    if (label !== overlayLabel) {
+      overlay.setContent(renderOverlayButton(overlayAction, label));
+      overlayLabel = label;
+    }
+    if (overlayVisible)
+      return;
+    overlay.setClickable(true);
+    overlay.show();
+    overlayVisible = true;
   }
   function updateIntroOverlay() {
-    const action = getOverlayAction(mpv.getNumber("time-pos"), introInterval, creditsInterval, prefetchedNextEpisode !== null);
+    const action = getOverlayAction(mpv.getNumber("time-pos"), { intro: introInterval, recap: recapInterval, credits: creditsInterval }, prefetchedNextEpisode !== null, mpv.getNumber("duration"));
     if (action === overlayAction)
       return;
     overlayAction = action;
-    if (!action) {
-      overlay.setClickable(false);
-      overlay.hide();
-      return;
-    }
-    overlay.postMessage("setAction", {
-      label: action === "intro" ? "Skip Intro" : "Next Episode"
-    });
-    overlay.setClickable(true);
-    overlay.show();
+    applyOverlayState();
   }
   function handleTimePositionChanged() {
     updateIntroOverlay();
@@ -1326,36 +1425,90 @@
   async function resolvePlaybackIntervals(revision) {
     const duration = mpv.getNumber("duration");
     const chapters = core.getChapters();
-    const chapterIntro = findChapterIntro(chapters);
-    const chapterCredits = findChapterCredits(chapters, duration);
+    const found = {
+      intro: findChapterIntro(chapters),
+      recap: null,
+      credits: findChapterCredits(chapters, duration)
+    };
     if (!isCurrentRequest(revision, playbackRevision))
       return;
-    introInterval = chapterIntro;
-    creditsInterval = chapterCredits;
-    updateIntroOverlay();
-    if (chapterIntro && chapterCredits)
+    applySegments(found, duration);
+    if (found.intro && found.credits)
       return;
     const context = activePlaybackContext;
     const episode = context?.episode;
-    const providerId = context?.media.providerId || context?.media.id || "";
-    if (!context || !episode || !(context.media.providerType === "anime" || providerId.startsWith("kitsu:"))) {
+    if (!context || !episode)
       return;
+    if (!parseSkipSegments(preferences.get("skipSegments")))
+      return;
+    const providerId = context.media.providerId || context.media.id || "";
+    if (context.media.providerType === "anime" || providerId.startsWith("kitsu:")) {
+      const anime = await loadAniSkipSegments(revision, context.media.malId || "", providerId, episode, duration);
+      if (!isCurrentRequest(revision, playbackRevision))
+        return;
+      if (anime) {
+        found.intro = found.intro || anime.intro;
+        found.credits = found.credits || anime.credits;
+        applySegments(found, duration);
+      }
     }
+    if (found.intro && found.recap && found.credits)
+      return;
+    const db = await loadIntroDbSegments(revision, context.media.imdbId, episode);
+    if (!db || !isCurrentRequest(revision, playbackRevision))
+      return;
+    found.intro = found.intro || db.intro;
+    found.recap = found.recap || db.recap;
+    found.credits = found.credits || db.credits;
+    applySegments(found, duration);
+  }
+  function seekToSeconds(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0)
+      return;
     try {
-      const malId = context.media.malId || await loadKitsuMalId(providerId);
+      mpv.set("time-pos", Math.max(0, seconds + 0.5));
+    } catch (error) {
+      logDebug("Popcorn: Seek failed:", formatError(error));
+    }
+  }
+  function applySegments(found, duration) {
+    const known = Number.isFinite(duration) && duration > 0;
+    const within = (interval) => interval && (!known || interval.end <= duration) ? interval : null;
+    introInterval = within(found.intro);
+    recapInterval = within(found.recap);
+    creditsInterval = within(found.credits);
+    updateIntroOverlay();
+  }
+  async function loadAniSkipSegments(revision, knownMalId, providerId, episode, duration) {
+    try {
+      const malId = knownMalId || await loadKitsuMalId(providerId);
       if (!malId || !Number.isFinite(duration) || duration <= 0 || !isCurrentRequest(revision, playbackRevision))
-        return;
+        return null;
       const response = await http.get(`https://api.aniskip.com/v2/skip-times/${encodeURIComponent(malId)}/${episode.episode}` + `?types=op&types=ed&episodeLength=${encodeURIComponent(String(duration))}`, { params: {}, headers: { Accept: "application/json" }, data: {} });
-      if (response.statusCode < 200 || response.statusCode >= 300 || !isCurrentRequest(revision, playbackRevision))
-        return;
+      if (response.statusCode < 200 || response.statusCode >= 300)
+        return null;
       const data = safeJson2(response.data ?? response.text);
-      const intro = chapterIntro || parseAniSkipInterval(data);
-      const credits = chapterCredits || parseAniSkipInterval(data, "ed");
-      introInterval = intro && intro.end <= duration ? intro : null;
-      creditsInterval = credits && credits.end <= duration ? credits : null;
-      updateIntroOverlay();
+      return { intro: parseAniSkipInterval(data), credits: parseAniSkipInterval(data, "ed") };
     } catch (error) {
       logDebug("Popcorn: Skip interval lookup failed:", formatError(error));
+      return null;
+    }
+  }
+  async function loadIntroDbSegments(revision, imdbId, episode) {
+    if (!isImdbId(imdbId) || !(episode.season >= 1) || !(episode.episode >= 1))
+      return null;
+    try {
+      const data = await requestJson(`https://api.introdb.app/segments?imdb_id=${encodeURIComponent(imdbId)}` + `&season=${encodeURIComponent(String(episode.season))}` + `&episode=${encodeURIComponent(String(episode.episode))}`);
+      if (!isCurrentRequest(revision, playbackRevision))
+        return null;
+      return {
+        intro: parseIntroDbSegment(data, "intro"),
+        recap: parseIntroDbSegment(data, "recap"),
+        credits: parseIntroDbSegment(data, "outro")
+      };
+    } catch (error) {
+      logDebug("Popcorn: Segment lookup failed:", formatError(error));
+      return null;
     }
   }
   async function prefetchNextEpisode(revision) {
@@ -1435,25 +1588,8 @@
   global.onMessage("showPopcornSidebar", toggleSidebar);
   event.on("iina.window-loaded", () => {
     sidebar.loadFile("ui/sidebar.html");
-    overlay.loadFile("ui/overlay.html");
     overlay.setClickable(false);
     overlay.hide();
-    overlay.onMessage("overlayAction", () => {
-      if (overlayAction === "intro" && introInterval) {
-        const end = introInterval.end;
-        introInterval = null;
-        overlayAction = null;
-        overlay.setClickable(false);
-        overlay.hide();
-        core.seekTo(end);
-        return;
-      }
-      if (overlayAction === "next" && prefetchedNextEpisode) {
-        const next = prefetchedNextEpisode;
-        prefetchedNextEpisode = null;
-        playItem(next);
-      }
-    });
     sidebar.onMessage(MESSAGE_NAMES.PlayItem, playItem);
     sidebar.onMessage(MESSAGE_NAMES.SetMediaType, (data) => {
       const mediaType = parseMediaTypePreference(data?.mediaType);

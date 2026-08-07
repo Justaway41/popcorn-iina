@@ -48,6 +48,10 @@
         }
         .addon-reveal, .addon-remove { padding: 3px 7px; }
         .addon-empty { margin: 10px 0 0; opacity: .65; font-size: 11px; }
+        .skip-section { display: grid; gap: 6px; margin-top: 18px; }
+        .skip-section h3, .skip-section p { margin: 0; }
+        .skip-toggle { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+        .skip-toggle input { margin: 0; }
         .trakt-section { display: grid; gap: 6px; margin-top: 18px; }
         .trakt-section h3, .trakt-section p { margin: 0; }
         .trakt-links { display: flex; gap: 8px; }
@@ -77,6 +81,19 @@
         </form>
         <div id="addon-list" class="addon-list"></div>
         <p id="addon-empty" class="addon-empty">No addons yet.</p>
+    </section>
+
+    <section class="pref-section skip-section" aria-labelledby="skip-heading">
+        <h3 id="skip-heading">Skip Intro and Credits</h3>
+        <label class="skip-toggle" for="skip-segments">
+            <input id="skip-segments" type="checkbox">
+            <span>Look up intro, recap, and credits timings</span>
+        </label>
+        <p class="small secondary pref-help">
+            Sends only the IMDb id and episode number of what you are playing to introdb.app and
+            aniskip.com to find where to skip to. Chapter timings in the file itself are always
+            preferred and never need a lookup. Turn this off to keep every lookup local.
+        </p>
     </section>
 
     <section class="pref-section trakt-section" aria-labelledby="trakt-heading">

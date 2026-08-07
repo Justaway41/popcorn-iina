@@ -46,6 +46,7 @@ interface Elements {
     loading: HTMLDivElement;
     movies: HTMLButtonElement;
     retry: HTMLButtonElement;
+    searchClear: HTMLButtonElement;
     searchForm: HTMLFormElement;
     searchInput: HTMLInputElement;
     title: HTMLHeadingElement;
@@ -54,6 +55,8 @@ interface Elements {
 
 let ui: Elements;
 let mediaType: MediaType = "movie";
+/** A type switch not yet echoed back by the plugin; incoming configuration must not undo it. */
+let pendingMediaType: MediaType | null = null;
 let episodeOrder: EpisodeOrder = "oldest";
 let addons: StremioAddon[] = [];
 let watchHistory: WatchHistoryEntry[] = [];
@@ -134,6 +137,7 @@ export function initApp(): void {
             loading: element("loading"),
             movies: element("movies-btn"),
             retry: element("retry-btn"),
+            searchClear: element("search-clear"),
             searchForm: element("search-form"),
             searchInput: element("search-input"),
             title: element("section-title"),
@@ -143,6 +147,15 @@ export function initApp(): void {
         ui.searchForm.addEventListener("submit", (event) => {
             event.preventDefault();
             void loadHome(ui.searchInput.value.trim());
+        });
+        ui.searchInput.addEventListener("input", updateSearchClear);
+        ui.searchClear.addEventListener("click", () => {
+            ui.searchInput.value = "";
+            updateSearchClear();
+            ui.searchInput.focus();
+            // Only reload when a search was actually showing; typing then clearing without
+            // submitting should not throw away the browse results already on screen.
+            if (homeQuery) void loadHome("");
         });
         ui.movies.addEventListener("click", () => switchType("movie"));
         ui.tv.addEventListener("click", () => switchType("series"));
@@ -157,7 +170,14 @@ export function initApp(): void {
 function applyConfiguration(data: unknown): void {
     const payload = data as ConfigurationPayload;
     addons = parseAddons(payload?.addons);
-    mediaType = parseMediaTypePreference(payload?.mediaType);
+    // Setting the type and requesting configuration are separate messages, so a reply can arrive
+    // still carrying the old type. Hold the local choice until the plugin reports it back, or
+    // switching type during a search would silently flip straight back.
+    const incoming = parseMediaTypePreference(payload?.mediaType);
+    if (pendingMediaType === null || incoming === pendingMediaType) {
+        pendingMediaType = null;
+        mediaType = incoming;
+    }
     episodeOrder = parseEpisodeOrder(payload?.episodeOrder);
     watchHistory = parseWatchHistory(payload?.history);
     updateTypeButtons();
@@ -188,15 +208,21 @@ function element<T extends HTMLElement>(id: string): T {
 function switchType(type: MediaType): void {
     if (mediaType === type && view.kind === "home") return;
     mediaType = type;
-    ui.searchInput.value = "";
+    pendingMediaType = type;
     updateTypeButtons();
     iina.postMessage(MESSAGE_NAMES.SetMediaType, { mediaType });
-    void loadHome("");
+    // Keep whatever was searched: switching type is usually "same title, other kind",
+    // so re-run the query against the new type rather than throwing it away.
+    void loadHome(ui.searchInput.value.trim());
 }
 
 function updateTypeButtons(): void {
     ui.movies.classList.toggle("active", mediaType === "movie");
     ui.tv.classList.toggle("active", mediaType === "series");
+}
+
+function updateSearchClear(): void {
+    ui.searchClear.classList.toggle("hidden", ui.searchInput.value.length === 0);
 }
 
 async function loadHome(query: string): Promise<void> {
@@ -205,6 +231,7 @@ async function loadHome(query: string): Promise<void> {
     homeQuery = query;
     view = { kind: "home", query };
     ui.searchInput.value = query;
+    updateSearchClear();
     ui.back.classList.add("hidden");
     ui.title.textContent = query ? "Search Results" : watchHistory.length > 0 ? "Browse" : "Trending";
     setLoading("grid");
@@ -313,14 +340,14 @@ async function loadMediaDetails(
     return { ...details, metadataAvailable: true };
 }
 
-async function loadEpisodes(media: Media): Promise<void> {
+async function loadEpisodes(media: Media, season?: number): Promise<void> {
     const request = replaceRequest(activeRequest);
     activeRequest = request;
     view = { kind: "episodes", media };
     ui.back.classList.remove("hidden");
     ui.title.textContent = media.name;
     setLoading("episodes");
-    retryAction = () => loadEpisodes(media);
+    retryAction = () => loadEpisodes(media, season);
 
     try {
         const details = await loadMediaDetails(media, request.signal);
@@ -328,7 +355,7 @@ async function loadEpisodes(media: Media): Promise<void> {
             renderEmpty("Episode metadata unavailable.");
             return;
         }
-        renderEpisodes(details.media, details.episodes);
+        renderEpisodes(details.media, details.episodes, undefined, season);
     } catch (error) {
         if (!request.signal.aborted) showError(readError(error, "Could not load episodes."));
     }
@@ -406,7 +433,9 @@ async function goBack(): Promise<void> {
     if (view.kind === "episodes") {
         await loadHome(homeQuery);
     } else if (view.kind === "streams" && view.episode) {
-        await loadEpisodes(view.media);
+        // The episode that was opened names the season to return to, so going back does not
+        // snap to whichever season the default would have picked.
+        await loadEpisodes(view.media, view.episode.season);
     } else if (view.kind === "streams") {
         await loadHome(homeQuery);
     } else if (view.kind === "history") {

@@ -313,6 +313,9 @@
   function parseEpisodeOrder(value) {
     return value === "newest" ? "newest" : "oldest";
   }
+  function parseSkipSegments(value) {
+    return value !== false;
+  }
   function sortEpisodes(episodes, order) {
     const direction = order === "newest" ? -1 : 1;
     return [...episodes].sort((a, b) => direction * (a.season - b.season || a.episode - b.episode));
@@ -1007,9 +1010,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.0.0",
+    version: "2.1.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 7,
+    ghVersion: 8,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1026,7 +1029,8 @@
       mediaType: "movie",
       episodeOrder: "oldest",
       watchHistory: [],
-      trakt: {}
+      trakt: {},
+      skipSegments: true
     },
     permissions: [
       "network-request",
@@ -1059,6 +1063,7 @@
   var empty = element("addon-empty");
   var template = element("addon-row-template");
   var presetButtons = [...document.querySelectorAll(".addon-preset")];
+  var skipSegments = element("skip-segments");
   var traktClientId = element("trakt-client-id");
   var traktClientSecret = element("trakt-client-secret");
   var traktConnect = element("trakt-connect");
@@ -1099,15 +1104,20 @@
       traktStatus.textContent = copied ? "Link copied. Paste it into your browser." : "Could not copy the link. Right-click it and choose Copy Link.";
     });
   }));
+  skipSegments.addEventListener("change", () => {
+    preferences.set("skipSegments", skipSegments.checked);
+  });
   loadPreferences();
   async function loadPreferences() {
-    const [stored, legacy, storedTrakt] = await Promise.all([
+    const [stored, legacy, storedTrakt, storedSkipSegments] = await Promise.all([
       getPreference("addons"),
       getPreference("addonManifestUrl"),
-      getPreference("trakt")
+      getPreference("trakt"),
+      getPreference("skipSegments")
     ]);
     const storedAddons = parseAddons(stored);
     addons = parseAddons(stored, legacy);
+    skipSegments.checked = parseSkipSegments(storedSkipSegments);
     trakt = parseTraktState(storedTrakt);
     traktClientId.value = trakt.clientId;
     traktClientSecret.value = trakt.clientSecret;
