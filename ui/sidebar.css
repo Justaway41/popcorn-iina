@@ -129,6 +129,10 @@ main { padding: 0 10px 18px; }
 }
 
 .media-card {
+    /* A button is inline-block, so without an explicit width it sizes to the poster image's
+       intrinsic width once it is not itself the grid item. Keep it filling its container. */
+    display: block;
+    width: 100%;
     min-width: 0;
     padding: 0;
     border: 0;
@@ -160,6 +164,36 @@ main { padding: 0 10px 18px; }
     font-size: 12px;
     font-weight: 750;
 }
+/* Sits opposite .watched-badge so the two never collide on a watched entry. Hidden until the
+   card is hovered or the control itself is focused, so it stays reachable by keyboard. */
+.card-slot { position: relative; display: grid; min-width: 0; }
+.card-remove {
+    position: absolute;
+    top: 5px;
+    left: 5px;
+    display: grid;
+    width: 20px;
+    height: 20px;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, .72);
+    box-shadow: 0 1px 5px rgba(0, 0, 0, .45);
+    color: white;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity .12s;
+}
+.card-slot:hover .card-remove, .card-remove:focus-visible { opacity: 1; }
+.card-remove:hover { background: var(--red); }
+.card-remove:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+@media (prefers-reduced-motion: reduce) {
+    .card-remove { transition: none; }
+}
+
 .poster-progress {
     position: absolute;
     right: 5px;

@@ -9,6 +9,7 @@ export const MESSAGE_NAMES = {
     SetMediaType: "setMediaType",
     SetEpisodeOrder: "setEpisodeOrder",
     HistoryUpdated: "historyUpdated",
+    RemoveHistoryEntry: "removeHistoryEntry",
     ShowNextEpisode: "showNextEpisode"
 } as const;
 
@@ -44,6 +45,10 @@ export interface SetEpisodeOrderPayload {
 
 export interface HistoryPayload {
     history: WatchHistoryEntry[];
+}
+
+export interface RemoveHistoryEntryPayload {
+    id: string;
 }
 
 export interface ShowNextEpisodePayload {

@@ -6,7 +6,8 @@ import {
     getHistoryEntry,
     getResumePercent,
     parseWatchHistory,
-    recordPlayback
+    recordPlayback,
+    removeHistoryEntry
 } from "./history";
 
 const movie = {
@@ -133,6 +134,19 @@ test("tracks provider-only movies locally by provider ID", () => {
     expect(entries[0].id).toBe("kitsu:123");
     expect(parseWatchHistory(entries)).toEqual(entries);
     expect(getHistoryEntry(entries, context)).toEqual(entries[0]);
+});
+
+test("removes a single history entry by id", () => {
+    const entries = [
+        { id: "tt1", media: movie, lastPlayedAt: "a", watched: false, progress: 5 },
+        { id: "tt2", media: { ...movie, id: "tt2", imdbId: "tt2" }, lastPlayedAt: "b", watched: true, progress: 100 }
+    ];
+    expect(removeHistoryEntry(entries, "tt1")).toEqual([entries[1]]);
+    // an unknown id must not silently clear the list
+    expect(removeHistoryEntry(entries, "nope")).toEqual(entries);
+    // nor must a missing one, which is what an empty payload arrives as
+    expect(removeHistoryEntry(entries, "")).toEqual(entries);
+    expect(removeHistoryEntry([], "tt1")).toEqual([]);
 });
 
 test("resumes only unfinished meaningful progress", () => {

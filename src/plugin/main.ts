@@ -1,6 +1,7 @@
 import type {
     PlaybackContext,
     PlayItemPayload,
+    RemoveHistoryEntryPayload,
     SetEpisodeOrderPayload,
     SetMediaTypePayload
 } from "../shared/messages";
@@ -8,7 +9,7 @@ import type { AddonManifest, StremioAddon } from "../shared/addons";
 
 import { MESSAGE_NAMES } from "../shared/messages";
 import { loadEnabledAddonStreams, parseAddonManifest, parseAddons } from "../shared/addons";
-import { parseWatchHistory, recordPlayback } from "../shared/history";
+import { parseWatchHistory, recordPlayback, removeHistoryEntry } from "../shared/history";
 import {
     buildStremioStreamUrl,
     findClosestQualityStream,
@@ -445,6 +446,15 @@ event.on("iina.window-loaded", () => {
             parseEpisodeOrder((data as SetEpisodeOrderPayload)?.episodeOrder)
         );
         preferences.sync();
+    });
+    sidebar.onMessage(MESSAGE_NAMES.RemoveHistoryEntry, (data) => {
+        const id = (data as RemoveHistoryEntryPayload)?.id;
+        if (typeof id !== "string" || !id) return;
+        // Re-read rather than trusting the cached copy; a Trakt sync may have replaced it.
+        watchHistory = removeHistoryEntry(parseWatchHistory(preferences.get("watchHistory")), id);
+        preferences.set("watchHistory", watchHistory);
+        preferences.sync();
+        sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history: watchHistory });
     });
     sidebar.onMessage(MESSAGE_NAMES.RequestConfiguration, () => {
         watchHistory = parseWatchHistory(preferences.get("watchHistory"));

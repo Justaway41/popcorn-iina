@@ -231,6 +231,7 @@
     SetMediaType: "setMediaType",
     SetEpisodeOrder: "setEpisodeOrder",
     HistoryUpdated: "historyUpdated",
+    RemoveHistoryEntry: "removeHistoryEntry",
     ShowNextEpisode: "showNextEpisode"
   };
   // Info.json
@@ -939,8 +940,11 @@
     if (failedSources > 0)
       fragment.appendChild(addonWarning(failedSources, "catalog"));
     if (!query && watchHistory.length > 0) {
-      fragment.appendChild(historySection(watchHistory.slice(0, 6), true));
-      fragment.appendChild(contentHeading("Trending"));
+      const history = historySection(watchHistory.slice(0, 6), true);
+      const heading = contentHeading("Trending");
+      history.dataset.historyChrome = "";
+      heading.dataset.historyChrome = "";
+      fragment.append(history, heading);
     }
     fragment.appendChild(mediaGrid(items.map((media) => mediaCard(media, media.name, media.releaseInfo, () => {
       if (media.type === "series")
@@ -966,8 +970,36 @@
     section.className = "history-section";
     if (showAll)
       section.appendChild(contentHeading("Recently Watched", renderHistory));
-    section.appendChild(mediaGrid(entries.map((entry) => mediaCard(entry.media, entry.media.name, entry.episode ? `S${pad(entry.episode.season)}E${pad(entry.episode.episode)} · ${entry.episode.name}` : entry.media.releaseInfo, () => void openHistoryEntry(entry), entry.watched, entry.progress))));
+    section.appendChild(mediaGrid(entries.map((entry) => removableSlot(entry, mediaCard(entry.media, entry.media.name, entry.episode ? `S${pad(entry.episode.season)}E${pad(entry.episode.episode)} · ${entry.episode.name}` : entry.media.releaseInfo, () => void openHistoryEntry(entry), entry.watched, entry.progress)))));
     return section;
+  }
+  function removableSlot(entry, card) {
+    const slot = document.createElement("div");
+    slot.className = "card-slot";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "card-remove";
+    remove.textContent = "×";
+    remove.title = `Remove ${entry.media.name} from Recently Watched`;
+    remove.setAttribute("aria-label", remove.title);
+    remove.setAttribute("data-clickable", "");
+    remove.addEventListener("click", () => removeFromHistory(entry, slot));
+    slot.append(card, remove);
+    return slot;
+  }
+  function removeFromHistory(entry, slot) {
+    watchHistory = watchHistory.filter((item) => item.id !== entry.id);
+    iina.postMessage(MESSAGE_NAMES.RemoveHistoryEntry, { id: entry.id });
+    slot.remove();
+    if (watchHistory.length > 0)
+      return;
+    if (view.kind === "history") {
+      renderEmpty("Nothing watched yet.");
+      return;
+    }
+    ui.content.querySelectorAll("[data-history-chrome]").forEach((node) => node.remove());
+    if (view.kind === "home" && !view.query)
+      ui.title.textContent = "Trending";
   }
   function contentHeading(title, action) {
     const heading = document.createElement("div");

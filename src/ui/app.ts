@@ -422,8 +422,12 @@ function renderMedia(items: Media[], query: string, failedSources = 0): void {
     const fragment = document.createDocumentFragment();
     if (failedSources > 0) fragment.appendChild(addonWarning(failedSources, "catalog"));
     if (!query && watchHistory.length > 0) {
-        fragment.appendChild(historySection(watchHistory.slice(0, 6), true));
-        fragment.appendChild(contentHeading("Trending"));
+        // Both only exist because history is non-empty, so both go when the last entry is removed.
+        const history = historySection(watchHistory.slice(0, 6), true);
+        const heading = contentHeading("Trending");
+        history.dataset.historyChrome = "";
+        heading.dataset.historyChrome = "";
+        fragment.append(history, heading);
     }
     fragment.appendChild(mediaGrid(items.map((media) => mediaCard(
         media,
@@ -455,7 +459,7 @@ function historySection(entries: WatchHistoryEntry[], showAll: boolean): HTMLEle
     const section = document.createElement("section");
     section.className = "history-section";
     if (showAll) section.appendChild(contentHeading("Recently Watched", renderHistory));
-    section.appendChild(mediaGrid(entries.map((entry) => mediaCard(
+    section.appendChild(mediaGrid(entries.map((entry) => removableSlot(entry, mediaCard(
         entry.media,
         entry.media.name,
         entry.episode
@@ -464,8 +468,42 @@ function historySection(entries: WatchHistoryEntry[], showAll: boolean): HTMLEle
         () => void openHistoryEntry(entry),
         entry.watched,
         entry.progress
-    ))));
+    )))));
     return section;
+}
+
+/**
+ * The card itself is a button, so the remove control cannot nest inside it; it rides alongside
+ * in a positioned slot instead.
+ */
+function removableSlot(entry: WatchHistoryEntry, card: HTMLButtonElement): HTMLElement {
+    const slot = document.createElement("div");
+    slot.className = "card-slot";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "card-remove";
+    remove.textContent = "×";
+    remove.title = `Remove ${entry.media.name} from Recently Watched`;
+    remove.setAttribute("aria-label", remove.title);
+    remove.setAttribute("data-clickable", "");
+    remove.addEventListener("click", () => removeFromHistory(entry, slot));
+    slot.append(card, remove);
+    return slot;
+}
+
+function removeFromHistory(entry: WatchHistoryEntry, slot: HTMLElement): void {
+    watchHistory = watchHistory.filter((item) => item.id !== entry.id);
+    iina.postMessage(MESSAGE_NAMES.RemoveHistoryEntry, { id: entry.id });
+    // Drop the one node rather than re-rendering, so the home view keeps its loaded catalogs.
+    slot.remove();
+    if (watchHistory.length > 0) return;
+    if (view.kind === "history") {
+        renderEmpty("Nothing watched yet.");
+        return;
+    }
+    // Leave the home view looking exactly as it would have rendered with no history at all.
+    ui.content.querySelectorAll("[data-history-chrome]").forEach((node) => node.remove());
+    if (view.kind === "home" && !view.query) ui.title.textContent = "Trending";
 }
 
 function contentHeading(title: string, action?: () => void): HTMLElement {
@@ -485,7 +523,7 @@ function contentHeading(title: string, action?: () => void): HTMLElement {
     return heading;
 }
 
-function mediaGrid(cards: HTMLButtonElement[]): HTMLElement {
+function mediaGrid(cards: HTMLElement[]): HTMLElement {
     const grid = document.createElement("div");
     grid.className = "media-grid";
     grid.append(...cards);

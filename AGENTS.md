@@ -120,6 +120,16 @@ no dot at all.
 
 `src/ui/app.ts` posts a `PlayItem` message. `src/plugin/main.ts` validates the URL, replaces playback through mpv, applies the media title, restores progress, records local history, and scrobbles when Trakt is connected. mpv events drive progress, watched thresholds, intro/credit controls, EOF handling, and next-episode presentation. The prefetched next stream uses the closest resolution to the current stream, with higher quality winning ties.
 
+### Watch history removal
+
+Recently Watched cards carry a remove control. Because a card is itself a `<button>`, the control
+cannot nest inside it and rides alongside in a `.card-slot` wrapper, positioned opposite the
+watched badge. `src/ui/app.ts` drops the one node and posts `RemoveHistoryEntry`; `src/plugin/main.ts`
+re-reads the stored history before filtering, persists, and broadcasts `HistoryUpdated`. Removal is
+immediate and has no undo. It is local only: `mergeWatchHistory` unions local and remote entries, so
+an entry that still exists on Trakt returns on the next sync. Suppressing that would need a
+tombstone list, which does not exist yet.
+
 ### Preferences and Trakt
 
 `src/ui/preferences.ts` manages addon manifests and Trakt device authorization in IINA's preference webview. Composite preferences are stored as arrays/objects, not JSON strings. `src/plugin/preferences.ts` migrates legacy stringified values. Playback-side Trakt work is serialized in `src/plugin/trakt.ts`; transport failures must never interrupt playback, and local history remains the fallback.
@@ -227,8 +237,12 @@ As of 2026-08-07:
   - The uninstall-crash fix. It removes repeating timers from both plugin runtime entries, moves
     playback monitoring to mpv events, and changes approved Trakt links in Settings to
     copy-to-clipboard because the preference webview has no safe native-open event.
-- Both still await manual IINA verification; nothing has been pushed, tagged, or released.
+  - Watch-history removal, described under its own runtime-flow section above.
 - The uninstall symptom was confirmed as an IINA 1.4.4 `SIGTRAP` in `JavascriptAPIPreferences.get(_:)` invoked by the old global polling timer during plugin teardown.
+- `.media-card` must keep `display: block` and `width: 100%`. It is a `<button>`, so as soon as it
+  stops being the direct grid item (as it does inside `.card-slot`) an intrinsic width takes over
+  and the poster image's natural size blows out the grid. Chrome shrink-to-fits and hides this;
+  IINA's WebKit does not, so headless checks cannot catch that class of regression.
 - Loading skeletons mirror the geometry they resolve into rather than reusing one poster grid;
   `getSkeletonCells` names the bands per view and the heights in `ui/sidebar.css` are matched to
   the real elements, so content does not move when a fetch resolves. Changing a row's box model

@@ -43,6 +43,14 @@ export function recordPlayback(
     return [entry, ...entries.filter((item) => item.id !== id)].slice(0, MAX_HISTORY_ITEMS);
 }
 
+export function removeHistoryEntry(
+    entries: WatchHistoryEntry[],
+    id: string
+): WatchHistoryEntry[] {
+    if (!id) return entries;
+    return entries.filter((entry) => entry.id !== id);
+}
+
 export function getHistoryEntry(
     entries: WatchHistoryEntry[],
     context: PlaybackContext

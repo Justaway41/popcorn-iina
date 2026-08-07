@@ -258,6 +258,11 @@
     };
     return [entry, ...entries.filter((item) => item.id !== id)].slice(0, MAX_HISTORY_ITEMS);
   }
+  function removeHistoryEntry(entries, id) {
+    if (!id)
+      return entries;
+    return entries.filter((entry) => entry.id !== id);
+  }
   function parseEntry(value) {
     const item = getRecord2(value);
     const media = parseMedia(item?.media);

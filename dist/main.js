@@ -7,6 +7,7 @@
     SetMediaType: "setMediaType",
     SetEpisodeOrder: "setEpisodeOrder",
     HistoryUpdated: "historyUpdated",
+    RemoveHistoryEntry: "removeHistoryEntry",
     ShowNextEpisode: "showNextEpisode"
   };
 
@@ -170,6 +171,11 @@
       progress
     };
     return [entry, ...entries.filter((item) => item.id !== id)].slice(0, MAX_HISTORY_ITEMS);
+  }
+  function removeHistoryEntry(entries, id) {
+    if (!id)
+      return entries;
+    return entries.filter((entry) => entry.id !== id);
   }
   function parseEntry(value) {
     const item = getRecord2(value);
@@ -1457,6 +1463,15 @@
     sidebar.onMessage(MESSAGE_NAMES.SetEpisodeOrder, (data) => {
       preferences.set("episodeOrder", parseEpisodeOrder(data?.episodeOrder));
       preferences.sync();
+    });
+    sidebar.onMessage(MESSAGE_NAMES.RemoveHistoryEntry, (data) => {
+      const id = data?.id;
+      if (typeof id !== "string" || !id)
+        return;
+      watchHistory = removeHistoryEntry(parseWatchHistory(preferences.get("watchHistory")), id);
+      preferences.set("watchHistory", watchHistory);
+      preferences.sync();
+      sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history: watchHistory });
     });
     sidebar.onMessage(MESSAGE_NAMES.RequestConfiguration, () => {
       watchHistory = parseWatchHistory(preferences.get("watchHistory"));
