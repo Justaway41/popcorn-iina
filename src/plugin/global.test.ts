@@ -6,15 +6,16 @@ test("global entry avoids the missing undefined identifier", () => {
     expect(source).not.toMatch(/\bundefined\b/);
 });
 
-test("global entry opens validated external-link requests natively", () => {
+test("global entry does not poll preferences while the plugin can unload", () => {
     const source = readFileSync(new URL("./global.ts", import.meta.url), "utf8");
+    const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
     const info = JSON.parse(readFileSync(
         new URL("../../Info.json", import.meta.url),
         "utf8"
     ));
-    expect(source).toContain("parseTraktExternalLinkRequest");
-    expect(source).toContain("utils.open(url)");
-    expect(info.preferenceDefaults.externalLinkRequest).toEqual({});
+    expect(`${source}\n${mainSource}`).not.toContain("setInterval(");
+    expect(source).not.toContain("externalLinkRequest");
+    expect(info.preferenceDefaults).not.toHaveProperty("externalLinkRequest");
 });
 
 test("release workflow runs tests before packaging", () => {

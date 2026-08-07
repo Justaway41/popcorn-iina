@@ -1,14 +1,20 @@
 import { expect, test } from "bun:test";
 
 import {
+    buildNextEpisodeDetail,
+    buildRowMeta,
+    buildStreamSummary,
     getAudioBadge,
+    getDefaultTier,
+    getTierRowCap,
+    getSkeletonCells,
+    getVaryingStreamFields,
+    stripSeriesPrefix,
     getCacheBadge,
     getEpisodeOrderButtonId,
     getEpisodeOrderLabel,
-    getOpenSeasonNumbers,
     getProgressDisplay,
     getSizeSortControl,
-    getSubtitleBadge,
     mergeSettledCatalogResults,
     replaceRequest
 } from "./app";
@@ -41,15 +47,6 @@ test("keeps the stream list rendered while IINA opens playback", () => {
     expect(appSource).not.toContain("Opening stream in IINA...");
 });
 
-test("keeps expanded numeric seasons for an episode-list re-render", () => {
-    const open = getOpenSeasonNumbers([
-        { open: true, dataset: { season: "1" } },
-        { open: false, dataset: { season: "2" } },
-        { open: true, dataset: { season: "invalid" } }
-    ]);
-
-    expect([...open]).toEqual([1]);
-});
 
 test("replacing a request aborts the previous request only", () => {
     const previous = new AbortController();
@@ -82,21 +79,6 @@ test("formats single, multiple, and unknown audio languages", () => {
     });
 });
 
-test("combines embedded and external English subtitle availability", () => {
-    expect(getSubtitleBadge(["English"], false)).toEqual({
-        label: "EN Subs",
-        title: "English subtitles available",
-        state: "yes"
-    });
-    expect(getSubtitleBadge(null, true).state).toBe("yes");
-    expect(getSubtitleBadge(["Spanish"], null).state).toBe("no");
-    expect(getSubtitleBadge(null, false).state).toBe("no");
-    expect(getSubtitleBadge(null, null)).toEqual({
-        label: "Subs ?",
-        title: "Subtitle availability unknown",
-        state: "unknown"
-    });
-});
 
 test("labels verified and unknown cache states", () => {
     expect(getCacheBadge(true)).toEqual({
@@ -126,4 +108,118 @@ test("shows progress only for unfinished entries with an exact position", () => 
     expect(getProgressDisplay(null, false)).toBeNull();
     expect(getProgressDisplay(42.25, false)).toEqual({ percent: 42, label: "42% watched" });
     expect(getProgressDisplay(95, true)).toBeNull();
+});
+
+const stream = (over: Partial<{
+    addonName: string; cached: boolean | null; source: string;
+    audioLanguages: string[]; seeders: number | null; resolution: string; size: string;
+}> = {}) => ({
+    addonName: "AIOStreams",
+    cached: null as boolean | null,
+    source: "WEB-DL",
+    audioLanguages: [] as string[],
+    seeders: null as number | null,
+    resolution: "1080p",
+    size: "5 GB",
+    ...over
+});
+
+test("hoists only the fields every stream agrees on", () => {
+    const sameEverywhere = [
+        stream({ cached: false, source: "WEBRip" }),
+        stream({ cached: false, source: "WEBRip" })
+    ];
+    expect(getVaryingStreamFields(sameEverywhere)).toEqual({
+        addon: false, cache: false, source: false
+    });
+
+    const mixed = [
+        stream({ cached: true, source: "WEBRip" }),
+        stream({ cached: false, source: "BluRay", addonName: "Comet" })
+    ];
+    expect(getVaryingStreamFields(mixed)).toEqual({ addon: true, cache: true, source: true });
+});
+
+test("summarizes constants and leaves varying facts to the rows", () => {
+    const streams = [stream({ cached: false, source: "WEBRip" }), stream({ cached: false, source: "WEBRip" })];
+    expect(buildStreamSummary(streams, getVaryingStreamFields(streams), true))
+        .toBe("2 streams · AIOStreams · EN subs · WEBRip · none cached");
+
+    const mixed = [stream({ cached: true }), stream({ cached: false, source: "BluRay" })];
+    expect(buildStreamSummary(mixed, getVaryingStreamFields(mixed), null)).toBe("2 streams · AIOStreams");
+});
+
+test("keeps every ready stream visible before the show-more control", () => {
+    expect(getTierRowCap(14)).toBe(14);
+    expect(getTierRowCap(0)).toBe(5);
+    expect(getTierRowCap(40)).toBe(15);
+});
+
+test("opens the highest tier that can play without downloading", () => {
+    const tiers = [
+        { resolution: "2160p", streams: [{ cached: false }, { cached: false }] },
+        { resolution: "1080p", streams: [{ cached: true }] },
+        { resolution: "720p", streams: [{ cached: true }] }
+    ];
+    expect(getDefaultTier(tiers, null)).toBe("1080p");
+    // a tier the user opened earlier wins while it still has streams
+    expect(getDefaultTier(tiers, "720p")).toBe("720p");
+    expect(getDefaultTier(tiers, "480p")).toBe("1080p");
+    // nothing cached anywhere falls back to the largest tier
+    expect(getDefaultTier([
+        { resolution: "2160p", streams: [{ cached: false }] },
+        { resolution: "1080p", streams: [{ cached: false }, { cached: false }] }
+    ], null)).toBe("1080p");
+});
+
+test("omits row metadata that the summary line already states", () => {
+    const hoisted = { addon: false, cache: false, source: false };
+    expect(buildRowMeta(stream({ audioLanguages: ["German"] }), hoisted)).toBe("German");
+    expect(buildRowMeta(stream(), hoisted)).toBe("");
+
+    const varying = { addon: true, cache: true, source: true };
+    expect(buildRowMeta(stream({ audioLanguages: ["German"], addonName: "Comet" }), varying))
+        .toBe("WEB-DL · German · Comet");
+});
+
+test("shows seeders only when the stream is not already cached", () => {
+    const varying = { addon: false, cache: true, source: false };
+    expect(buildRowMeta(stream({ cached: true, seeders: 42 }), varying)).toBe("");
+    expect(buildRowMeta(stream({ cached: false, seeders: 42 }), varying)).toBe("42 seeders");
+});
+
+test("drops a series prefix the header already shows", () => {
+    const pattern = /^\s*Dark[\s(]*(?:\d{4}\)?)?[\s\-–·()]*(?:s0?3\s*[.\s]?e0?4|s0?3|0?3x0?4|season\s*0?3)?[\s\-–·]*/i;
+    expect(stripSeriesPrefix("Dark · S03E04 · WEBRip · x265-NTb", pattern)).toBe("WEBRip · x265-NTb");
+    expect(stripSeriesPrefix("Dark S03 · WEB-DL Kitsune", pattern)).toBe("WEB-DL Kitsune");
+    // never blank a row out entirely
+    expect(stripSeriesPrefix("Dark S03E04", pattern)).toBe("Dark S03E04");
+    expect(stripSeriesPrefix("Some Other Release", pattern)).toBe("Some Other Release");
+    // an orphaned bracket or dash left by the removal must not survive
+    expect(stripSeriesPrefix("Dark (2017) S03E04 ( NF · WEB-DL", pattern)).toBe("NF · WEB-DL");
+    expect(stripSeriesPrefix("Dark (2017) - S03E04 - The Origin [WEBDL]", pattern)).toBe("The Origin [WEBDL]");
+});
+
+test("skeleton stands in for the bands the view resolves into", () => {
+    // posters only on the home grid
+    expect(getSkeletonCells("grid")).toEqual(Array(6).fill("sk-tile"));
+    // every list view arrives as summary, then an open tier heading, then rows
+    expect(getSkeletonCells("rows").slice(0, 3)).toEqual(["sk-summary", "sk-tier", "sk-row"]);
+    // the next-episode card is reserved only when one was asked for
+    expect(getSkeletonCells("rows", true)[0]).toBe("sk-lead");
+    expect(getSkeletonCells("rows", false)).not.toContain("sk-lead");
+    expect(getSkeletonCells("rows", true).length).toBe(getSkeletonCells("rows").length + 1);
+    // the episode list leads with the season chip strip and uses its own shorter row
+    expect(getSkeletonCells("episodes")[0]).toBe("sk-chips");
+    expect(getSkeletonCells("episodes").slice(1)).toEqual(Array(8).fill("sk-erow"));
+    // stream bands must never leak into the episode shape - their heights differ
+    expect(getSkeletonCells("episodes")).not.toContain("sk-summary");
+    expect(getSkeletonCells("episodes")).not.toContain("sk-row");
+});
+
+test("states everything on the standalone next-episode row", () => {
+    expect(buildNextEpisodeDetail({
+        resolution: "2160p", source: "WEB-DL", size: "12 GB",
+        cached: true, audioLanguages: ["English"]
+    })).toBe("2160p · WEB-DL · English · 12 GB · Ready");
 });

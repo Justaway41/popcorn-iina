@@ -15,6 +15,7 @@ import {
 import { parseWatchHistory } from "../shared/history";
 import {
     mergeWatchHistory,
+    parseTraktExternalLinkRequest,
     parseTraktState,
     pollDeviceToken,
     requestDeviceCode,
@@ -89,7 +90,11 @@ traktSync.addEventListener("click", () => void syncTraktNow());
 traktDisconnect.addEventListener("click", disconnectTrakt);
 externalLinks.forEach((link) => link.addEventListener("click", (event) => {
     event.preventDefault();
-    requestExternalLink(link.href);
+    void copyExternalLink(link.href).then((copied) => {
+        traktStatus.textContent = copied
+            ? "Link copied. Paste it into your browser."
+            : "Could not copy the link. Right-click it and choose Copy Link.";
+    });
 }));
 
 void loadPreferences();
@@ -313,9 +318,11 @@ async function connectTrakt(): Promise<void> {
         const code = await requestDeviceCode(browserTransport, trakt);
         if (revision !== traktRevision) return;
         traktDevice.hidden = false;
-        traktDevice.textContent = `Enter ${code.userCode} at trakt.tv/activate`;
         const activation = `${code.verificationUrl.replace(/\/$/, "")}/${encodeURIComponent(code.userCode)}`;
-        requestExternalLink(activation);
+        const copied = await copyExternalLink(activation);
+        traktDevice.textContent = copied
+            ? `Enter ${code.userCode} at trakt.tv/activate · Link copied`
+            : `Open ${activation} in your browser`;
         traktStatus.textContent = "Waiting for Trakt authorization…";
         const connected = await pollDeviceToken(
             browserTransport,
@@ -345,8 +352,15 @@ async function connectTrakt(): Promise<void> {
     }
 }
 
-function requestExternalLink(url: string): void {
-    preferences.set("externalLinkRequest", { url });
+async function copyExternalLink(url: string): Promise<boolean> {
+    const safeUrl = parseTraktExternalLinkRequest({ url });
+    if (!safeUrl) return false;
+    try {
+        await navigator.clipboard.writeText(safeUrl);
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 async function syncTraktNow(): Promise<void> {

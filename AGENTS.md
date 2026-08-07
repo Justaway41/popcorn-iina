@@ -21,16 +21,20 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `1.0.5`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.0.0`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
 - movie, TV, and anime discovery and search;
 - folded season and serial episode browsing;
 - multiple enabled Stremio addon manifests;
-- direct HTTP(S) stream selection, size sorting, quality matching, language and subtitle badges;
-- cleaned AIOStreams/Comet-style titles with raw titles on hover;
-- tri-state cache metadata (`Cached`, `Uncached`, `Cache ?`) and seeders when providers expose them;
+- direct HTTP(S) stream selection grouped into resolution tiers, cached-first ordering, size sorting;
+- cleaned AIOStreams/Comet-style titles with raw titles on hover, with the series/episode prefix
+  the header already shows removed from each row;
+- constants hoisting: facts identical on every stream move to one summary line, only what varies
+  stays on the rows;
+- tri-state cache state shown as a dot (ready / will download / not reported) and seeders when
+  providers expose them;
 - local recent/watch progress plus optional user-supplied Trakt credentials;
 - skip intro, end-credit next-episode control, and closest-quality next stream;
 - IINA sidebar, overlay, menu shortcut (`Shift+P`), window title, and display-sleep prevention.
@@ -59,7 +63,7 @@ Open the owner file and its test first. Follow imports only when the actual flow
 | Local watch history and progress | `src/shared/history.ts` | `src/shared/history.test.ts` |
 | Trakt state, OAuth device flow, sync, scrobbling | `src/shared/trakt.ts` | `src/shared/trakt.test.ts` |
 | Player/sidebar message contracts | `src/shared/messages.ts` | callers in `src/plugin/main.ts` and `src/ui/app.ts` |
-| Sidebar discovery, seasons, episodes, streams, recent UI | `src/ui/app.ts` | `src/ui/app.test.ts`, `src/ui/sidebar.ts` |
+| Sidebar discovery, season chips, episodes, stream tiers, recent UI | `src/ui/app.ts` | `src/ui/app.test.ts`, `src/ui/sidebar.ts` |
 | Preferences UI for addons and Trakt | `src/ui/preferences.ts` | `src/ui/preferences.test.ts`, `ui/preferences.html` |
 | Private addon URL reveal behavior | `src/ui/addon-url-visibility.ts` | `src/ui/preferences.test.ts` |
 | Sidebar presentation | `ui/sidebar.css`, `ui/sidebar.html` | `src/ui/app.ts` |
@@ -77,13 +81,40 @@ Open the owner file and its test first. Follow imports only when the actual flow
 
 ### Discovery and series
 
-`src/ui/app.ts` queries Cinemeta and enabled addon catalogs, then uses `src/shared/stremio.ts` and `src/shared/addons.ts` to normalize and merge results. TV/anime metadata is converted into episode rows grouped by folded seasons. Episode ordering is a persisted `oldest`/`newest` preference and re-rendering must preserve expanded seasons.
+`src/ui/app.ts` queries Cinemeta and enabled addon catalogs, then uses `src/shared/stremio.ts` and `src/shared/addons.ts` to normalize and merge results. TV/anime metadata is converted into episode rows. One season is shown at a time behind a
+horizontal season chip strip, so chrome height is constant no matter how many seasons a show
+has. The default season is the one holding the next unwatched episode, marked with a dot on its
+chip. Episode ordering is a persisted `oldest`/`newest` preference toggled from the chip row.
+Aired dates render only for unaired episodes; watched episodes dim and carry a check, and a
+partially watched episode carries a resume bar.
 
 ### Streams
 
-The sidebar requests stream resources from every enabled addon that declares stream support. `parsePlayableStreams` is the normalization boundary: keep direct HTTP(S) streams, prefer structured filename/size/cache/seeder data, use conservative text fallbacks, clean display titles, and retain `rawTitle`. Addon results remain source-labeled and are sorted by parsed file size only when the size toggle is used.
+The sidebar requests stream resources from every enabled addon that declares stream support.
+`parsePlayableStreams` is the normalization boundary: keep direct HTTP(S) streams, prefer
+structured filename/size/cache/seeder data, use conservative text fallbacks, clean display
+titles, and retain `rawTitle`.
 
-Subtitle availability combines embedded stream metadata with OpenSubtitles results when an IMDb-compatible video ID exists. Unknown metadata must remain visibly unknown rather than being guessed.
+`resolution` and `source` are separate fields and must stay that way. Resolution is parsed from
+`behaviorHints.filename` first, because a filename is a release name and is immune to the display
+labels an addon may substitute for literal tokens; a standard abbreviation (`UHD`/`QHD`/`FHD`/`HD`)
+is consulted only when no literal token exists. `4K` is normalized to `2160p` so one tier is not
+split across two spellings. A source type such as `WEBRip` must never occupy the resolution slot -
+doing so previously made `findClosestQualityStream` discard the stream and silently suppressed the
+next-episode row.
+
+Cache state is read from words before emoji, and an explicit negative wins. Decorative glyphs
+appear in addon labels and must never be able to invert a stated cache status.
+
+The list is grouped into resolution tiers with a per-tier ready count. Within a tier, cache state
+is the primary sort key and the size toggle is secondary, because availability, not file size,
+decides whether playback starts now. Each tier reveals as many rows as it has ready streams,
+bounded to 5-15.
+
+Subtitle availability combines embedded stream metadata with OpenSubtitles results when an
+IMDb-compatible video ID exists. Unknown metadata must remain visibly unknown rather than being
+guessed: a cached stream shows a filled dot, an uncached one a hollow ring, and an unreported one
+no dot at all.
 
 ### Playback and next episode
 
@@ -181,12 +212,27 @@ git var GIT_COMMITTER_IDENT
 
 ## Current Working State
 
-As of 2026-08-06:
+As of 2026-08-07:
 
-- `main` contains the stream-display metadata implementation: cleaned provider titles, raw-title tooltips, cache-state badges, seeders, and structured-first parsing.
-- The primary checkout has an uncommitted uninstall-crash fix awaiting manual IINA verification. It removes repeating timers from both plugin runtime entries, moves playback monitoring to mpv events, and changes approved Trakt links in Settings to copy-to-clipboard because the preference webview has no safe native-open event.
-- That crash fix passed 97 tests, TypeScript checks, packaging, and archive validation. Do not overwrite or partially revert it.
+- `main` contains version `2.0.0`, which bundles two changes that were developed separately but
+  shipped together because they touch the same files (`src/plugin/main.ts`, `Info.json`, and the
+  built bundles):
+  - The sidebar declutter, planned in `docs/superpowers/plans/2026-08-06-sidebar-declutter.md` and
+    measured against a live AIOStreams response. It splits `quality` into `resolution` + `source`,
+    makes cache parsing collision-proof, groups streams into resolution tiers with cached-first
+    ordering, replaces the season accordions with a season chip strip, and renames the `quality`
+    field on `PlaybackContext` / `ShowNextEpisodePayload` to `resolution`. `getOpenSeasonNumbers`,
+    `getSubtitleBadge`, `getQualityClass`, and `buildStreamDetails` were removed with their tests;
+    the stream badge CSS they used is gone.
+  - The uninstall-crash fix. It removes repeating timers from both plugin runtime entries, moves
+    playback monitoring to mpv events, and changes approved Trakt links in Settings to
+    copy-to-clipboard because the preference webview has no safe native-open event.
+- Both still await manual IINA verification; nothing has been pushed, tagged, or released.
 - The uninstall symptom was confirmed as an IINA 1.4.4 `SIGTRAP` in `JavascriptAPIPreferences.get(_:)` invoked by the old global polling timer during plugin teardown.
+- Loading skeletons mirror the geometry they resolve into rather than reusing one poster grid;
+  `getSkeletonCells` names the bands per view and the heights in `ui/sidebar.css` are matched to
+  the real elements, so content does not move when a fetch resolves. Changing a row's box model
+  means updating its `sk-*` counterpart.
 - The local test archive is `xyz.brbc.popcorn.iinaplugin.iinaplgz`; it is not published.
 - Existing untracked historical plan/spec files under `docs/superpowers/` are user-owned. Do not delete, rewrite, or stage them unless explicitly requested.
 

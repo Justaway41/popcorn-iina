@@ -288,7 +288,7 @@
   }
   function findClosestQualityStream(streams, previousQuality) {
     const known = streams.flatMap((stream, index) => {
-      const height = qualityHeight(stream.quality);
+      const height = qualityHeight(stream.resolution);
       return height === null ? [] : [{ stream, index, height }];
     });
     if (known.length === 0)
@@ -332,7 +332,8 @@
         title: cleanStreamTitle(rawTitle),
         rawTitle,
         url,
-        quality: metadata.match(/\b(4K|(?:2160|1440|1080|720|576|480|360|240)p|HDRip|BRRip|WEBRip)\b/i)?.[0] || "",
+        resolution: parseResolution(filename || metadata, metadata),
+        source: (filename.match(SOURCE_PATTERN) || metadata.match(SOURCE_PATTERN))?.[0] || "",
         size: structuredSize || metadata.match(/(?:💾\s*)?([\d.]+\s*[KMGT]B)\b/i)?.[1] || "",
         audioLanguages: parseAudioLanguages(metadata),
         subtitleLanguages: parseSubtitleLanguages(stream?.subtitles),
@@ -364,12 +365,35 @@
   }
   function cleanStreamTitle(value) {
     const firstLine = value.split(/\r?\n/).find((line) => line.trim())?.trim() || value.trim();
-    const cleaned = firstLine.replace(/\.(?:mkv|mp4|avi|mov|m4v|ts|m2ts|webm|iso)$/i, "").replace(/\p{Extended_Pictographic}|[\uFE0F\u200D]/gu, " ").replace(/[._]+/g, " ").replace(/\bH\s*26([45])\b/gi, "H.26$1").replace(/\bS(\d{1,2})\s+E(\d{1,3})\b/gi, "S$1E$2").replace(/\bWEB\s+DL\b/gi, "WEB-DL").replace(/\b(?:4K|(?:2160|1440|1080|720|576|480|360|240)p)\b/gi, " ").replace(/\b\d+(?:\.\d+)?\s*[KMGT]B\b/gi, " ").replace(/[|•]+/g, " ").replace(/\s+/g, " ").trim().replace(/\s+(?=(?:S\d{1,2}E\d{1,3}|WEB(?:-?DL|Rip)|BluRay|REMUX|HDR(?:10\+?)?|DV|DoVi|HEVC|AVC|AV1|x26[45]|H\.26[45])\b)/gi, " · ");
+    const cleaned = firstLine.replace(/\.(?:mkv|mp4|avi|mov|m4v|ts|m2ts|webm|iso)$/i, "").replace(/【[^】]*】/g, " ").replace(/\[[^\]]*(?:www\s*\.|\.com|\.net|\.org|\.tv|[一-鿿])[^\]]*\]/gi, " ").replace(/\b(?:www\s*\.\s*)?[a-z0-9-]+\s*\.\s*(?:com|net|org|tv|me)\b/gi, " ").replace(/\p{Extended_Pictographic}|[\uFE0F\u200D]/gu, " ").replace(/[._]+/g, " ").replace(/\bH\s*26([45])\b/gi, "H.26$1").replace(/\bS(\d{1,2})\s+E(\d{1,3})\b/gi, "S$1E$2").replace(/\bWEB\s+DL\b/gi, "WEB-DL").replace(/\b(?:4K|(?:2160|1440|1080|720|576|480|360|240)p)\b/gi, " ").replace(/\b\d+(?:\.\d+)?\s*[KMGT]B\b/gi, " ").replace(/[|•]+/g, " ").replace(/\s+/g, " ").trim().replace(/\s+(?=(?:S\d{1,2}E\d{1,3}|WEB(?:-?DL|Rip)|BluRay|REMUX|HDR(?:10\+?)?|DV|DoVi|HEVC|AVC|AV1|x26[45]|H\.26[45])\b)/gi, " · ");
     return cleaned || firstLine || "Stream";
   }
+  var RESOLUTION_PATTERN = /\b(4K|(?:2160|1440|1080|720|576|480|360|240)p)\b/i;
+  var SOURCE_PATTERN = /\b(WEB-?DL|WEBRip|BluRay|BRRip|HDRip|REMUX)\b/i;
+  var RESOLUTION_ALIASES = [
+    [/\b(?:4K\s*)?UHD\b/i, "2160p"],
+    [/\bQHD\b/i, "1440p"],
+    [/\bFHD\b/i, "1080p"],
+    [/\bHD\b/i, "720p"]
+  ];
+  function normalizeResolution(value) {
+    if (!value)
+      return "";
+    return /^4k$/i.test(value) ? "2160p" : value.toLowerCase();
+  }
+  function parseResolution(primary, metadata) {
+    const literal = normalizeResolution(primary.match(RESOLUTION_PATTERN)?.[0] || "");
+    if (literal)
+      return literal;
+    return RESOLUTION_ALIASES.find(([pattern]) => pattern.test(metadata))?.[1] || "";
+  }
   function parseCacheStatus(value) {
-    const cached = /⚡|🚀|\[[^\]\r\n]{1,20}\+\]|\bcached\b|\binstant\b/i.test(value);
-    const uncached = /⬇|⏳|\buncached\b|\bnot\s+ready\b|\bdownload(?:ing)?\b/i.test(value);
+    if (/\b(?:uncached|not\s+ready|download(?:ing)?)\b/i.test(value))
+      return false;
+    if (/\b(?:cached|instant|ready)\b/i.test(value))
+      return true;
+    const cached = /⚡|\[[^\]\r\n]{1,20}\+\]/.test(value);
+    const uncached = /⬇|⏳/.test(value);
     return cached === uncached ? null : cached;
   }
   function parseSeeders(value) {
@@ -450,17 +474,9 @@
     }
   }
   var TRAKT_API = "https://api.trakt.tv";
-  var TRAKT_ACCOUNT_URL = "https://trakt.tv/join";
-  var TRAKT_APPLICATIONS_URL = "https://app.trakt.tv/settings/apps/api";
   var MAX_HISTORY_ITEMS2 = 100;
   var TOKEN_REFRESH_WINDOW_MS = 60000;
   var DEFAULT_RETRY_MS = 60000;
-  function parseTraktExternalLinkRequest(value) {
-    const url = getString4(getRecord4(value)?.url);
-    if (url === TRAKT_ACCOUNT_URL || url === TRAKT_APPLICATIONS_URL)
-      return url;
-    return /^https:\/\/trakt\.tv\/activate\/[A-Za-z0-9_-]+$/.test(url) ? url : "";
-  }
   function apiHeaders(state) {
     return {
       Accept: "application/json",
@@ -799,9 +815,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "1.0.5",
+    version: "2.0.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 6,
+    ghVersion: 7,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -818,8 +834,7 @@
       mediaType: "movie",
       episodeOrder: "oldest",
       watchHistory: [],
-      trakt: {},
-      externalLinkRequest: {}
+      trakt: {}
     },
     permissions: [
       "network-request",
@@ -1090,7 +1105,7 @@
   var windowReady = false;
   var pendingShowSidebar = false;
   var sidebarVisible = false;
-  var playbackTimer = null;
+  var lastPlaybackTickAt = 0;
   var savedImageDisplayDuration = null;
   var savedPositionOnQuitFlag = null;
   var activePlaybackContext = null;
@@ -1153,18 +1168,23 @@
   }
   function startPlaybackMonitoring() {
     stopPlaybackMonitoring();
+    lastPlaybackTickAt = 0;
     startKeepAwake();
-    playbackTimer = setInterval(() => {
-      const playing = !mpv.getFlag("pause");
-      keepAwakeTick(playing);
-      const percent = mpv.getNumber("percent-pos");
-      if (playing && shouldSendWatchedStop(percent, traktStopSent)) {
-        sendTrakt("stop", percent);
-      }
-      if (playing && shouldSaveProgress(Date.now(), lastProgressSavedAt, PROGRESS_SAVE_INTERVAL_MS)) {
-        savePlaybackProgress();
-      }
-    }, PLAYBACK_TICK_INTERVAL_MS);
+  }
+  function updatePlaybackMonitoring() {
+    const now = Date.now();
+    if (now - lastPlaybackTickAt < PLAYBACK_TICK_INTERVAL_MS)
+      return;
+    lastPlaybackTickAt = now;
+    const playing = !mpv.getFlag("pause");
+    keepAwakeTick(playing);
+    const percent = mpv.getNumber("percent-pos");
+    if (playing && shouldSendWatchedStop(percent, traktStopSent)) {
+      sendTrakt("stop", percent);
+    }
+    if (playing && shouldSaveProgress(now, lastProgressSavedAt, PROGRESS_SAVE_INTERVAL_MS)) {
+      savePlaybackProgress();
+    }
   }
   function savePlaybackProgress(percent = mpv.getNumber("percent-pos")) {
     const context = activePlaybackContext;
@@ -1195,10 +1215,7 @@
     sendTrakt(forceStop || percent >= 90 ? "stop" : "pause", percent);
   }
   function stopPlaybackMonitoring() {
-    if (playbackTimer) {
-      clearInterval(playbackTimer);
-      playbackTimer = null;
-    }
+    lastPlaybackTickAt = 0;
     stopKeepAwake();
   }
   function prepareSplash() {
@@ -1268,7 +1285,7 @@
       media: context.media,
       episode: nextEpisode,
       episodes: context.episodes,
-      quality: context.quality
+      resolution: context.resolution
     });
   }
   function clearIntro() {
@@ -1295,6 +1312,10 @@
     });
     overlay.setClickable(true);
     overlay.show();
+  }
+  function handleTimePositionChanged() {
+    updateIntroOverlay();
+    updatePlaybackMonitoring();
   }
   async function resolvePlaybackIntervals(revision) {
     const duration = mpv.getNumber("duration");
@@ -1343,7 +1364,7 @@
       const result = await loadEnabledAddonStreams(parseAddons(preferences.get("addons"), preferences.get("addonManifestUrl")), loadAddonManifest, async (addon) => parsePlayableStreams(await requestJson(buildStremioStreamUrl(addon.manifestUrl, context.media.type, next.id))));
       if (!isCurrentRequest(revision, playbackRevision))
         return;
-      const stream = findClosestQualityStream(result.streams, context.quality || "");
+      const stream = findClosestQualityStream(result.streams, context.resolution || "");
       if (!stream)
         return;
       prefetchedNextEpisode = {
@@ -1353,7 +1374,7 @@
           media: context.media,
           episode: next,
           episodes: context.episodes,
-          quality: stream.quality
+          resolution: stream.resolution
         }
       };
       updateIntroOverlay();
@@ -1501,7 +1522,7 @@
     if (mpv.getFlag("eof-reached"))
       reachedNaturalEof = true;
   });
-  event.on("mpv.time-pos.changed", updateIntroOverlay);
+  event.on("mpv.time-pos.changed", handleTimePositionChanged);
   event.on("mpv.end-file", handleEndFile);
   event.on("iina.window-will-close", () => {
     stopPlaybackMonitoring();

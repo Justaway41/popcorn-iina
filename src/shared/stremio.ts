@@ -32,7 +32,10 @@ export interface PlayableStream {
     title: string;
     rawTitle: string;
     url: string;
-    quality: string;
+    /** Vertical resolution only, normalized to `2160p`/`1080p`/…; never a source type. */
+    resolution: string;
+    /** Release source such as `WEB-DL` or `BluRay`. Display only. */
+    source: string;
     size: string;
     audioLanguages: string[];
     subtitleLanguages: string[] | null;
@@ -146,6 +149,38 @@ export function sortStreamsBySize<T extends { size: string }>(
         .map(({ stream }) => stream);
 }
 
+// Availability outranks file size: an uncached stream costs a download wait no matter how
+// good it is. Unknown sits between the two because it may still play instantly.
+function cacheRank(cached: boolean | null): number {
+    return cached === true ? 0 : cached === null ? 1 : 2;
+}
+
+export function sortStreamsForPlayback<T extends { size: string; cached: boolean | null }>(
+    streams: T[],
+    order: SizeOrder
+): T[] {
+    // Array.prototype.sort is stable, so the size ordering survives inside each cache rank.
+    return sortStreamsBySize(streams, order)
+        .sort((a, b) => cacheRank(a.cached) - cacheRank(b.cached));
+}
+
+export function groupStreamsByResolution<T extends { resolution: string }>(
+    streams: T[]
+): Array<{ resolution: string; streams: T[] }> {
+    const groups = new Map<string, T[]>();
+    streams.forEach((stream) => {
+        const key = RESOLUTION_ORDER.includes(stream.resolution) ? stream.resolution : "other";
+        groups.set(key, [...(groups.get(key) || []), stream]);
+    });
+    const rank = (value: string) => {
+        const index = RESOLUTION_ORDER.indexOf(value);
+        return index < 0 ? RESOLUTION_ORDER.length : index;
+    };
+    return [...groups.entries()]
+        .sort((a, b) => rank(a[0]) - rank(b[0]))
+        .map(([resolution, items]) => ({ resolution, streams: items }));
+}
+
 export function parseByteSize(value: string): number | null {
     const match = value.trim().match(/^([\d.]+)\s*([KMGT])B$/i);
     if (!match) return null;
@@ -154,12 +189,12 @@ export function parseByteSize(value: string): number | null {
     return Number.isFinite(amount) && amount >= 0 ? amount * 1024 ** power : null;
 }
 
-export function findClosestQualityStream<T extends { quality: string }>(
+export function findClosestQualityStream<T extends { resolution: string }>(
     streams: T[],
     previousQuality: string
 ): T | null {
     const known = streams.flatMap((stream, index) => {
-        const height = qualityHeight(stream.quality);
+        const height = qualityHeight(stream.resolution);
         return height === null ? [] : [{ stream, index, height }];
     });
     if (known.length === 0) return null;
@@ -310,9 +345,8 @@ export function parsePlayableStreams(value: unknown): PlayableStream[] {
             title: cleanStreamTitle(rawTitle),
             rawTitle,
             url,
-            quality: metadata.match(
-                /\b(4K|(?:2160|1440|1080|720|576|480|360|240)p|HDRip|BRRip|WEBRip)\b/i
-            )?.[0] || "",
+            resolution: parseResolution(filename || metadata, metadata),
+            source: (filename.match(SOURCE_PATTERN) || metadata.match(SOURCE_PATTERN))?.[0] || "",
             size: structuredSize || metadata.match(/(?:💾\s*)?([\d.]+\s*[KMGT]B)\b/i)?.[1] || "",
             audioLanguages: parseAudioLanguages(metadata),
             subtitleLanguages: parseSubtitleLanguages(stream?.subtitles),
@@ -355,6 +389,11 @@ function cleanStreamTitle(value: string): string {
     const firstLine = value.split(/\r?\n/).find((line) => line.trim())?.trim() || value.trim();
     const cleaned = firstLine
         .replace(/\.(?:mkv|mp4|avi|mov|m4v|ts|m2ts|webm|iso)$/i, "")
+        // Release-site tags. Only bracket blocks that look like a site are dropped, so
+        // plain group tags such as [SubsPlease] survive.
+        .replace(/【[^】]*】/g, " ")
+        .replace(/\[[^\]]*(?:www\s*\.|\.com|\.net|\.org|\.tv|[一-鿿])[^\]]*\]/gi, " ")
+        .replace(/\b(?:www\s*\.\s*)?[a-z0-9-]+\s*\.\s*(?:com|net|org|tv|me)\b/gi, " ")
         .replace(/\p{Extended_Pictographic}|[\uFE0F\u200D]/gu, " ")
         .replace(/[._]+/g, " ")
         .replace(/\bH\s*26([45])\b/gi, "H.26$1")
@@ -372,9 +411,40 @@ function cleanStreamTitle(value: string): string {
     return cleaned || firstLine || "Stream";
 }
 
+const RESOLUTION_PATTERN = /\b(4K|(?:2160|1440|1080|720|576|480|360|240)p)\b/i;
+const SOURCE_PATTERN = /\b(WEB-?DL|WEBRip|BluRay|BRRip|HDRip|REMUX)\b/i;
+
+// Standard abbreviations. Addons may label a resolution instead of stating it, so these
+// are a last resort consulted only when no explicit token exists anywhere.
+const RESOLUTION_ALIASES: Array<[RegExp, string]> = [
+    [/\b(?:4K\s*)?UHD\b/i, "2160p"],
+    [/\bQHD\b/i, "1440p"],
+    [/\bFHD\b/i, "1080p"],
+    [/\bHD\b/i, "720p"]
+];
+
+export const RESOLUTION_ORDER = ["2160p", "1440p", "1080p", "720p", "576p", "480p", "360p", "240p"];
+
+function normalizeResolution(value: string): string {
+    if (!value) return "";
+    return /^4k$/i.test(value) ? "2160p" : value.toLowerCase();
+}
+
+// Prefer the filename: it is a release name and is immune to display decoration, while
+// `name`/`description` may carry addon-specific labels instead of literal tokens.
+function parseResolution(primary: string, metadata: string): string {
+    const literal = normalizeResolution(primary.match(RESOLUTION_PATTERN)?.[0] || "");
+    if (literal) return literal;
+    return RESOLUTION_ALIASES.find(([pattern]) => pattern.test(metadata))?.[1] || "";
+}
+
+// Words state cache status; emoji only decorate it. A decorative glyph must never be able
+// to invert an explicit statement, so words are checked first and an explicit negative wins.
 function parseCacheStatus(value: string): boolean | null {
-    const cached = /⚡|🚀|\[[^\]\r\n]{1,20}\+\]|\bcached\b|\binstant\b/i.test(value);
-    const uncached = /⬇|⏳|\buncached\b|\bnot\s+ready\b|\bdownload(?:ing)?\b/i.test(value);
+    if (/\b(?:uncached|not\s+ready|download(?:ing)?)\b/i.test(value)) return false;
+    if (/\b(?:cached|instant|ready)\b/i.test(value)) return true;
+    const cached = /⚡|\[[^\]\r\n]{1,20}\+\]/.test(value);
+    const uncached = /⬇|⏳/.test(value);
     return cached === uncached ? null : cached;
 }
 

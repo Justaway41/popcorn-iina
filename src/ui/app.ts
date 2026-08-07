@@ -27,7 +27,8 @@ import {
     parseMediaTypePreference,
     parsePlayableStreams,
     sortEpisodes,
-    sortStreamsBySize,
+    sortStreamsForPlayback,
+    groupStreamsByResolution,
     mergeMediaResults
 } from "../shared/stremio";
 
@@ -104,17 +105,6 @@ export function getSizeSortControl(
         : { label: "Smallest File", next: "largest" };
 }
 
-export function getOpenSeasonNumbers(
-    sections: ArrayLike<{ open: boolean; dataset: { season?: string } }>
-): Set<number> {
-    const openSeasons = new Set<number>();
-    Array.from(sections).forEach((section) => {
-        const season = Number(section.dataset.season);
-        if (section.open && Number.isFinite(season)) openSeasons.add(season);
-    });
-    return openSeasons;
-}
-
 export function initApp(): void {
     iina.onMessage(MESSAGE_NAMES.Configuration, (data) => {
         applyConfiguration(data);
@@ -131,7 +121,7 @@ export function initApp(): void {
         if (!payload?.media || !payload?.episode || !Array.isArray(payload?.episodes)) {
             return;
         }
-        void loadStreams(payload.media, payload.episode, payload.episodes, payload.quality, true);
+        void loadStreams(payload.media, payload.episode, payload.episodes, payload.resolution, true);
     });
 
     document.addEventListener("DOMContentLoaded", () => {
@@ -217,7 +207,7 @@ async function loadHome(query: string): Promise<void> {
     ui.searchInput.value = query;
     ui.back.classList.add("hidden");
     ui.title.textContent = query ? "Search Results" : watchHistory.length > 0 ? "Browse" : "Trending";
-    setLoading();
+    setLoading("grid");
     retryAction = () => loadHome(query);
 
     try {
@@ -329,7 +319,7 @@ async function loadEpisodes(media: Media): Promise<void> {
     view = { kind: "episodes", media };
     ui.back.classList.remove("hidden");
     ui.title.textContent = media.name;
-    setLoading();
+    setLoading("episodes");
     retryAction = () => loadEpisodes(media);
 
     try {
@@ -371,7 +361,7 @@ async function loadStreams(
     view = { kind: "streams", media, episode, episodes };
     ui.back.classList.remove("hidden");
     ui.title.textContent = episode ? formatEpisodeTitle(media, episode) : media.name;
-    setLoading();
+    setLoading("rows", recommendNext);
     retryAction = () => loadStreams(media, episode, episodes, preferredQuality, recommendNext);
 
     try {
@@ -600,78 +590,146 @@ function mediaIdentity(media: Media): string {
     return media.imdbId || media.providerId || media.id;
 }
 
+/**
+ * Season holding the next episode still to watch, so arriving at a show lands on
+ * something actionable instead of the first season of a series already finished.
+ */
+export function getDefaultSeason(
+    episodes: Episode[],
+    watched: (episode: Episode) => boolean,
+    available: (episode: Episode) => boolean = isEpisodeAvailable
+): number {
+    const ordered = sortEpisodes(episodes, "oldest");
+    const next = ordered.find((episode) => available(episode) && !watched(episode));
+    return (next || ordered[0])?.season ?? 0;
+}
+
 function renderEpisodes(
     media: Media,
     episodes: Episode[],
     focusOrder?: EpisodeOrder,
-    openSeasons: ReadonlySet<number> = new Set()
+    selectedSeason?: number
 ): void {
     if (episodes.length === 0) {
         renderEmpty("No episodes found.");
         return;
     }
-    const fragment = document.createDocumentFragment();
-    const orderControl = document.createElement("div");
-    orderControl.className = "episode-order";
-    ["oldest", "newest"].forEach((order) => {
-        const value = order as EpisodeOrder;
-        const button = document.createElement("button");
-        button.type = "button";
-        button.id = getEpisodeOrderButtonId(value);
-        button.textContent = getEpisodeOrderLabel(value);
-        button.classList.toggle("active", episodeOrder === value);
-        button.setAttribute("aria-pressed", String(episodeOrder === value));
-        button.addEventListener("click", () => {
-            if (episodeOrder === value) return;
-            const expanded = getOpenSeasonNumbers(
-                ui.content.querySelectorAll<HTMLDetailsElement>("details.season")
-            );
-            episodeOrder = value;
-            iina.postMessage(MESSAGE_NAMES.SetEpisodeOrder, { episodeOrder });
-            renderEpisodes(media, episodes, value, expanded);
-        });
-        orderControl.appendChild(button);
-    });
-    fragment.appendChild(orderControl);
     const seasons = new Map<number, Episode[]>();
     sortEpisodes(episodes, episodeOrder).forEach((episode) => {
-        const values = seasons.get(episode.season) || [];
-        values.push(episode);
-        seasons.set(episode.season, values);
+        seasons.set(episode.season, [...(seasons.get(episode.season) || []), episode]);
+    });
+    const numbers = [...seasons.keys()].sort((a, b) => a - b);
+    const nextSeason = getDefaultSeason(episodes, (episode) => isWatched(episode.id));
+    const active = selectedSeason !== undefined && seasons.has(selectedSeason)
+        ? selectedSeason
+        : seasons.has(nextSeason) ? nextSeason : numbers[0];
+
+    const fragment = document.createDocumentFragment();
+    const nav = document.createElement("div");
+    nav.className = "season-nav";
+    nav.setAttribute("role", "tablist");
+    nav.setAttribute("aria-label", "Seasons");
+    numbers.forEach((season) => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "season-chip";
+        chip.textContent = season === 0 ? "Specials" : `S${season}`;
+        chip.title = season === 0 ? "Specials" : `Season ${season}`;
+        chip.setAttribute("role", "tab");
+        chip.setAttribute("aria-selected", String(season === active));
+        chip.classList.toggle("active", season === active);
+        if (season === nextSeason) chip.dataset.next = "";
+        chip.setAttribute("data-clickable", "");
+        chip.addEventListener("click", () => {
+            if (season === active) return;
+            renderEpisodes(media, episodes, undefined, season);
+        });
+        nav.appendChild(chip);
     });
 
-    seasons.forEach((values, season) => {
-        const section = document.createElement("details");
-        section.className = "season";
-        section.dataset.season = String(season);
-        section.open = openSeasons.has(season);
-        const heading = document.createElement("summary");
-        const seasonName = document.createElement("span");
-        seasonName.textContent = `Season ${season}`;
-        const count = document.createElement("span");
-        count.className = "season-count";
-        count.textContent = `${values.length} ${values.length === 1 ? "episode" : "episodes"}`;
-        heading.append(seasonName, count);
-        section.appendChild(heading);
-        const list = document.createElement("div");
-        list.className = "row-list";
-        values.forEach((episode) => {
-            const available = isEpisodeAvailable(episode);
-            list.appendChild(rowButton(
-                `S${pad(episode.season)}E${pad(episode.episode)} · ${episode.name}`,
-                available
-                    ? formatDate(episode.aired)
-                    : `Available ${formatDate(episode.aired)}`,
-                () => void loadStreams(media, episode, episodes),
-                !available,
-                available && isWatched(episode.id)
-            ));
-        });
-        section.appendChild(list);
-        fragment.appendChild(section);
+    const order = episodeOrder === "newest" ? "oldest" : "newest";
+    const orderButton = document.createElement("button");
+    orderButton.type = "button";
+    orderButton.className = "season-order";
+    orderButton.id = getEpisodeOrderButtonId(episodeOrder);
+    orderButton.textContent = episodeOrder === "newest" ? "NEWEST ↑" : "OLDEST ↓";
+    orderButton.title = `Sort ${getEpisodeOrderLabel(order)}`;
+    orderButton.setAttribute("data-clickable", "");
+    orderButton.addEventListener("click", () => {
+        episodeOrder = order;
+        iina.postMessage(MESSAGE_NAMES.SetEpisodeOrder, { episodeOrder });
+        renderEpisodes(media, episodes, order, active);
     });
+    nav.appendChild(orderButton);
+    fragment.appendChild(nav);
+
+    const list = document.createElement("div");
+    list.className = "episode-list";
+    (seasons.get(active) || []).forEach((episode) => {
+        list.appendChild(episodeRow(media, episode, episodes));
+    });
+    fragment.appendChild(list);
     showContent(fragment);
     if (focusOrder) document.getElementById(getEpisodeOrderButtonId(focusOrder))?.focus();
+}
+
+function episodeRow(media: Media, episode: Episode, episodes: Episode[]): HTMLButtonElement {
+    const available = isEpisodeAvailable(episode);
+    const watched = available && isWatched(episode.id);
+    const progress = available && !watched ? getEntryProgress(episode.id) : null;
+    const resume = getProgressDisplay(progress, watched);
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "erow";
+    button.disabled = !available;
+    button.classList.toggle("erow--watched", watched);
+    if (available) {
+        button.setAttribute("data-clickable", "");
+        button.addEventListener("click", () => void loadStreams(media, episode, episodes));
+    }
+
+    const number = document.createElement("span");
+    number.className = "erow-num";
+    number.textContent = pad(episode.episode);
+    const name = document.createElement("span");
+    name.className = "erow-name";
+    name.textContent = episode.name;
+    name.title = episode.name;
+    button.append(number, name);
+
+    // Aired dates are noise on episodes already out; only a future date informs anything.
+    if (!available) {
+        const airs = document.createElement("span");
+        airs.className = "erow-airs";
+        const date = formatDate(episode.aired);
+        airs.textContent = date ? `Airs ${date}` : "Unaired";
+        button.appendChild(airs);
+    } else if (watched) {
+        const mark = document.createElement("span");
+        mark.className = "erow-mark";
+        mark.textContent = "✓";
+        mark.title = "Watched";
+        button.appendChild(mark);
+    } else {
+        button.appendChild(document.createElement("span"));
+    }
+
+    if (resume) {
+        const track = document.createElement("span");
+        track.className = "erow-bar";
+        track.title = resume.label;
+        track.setAttribute("role", "progressbar");
+        track.setAttribute("aria-valuemin", "0");
+        track.setAttribute("aria-valuemax", "100");
+        track.setAttribute("aria-valuenow", String(resume.percent));
+        const fill = document.createElement("span");
+        fill.style.width = `${resume.percent}%`;
+        track.appendChild(fill);
+        button.appendChild(track);
+        button.classList.add("erow--resuming");
+    }
+    return button;
 }
 
 function renderStreams(
@@ -699,17 +757,18 @@ function renderStreams(
                 media,
                 ...(episode ? { episode } : {}),
                 episodes,
-                quality: stream.quality
+                resolution: stream.resolution
             },
             ...(resumePercent === null ? {} : { resumePercent })
         });
     };
+    const varying = getVaryingStreamFields(streams);
     if (recommendNext) {
         const recommendation = findClosestQualityStream(streams, preferredQuality || "");
         if (recommendation) {
             const button = rowButton(
                 "Play Next Episode",
-                buildStreamDetails(recommendation, englishSubtitles),
+                buildNextEpisodeDetail(recommendation),
                 () => playStream(recommendation),
                 false,
                 false,
@@ -719,86 +778,258 @@ function renderStreams(
             content.appendChild(button);
         }
     }
+    const seriesPrefix = episode ? buildSeriesPrefixPattern(media, episode) : null;
+
     let sizeOrder: SizeOrder = "largest";
-    const sort = document.createElement("div");
-    sort.className = "stream-sort";
+    const summary = document.createElement("div");
+    summary.className = "stream-summary";
+    const summaryText = document.createElement("span");
     const sortButton = document.createElement("button");
     sortButton.type = "button";
-    sortButton.className = "active";
+    sortButton.className = "stream-sort-toggle";
     sortButton.title = "Toggle file-size sorting";
     sortButton.setAttribute("data-clickable", "");
-    sort.appendChild(sortButton);
+    summary.append(summaryText, sortButton);
+
     const list = document.createElement("div");
-    list.className = "row-list";
     const renderList = () => {
-        const control = getSizeSortControl(sizeOrder);
-        sortButton.textContent = control.label;
-        list.replaceChildren(...sortStreamsBySize(streams, sizeOrder).map((stream) => (
-            rowButton(
-                stream.title,
-                buildStreamDetails(stream, englishSubtitles),
-                () => playStream(stream),
-                false,
-                false,
-                stream.rawTitle
-            )
-        )));
+        sortButton.textContent = getSizeSortControl(sizeOrder).label;
+        summaryText.textContent = buildStreamSummary(streams, varying, englishSubtitles);
+        list.replaceChildren(...buildStreamTiers(
+            streams,
+            sizeOrder,
+            varying,
+            seriesPrefix,
+            playStream
+        ));
     };
     sortButton.addEventListener("click", () => {
         sizeOrder = getSizeSortControl(sizeOrder).next;
         renderList();
     });
     renderList();
-    content.append(sort, list);
+    content.append(summary, list);
     showContent(content);
 }
 
-function buildStreamDetails(stream: AddonStream, englishSubtitles: boolean | null): DocumentFragment {
-    const fragment = document.createDocumentFragment();
-    const addon = document.createElement("span");
-    addon.className = "stream-addon";
-    addon.textContent = stream.addonName;
-    fragment.appendChild(addon);
-    const cacheDetails = getCacheBadge(stream.cached);
-    const cache = document.createElement("span");
-    cache.className = `stream-meta-badge stream-cache--${cacheDetails.state}`;
-    cache.textContent = cacheDetails.label;
-    cache.title = cacheDetails.title;
-    fragment.appendChild(cache);
-    if (stream.seeders !== null) {
-        const seeders = document.createElement("span");
-        seeders.className = "stream-meta-badge stream-seeders";
-        seeders.textContent = `${stream.seeders} seeders`;
-        seeders.title = "Reported torrent seeders";
-        fragment.appendChild(seeders);
-    }
-    if (stream.quality) {
-        const quality = document.createElement("span");
-        quality.className = `stream-quality ${getQualityClass(stream.quality)}`;
-        quality.textContent = stream.quality;
-        fragment.appendChild(quality);
-    }
-    const audioDetails = getAudioBadge(stream.audioLanguages);
-    const audio = document.createElement("span");
-    audio.className = "stream-meta-badge stream-audio";
-    audio.textContent = audioDetails.label;
-    audio.title = audioDetails.title;
-    fragment.appendChild(audio);
-
-    const subtitleDetails = getSubtitleBadge(stream.subtitleLanguages, englishSubtitles);
-    const subtitles = document.createElement("span");
-    subtitles.className = `stream-meta-badge stream-subtitles stream-subtitles--${subtitleDetails.state}`;
-    subtitles.textContent = subtitleDetails.label;
-    subtitles.title = subtitleDetails.title;
-    fragment.appendChild(subtitles);
-    if (stream.size) {
-        const size = document.createElement("span");
-        size.className = "stream-size";
-        size.textContent = stream.size;
-        fragment.appendChild(size);
-    }
-    return fragment;
+/** The next-episode row stands alone, so it states everything rather than hoisting. */
+export function buildNextEpisodeDetail(
+    stream: { resolution: string; source: string; size: string; cached: boolean | null; audioLanguages: string[] }
+): string {
+    return [
+        stream.resolution,
+        stream.source,
+        stream.audioLanguages.length > 0 ? getAudioBadge(stream.audioLanguages).label : "",
+        stream.size,
+        stream.cached === true ? "Ready" : stream.cached === false ? "Not cached" : ""
+    ].filter(Boolean).join(" · ");
 }
+
+/** Which per-stream facts actually differ. Anything identical on every row is chrome. */
+export function getVaryingStreamFields(
+    streams: Array<{ addonName: string; cached: boolean | null; source: string }>
+): { addon: boolean; cache: boolean; source: boolean } {
+    const differs = <T>(read: (stream: typeof streams[number]) => T) =>
+        new Set(streams.map(read)).size > 1;
+    return {
+        addon: differs((stream) => stream.addonName),
+        cache: differs((stream) => stream.cached),
+        source: differs((stream) => stream.source)
+    };
+}
+
+export function buildStreamSummary(
+    streams: Array<{ addonName: string; cached: boolean | null; source: string }>,
+    varying: { addon: boolean; cache: boolean; source: boolean },
+    englishSubtitles: boolean | null
+): string {
+    const first = streams[0];
+    const parts = [`${streams.length} ${streams.length === 1 ? "stream" : "streams"}`];
+    if (!varying.addon && first) parts.push(first.addonName);
+    // Unknown must stay distinct from a negative: absent, not silently equal to "no".
+    if (englishSubtitles === true) parts.push("EN subs");
+    else if (englishSubtitles === false) parts.push("no EN subs");
+    if (!varying.source && first?.source) parts.push(first.source);
+    if (!varying.cache && first) {
+        parts.push(first.cached === null
+            ? "cache unknown"
+            : first.cached ? "all ready" : "none cached");
+    }
+    return parts.join(" · ");
+}
+
+/**
+ * Rows visible before "show more". Follows the ready count so every instantly playable
+ * stream stays visible, with a floor for context and a ceiling to avoid a scroll wall.
+ */
+export function getTierRowCap(readyCount: number): number {
+    return Math.min(Math.max(readyCount, 5), 15);
+}
+
+/** Season/episode prefix the header already shows, so rows need not repeat it. */
+function buildSeriesPrefixPattern(media: Media, episode: Episode): RegExp | null {
+    const name = media.name.trim();
+    if (!name) return null;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+    const season = String(episode.season);
+    const number = String(episode.episode);
+    return new RegExp(
+        `^\\s*${escaped}[\\s(]*(?:\\d{4}\\)?)?[\\s\\-–·()]*` +
+        `(?:s0?${season}\\s*[.\\s]?e0?${number}|s0?${season}|0?${season}x0?${number}` +
+        `|season\\s*0?${season})?[\\s\\-–·]*`,
+        "i"
+    );
+}
+
+function buildStreamTiers(
+    streams: AddonStream[],
+    sizeOrder: SizeOrder,
+    varying: { addon: boolean; cache: boolean; source: boolean },
+    seriesPrefix: RegExp | null,
+    playStream: (stream: AddonStream) => void
+): HTMLElement[] {
+    const tiers = groupStreamsByResolution(streams);
+    const openTier = getDefaultTier(tiers);
+    return tiers.map(({ resolution, streams: tierStreams }) => {
+        const ordered = sortStreamsForPlayback(tierStreams, sizeOrder);
+        const ready = ordered.filter((stream) => stream.cached === true).length;
+        const cap = getTierRowCap(ready);
+
+        const section = document.createElement("details");
+        section.className = "tier";
+        section.dataset.tier = resolution;
+        section.open = resolution === openTier;
+
+        const heading = document.createElement("summary");
+        const name = document.createElement("span");
+        name.className = "tier-name";
+        name.textContent = resolution;
+        heading.appendChild(name);
+        if (ready > 0) {
+            const readyLabel = document.createElement("span");
+            readyLabel.className = "tier-ready";
+            readyLabel.textContent = `${ready} ready`;
+            readyLabel.title = `${ready} ready to play without downloading`;
+            heading.appendChild(readyLabel);
+        }
+        const count = document.createElement("span");
+        count.className = "tier-count";
+        count.textContent = String(ordered.length);
+        heading.appendChild(count);
+        section.appendChild(heading);
+
+        const body = document.createElement("div");
+        body.className = "tier-body";
+        const draw = (limit: number) => {
+            body.replaceChildren(...ordered.slice(0, limit).map((stream) => (
+                streamRow(stream, varying, seriesPrefix, () => playStream(stream))
+            )));
+            if (limit < ordered.length) {
+                const more = document.createElement("button");
+                more.type = "button";
+                more.className = "show-more";
+                more.textContent = `Show ${ordered.length - limit} more`;
+                more.setAttribute("data-clickable", "");
+                more.addEventListener("click", () => draw(ordered.length));
+                body.appendChild(more);
+            }
+        };
+        draw(cap);
+        section.appendChild(body);
+        section.addEventListener("toggle", () => {
+            if (section.open) lastOpenTier = resolution;
+        });
+        return section;
+    });
+}
+
+/**
+ * Highest tier holding a ready stream, so the default lands on something playable now.
+ * A tier the user opened earlier wins when it still has streams for this episode.
+ */
+export function getDefaultTier(
+    tiers: Array<{ resolution: string; streams: Array<{ cached: boolean | null }> }>,
+    remembered: string | null = lastOpenTier
+): string {
+    if (remembered && tiers.some(({ resolution }) => resolution === remembered)) return remembered;
+    const withReady = tiers.find(({ streams }) => streams.some((stream) => stream.cached === true));
+    if (withReady) return withReady.resolution;
+    return tiers.reduce(
+        (best, tier) => tier.streams.length > best.streams.length ? tier : best,
+        tiers[0]
+    )?.resolution || "";
+}
+
+function streamRow(
+    stream: AddonStream,
+    varying: { addon: boolean; cache: boolean; source: boolean },
+    seriesPrefix: RegExp | null,
+    action: () => void
+): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "srow";
+    button.setAttribute("data-clickable", "");
+    button.addEventListener("click", action);
+
+    if (varying.cache) {
+        const dot = document.createElement("span");
+        const state = stream.cached === true ? "ok" : stream.cached === false ? "warn" : "unknown";
+        dot.className = `dot dot--${state}`;
+        dot.title = getCacheBadge(stream.cached).title;
+        button.appendChild(dot);
+    } else {
+        button.classList.add("srow--nodot");
+    }
+
+    const main = document.createElement("span");
+    main.className = "srow-main";
+    const title = document.createElement("span");
+    title.className = "srow-title";
+    title.textContent = stripSeriesPrefix(stream.title, seriesPrefix);
+    title.title = stream.rawTitle;
+    main.appendChild(title);
+
+    const meta = buildRowMeta(stream, varying);
+    if (meta) {
+        const line = document.createElement("span");
+        line.className = "srow-meta";
+        line.textContent = meta;
+        main.appendChild(line);
+    }
+    button.appendChild(main);
+
+    const size = document.createElement("span");
+    size.className = "srow-size";
+    size.textContent = stream.size || "—";
+    button.appendChild(size);
+    if (stream.cached === false) button.classList.add("srow--uncached");
+    return button;
+}
+
+export function stripSeriesPrefix(title: string, pattern: RegExp | null): string {
+    if (!pattern) return title;
+    // Removing the prefix can leave an orphaned separator or bracket behind.
+    const stripped = title.replace(pattern, "").replace(/^[-–·(\s]+/, "").trim();
+    return stripped || title;
+}
+
+/** Second line, rendered only when it carries something the summary line does not. */
+export function buildRowMeta(
+    stream: { source: string; addonName: string; audioLanguages: string[]; cached: boolean | null; seeders: number | null },
+    varying: { addon: boolean; cache: boolean; source: boolean }
+): string {
+    const parts: string[] = [];
+    if (varying.source && stream.source) parts.push(stream.source);
+    if (stream.audioLanguages.length > 0) parts.push(getAudioBadge(stream.audioLanguages).label);
+    if (varying.addon) parts.push(stream.addonName);
+    // Seeders only predict a wait, so they matter only when the stream is not ready.
+    if (stream.cached !== true && stream.seeders !== null) parts.push(`${stream.seeders} seeders`);
+    return parts.join(" · ");
+}
+
+/** Remembered across episodes so a binge does not reset the chosen tier every time. */
+let lastOpenTier: string | null = null;
 
 export function getAudioBadge(languages: string[]): { label: string; title: string } {
     if (languages.length === 0) {
@@ -819,19 +1050,6 @@ export function getAudioBadge(languages: string[]): { label: string; title: stri
     };
 }
 
-export function getSubtitleBadge(
-    streamLanguages: string[] | null,
-    externalEnglishAvailable: boolean | null
-): { label: string; title: string; state: "yes" | "no" | "unknown" } {
-    if (streamLanguages?.includes("English") || externalEnglishAvailable === true) {
-        return { label: "EN Subs", title: "English subtitles available", state: "yes" };
-    }
-    if (streamLanguages !== null || externalEnglishAvailable === false) {
-        return { label: "No EN Subs", title: "English subtitles not found", state: "no" };
-    }
-    return { label: "Subs ?", title: "Subtitle availability unknown", state: "unknown" };
-}
-
 export function getCacheBadge(cached: boolean | null): {
     label: string;
     title: string;
@@ -846,16 +1064,6 @@ export function getCacheBadge(cached: boolean | null): {
     return { label: "Cache ?", title: "Cache status not provided", state: "unknown" };
 }
 
-function getQualityClass(quality: string): string {
-    const normalized = quality.toLowerCase();
-    if (normalized === "4k" || normalized === "2160p" || normalized === "1440p") {
-        return "stream-quality--uhd";
-    }
-    if (normalized === "1080p") return "stream-quality--fhd";
-    if (normalized === "720p") return "stream-quality--hd";
-    if (["576p", "480p", "360p", "240p"].includes(normalized)) return "stream-quality--sd";
-    return "stream-quality--other";
-}
 
 function rowButton(
     title: string,
@@ -899,10 +1107,58 @@ async function fetchJson(url: string, signal: AbortSignal): Promise<unknown> {
     return await response.json() as unknown;
 }
 
-function setLoading(): void {
-    ui.loading.classList.remove("hidden");
+/**
+ * The skeleton has to predict the shape it resolves into, or the page lurches on arrival.
+ * Only the home view returns posters; every other view resolves into the summary/tier/row stack.
+ */
+function setLoading(shape: SkeletonShape = "rows", leadCard = false): void {
+    ui.loading.className = `loading loading--${shape}`;
+    ui.loading.replaceChildren(...buildSkeleton(shape, leadCard));
     ui.content.classList.add("hidden");
     ui.error.classList.add("hidden");
+}
+
+/** Text runs per band, so a placeholder reads as text rather than as a solid slab. */
+const SKELETON_RUNS: Record<string, number> = {
+    "sk-tile": 0,
+    "sk-lead": 2,
+    "sk-summary": 2,
+    "sk-tier": 2,
+    "sk-row": 3,
+    "sk-chips": 4,
+    "sk-erow": 2
+};
+
+type SkeletonShape = "grid" | "rows" | "episodes";
+
+/**
+ * The band stack the skeleton stands in for. Heights live in the stylesheet and are matched to
+ * the real elements, so this order is what keeps content from moving when the fetch resolves.
+ * The lead card is reserved only when a next-episode recommendation was requested; it can still
+ * turn out to have no matching stream, in which case the list settles up by that one band.
+ */
+export function getSkeletonCells(shape: SkeletonShape, leadCard = false): string[] {
+    if (shape === "grid") return Array.from({ length: 6 }, () => "sk-tile");
+    if (shape === "episodes") {
+        return ["sk-chips", ...Array.from({ length: 8 }, () => "sk-erow")];
+    }
+    return [
+        ...(leadCard ? ["sk-lead"] : []),
+        "sk-summary",
+        "sk-tier",
+        ...Array.from({ length: 6 }, () => "sk-row")
+    ];
+}
+
+function buildSkeleton(shape: SkeletonShape, leadCard: boolean): HTMLElement[] {
+    return getSkeletonCells(shape, leadCard).map((className) => {
+        const node = document.createElement("div");
+        node.className = className;
+        for (let index = 0; index < (SKELETON_RUNS[className] || 0); index += 1) {
+            node.appendChild(document.createElement("span"));
+        }
+        return node;
+    });
 }
 
 function showContent(content: Node): void {

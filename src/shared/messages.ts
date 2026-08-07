@@ -16,7 +16,8 @@ export interface PlaybackContext {
     media: Media;
     episode?: Episode;
     episodes: Episode[];
-    quality?: string;
+    /** Vertical resolution of the stream being played, used to match the next episode. */
+    resolution?: string;
 }
 
 export interface PlayItemPayload {
@@ -49,5 +50,5 @@ export interface ShowNextEpisodePayload {
     media: Media;
     episode: Episode;
     episodes: Episode[];
-    quality?: string;
+    resolution?: string;
 }

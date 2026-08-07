@@ -50,7 +50,7 @@ const trakt = createIinaTraktClient(http, preferences, (error) => {
 let windowReady = false;
 let pendingShowSidebar = false;
 let sidebarVisible = false;
-let playbackTimer: ReturnType<typeof setInterval> | null = null;
+let lastPlaybackTickAt = 0;
 let savedImageDisplayDuration: string | null = null;
 let savedPositionOnQuitFlag: boolean | null = null;
 let activePlaybackContext: PlaybackContext | null = null;
@@ -114,22 +114,23 @@ function setWindowTitle(title: string): void {
 
 function startPlaybackMonitoring(): void {
     stopPlaybackMonitoring();
+    lastPlaybackTickAt = 0;
     startKeepAwake();
-    playbackTimer = setInterval(() => {
-        const playing = !mpv.getFlag("pause");
-        keepAwakeTick(playing);
-        const percent = mpv.getNumber("percent-pos");
-        if (playing && shouldSendWatchedStop(percent, traktStopSent)) {
-            sendTrakt("stop", percent);
-        }
-        if (playing && shouldSaveProgress(
-            Date.now(),
-            lastProgressSavedAt,
-            PROGRESS_SAVE_INTERVAL_MS
-        )) {
-            savePlaybackProgress();
-        }
-    }, PLAYBACK_TICK_INTERVAL_MS);
+}
+
+function updatePlaybackMonitoring(): void {
+    const now = Date.now();
+    if (now - lastPlaybackTickAt < PLAYBACK_TICK_INTERVAL_MS) return;
+    lastPlaybackTickAt = now;
+    const playing = !mpv.getFlag("pause");
+    keepAwakeTick(playing);
+    const percent = mpv.getNumber("percent-pos");
+    if (playing && shouldSendWatchedStop(percent, traktStopSent)) {
+        sendTrakt("stop", percent);
+    }
+    if (playing && shouldSaveProgress(now, lastProgressSavedAt, PROGRESS_SAVE_INTERVAL_MS)) {
+        savePlaybackProgress();
+    }
 }
 
 function savePlaybackProgress(percent = mpv.getNumber("percent-pos")): void {
@@ -167,10 +168,7 @@ function checkpointPlayback(forceStop = false): void {
 }
 
 function stopPlaybackMonitoring(): void {
-    if (playbackTimer) {
-        clearInterval(playbackTimer);
-        playbackTimer = null;
-    }
+    lastPlaybackTickAt = 0;
     stopKeepAwake();
 }
 
@@ -250,7 +248,7 @@ function handleEndFile(): void {
         media: context.media,
         episode: nextEpisode,
         episodes: context.episodes,
-        quality: context.quality
+        resolution: context.resolution
     });
 }
 
@@ -283,6 +281,11 @@ function updateIntroOverlay(): void {
     });
     overlay.setClickable(true);
     overlay.show();
+}
+
+function handleTimePositionChanged(): void {
+    updateIntroOverlay();
+    updatePlaybackMonitoring();
 }
 
 async function resolvePlaybackIntervals(revision: number): Promise<void> {
@@ -340,7 +343,7 @@ async function prefetchNextEpisode(revision: number): Promise<void> {
             ))
         );
         if (!isCurrentRequest(revision, playbackRevision)) return;
-        const stream = findClosestQualityStream(result.streams, context.quality || "");
+        const stream = findClosestQualityStream(result.streams, context.resolution || "");
         if (!stream) return;
         prefetchedNextEpisode = {
             url: stream.url,
@@ -350,7 +353,7 @@ async function prefetchNextEpisode(revision: number): Promise<void> {
                 media: context.media,
                 episode: next,
                 episodes: context.episodes,
-                quality: stream.quality
+                resolution: stream.resolution
             }
         };
         updateIntroOverlay();
@@ -511,7 +514,7 @@ event.on("mpv.pause.changed", () => {
 event.on("mpv.eof-reached.changed", () => {
     if (mpv.getFlag("eof-reached")) reachedNaturalEof = true;
 });
-event.on("mpv.time-pos.changed", updateIntroOverlay);
+event.on("mpv.time-pos.changed", handleTimePositionChanged);
 event.on("mpv.end-file", handleEndFile);
 event.on("iina.window-will-close", () => {
     stopPlaybackMonitoring();

@@ -327,6 +327,24 @@
       return difference || a.index - b.index;
     }).map(({ stream }) => stream);
   }
+  function cacheRank(cached) {
+    return cached === true ? 0 : cached === null ? 1 : 2;
+  }
+  function sortStreamsForPlayback(streams, order) {
+    return sortStreamsBySize(streams, order).sort((a, b) => cacheRank(a.cached) - cacheRank(b.cached));
+  }
+  function groupStreamsByResolution(streams) {
+    const groups = new Map;
+    streams.forEach((stream) => {
+      const key = RESOLUTION_ORDER.includes(stream.resolution) ? stream.resolution : "other";
+      groups.set(key, [...groups.get(key) || [], stream]);
+    });
+    const rank = (value) => {
+      const index = RESOLUTION_ORDER.indexOf(value);
+      return index < 0 ? RESOLUTION_ORDER.length : index;
+    };
+    return [...groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0])).map(([resolution, items]) => ({ resolution, streams: items }));
+  }
   function parseByteSize(value) {
     const match = value.trim().match(/^([\d.]+)\s*([KMGT])B$/i);
     if (!match)
@@ -337,7 +355,7 @@
   }
   function findClosestQualityStream(streams, previousQuality) {
     const known = streams.flatMap((stream, index) => {
-      const height = qualityHeight(stream.quality);
+      const height = qualityHeight(stream.resolution);
       return height === null ? [] : [{ stream, index, height }];
     });
     if (known.length === 0)
@@ -468,7 +486,8 @@
         title: cleanStreamTitle(rawTitle),
         rawTitle,
         url,
-        quality: metadata.match(/\b(4K|(?:2160|1440|1080|720|576|480|360|240)p|HDRip|BRRip|WEBRip)\b/i)?.[0] || "",
+        resolution: parseResolution(filename || metadata, metadata),
+        source: (filename.match(SOURCE_PATTERN) || metadata.match(SOURCE_PATTERN))?.[0] || "",
         size: structuredSize || metadata.match(/(?:💾\s*)?([\d.]+\s*[KMGT]B)\b/i)?.[1] || "",
         audioLanguages: parseAudioLanguages(metadata),
         subtitleLanguages: parseSubtitleLanguages(stream?.subtitles),
@@ -489,12 +508,36 @@
   }
   function cleanStreamTitle(value) {
     const firstLine = value.split(/\r?\n/).find((line) => line.trim())?.trim() || value.trim();
-    const cleaned = firstLine.replace(/\.(?:mkv|mp4|avi|mov|m4v|ts|m2ts|webm|iso)$/i, "").replace(/\p{Extended_Pictographic}|[\uFE0F\u200D]/gu, " ").replace(/[._]+/g, " ").replace(/\bH\s*26([45])\b/gi, "H.26$1").replace(/\bS(\d{1,2})\s+E(\d{1,3})\b/gi, "S$1E$2").replace(/\bWEB\s+DL\b/gi, "WEB-DL").replace(/\b(?:4K|(?:2160|1440|1080|720|576|480|360|240)p)\b/gi, " ").replace(/\b\d+(?:\.\d+)?\s*[KMGT]B\b/gi, " ").replace(/[|•]+/g, " ").replace(/\s+/g, " ").trim().replace(/\s+(?=(?:S\d{1,2}E\d{1,3}|WEB(?:-?DL|Rip)|BluRay|REMUX|HDR(?:10\+?)?|DV|DoVi|HEVC|AVC|AV1|x26[45]|H\.26[45])\b)/gi, " · ");
+    const cleaned = firstLine.replace(/\.(?:mkv|mp4|avi|mov|m4v|ts|m2ts|webm|iso)$/i, "").replace(/【[^】]*】/g, " ").replace(/\[[^\]]*(?:www\s*\.|\.com|\.net|\.org|\.tv|[一-鿿])[^\]]*\]/gi, " ").replace(/\b(?:www\s*\.\s*)?[a-z0-9-]+\s*\.\s*(?:com|net|org|tv|me)\b/gi, " ").replace(/\p{Extended_Pictographic}|[\uFE0F\u200D]/gu, " ").replace(/[._]+/g, " ").replace(/\bH\s*26([45])\b/gi, "H.26$1").replace(/\bS(\d{1,2})\s+E(\d{1,3})\b/gi, "S$1E$2").replace(/\bWEB\s+DL\b/gi, "WEB-DL").replace(/\b(?:4K|(?:2160|1440|1080|720|576|480|360|240)p)\b/gi, " ").replace(/\b\d+(?:\.\d+)?\s*[KMGT]B\b/gi, " ").replace(/[|•]+/g, " ").replace(/\s+/g, " ").trim().replace(/\s+(?=(?:S\d{1,2}E\d{1,3}|WEB(?:-?DL|Rip)|BluRay|REMUX|HDR(?:10\+?)?|DV|DoVi|HEVC|AVC|AV1|x26[45]|H\.26[45])\b)/gi, " · ");
     return cleaned || firstLine || "Stream";
   }
+  var RESOLUTION_PATTERN = /\b(4K|(?:2160|1440|1080|720|576|480|360|240)p)\b/i;
+  var SOURCE_PATTERN = /\b(WEB-?DL|WEBRip|BluRay|BRRip|HDRip|REMUX)\b/i;
+  var RESOLUTION_ALIASES = [
+    [/\b(?:4K\s*)?UHD\b/i, "2160p"],
+    [/\bQHD\b/i, "1440p"],
+    [/\bFHD\b/i, "1080p"],
+    [/\bHD\b/i, "720p"]
+  ];
+  var RESOLUTION_ORDER = ["2160p", "1440p", "1080p", "720p", "576p", "480p", "360p", "240p"];
+  function normalizeResolution(value) {
+    if (!value)
+      return "";
+    return /^4k$/i.test(value) ? "2160p" : value.toLowerCase();
+  }
+  function parseResolution(primary, metadata) {
+    const literal = normalizeResolution(primary.match(RESOLUTION_PATTERN)?.[0] || "");
+    if (literal)
+      return literal;
+    return RESOLUTION_ALIASES.find(([pattern]) => pattern.test(metadata))?.[1] || "";
+  }
   function parseCacheStatus(value) {
-    const cached = /⚡|🚀|\[[^\]\r\n]{1,20}\+\]|\bcached\b|\binstant\b/i.test(value);
-    const uncached = /⬇|⏳|\buncached\b|\bnot\s+ready\b|\bdownload(?:ing)?\b/i.test(value);
+    if (/\b(?:uncached|not\s+ready|download(?:ing)?)\b/i.test(value))
+      return false;
+    if (/\b(?:cached|instant|ready)\b/i.test(value))
+      return true;
+    const cached = /⚡|\[[^\]\r\n]{1,20}\+\]/.test(value);
+    const uncached = /⬇|⏳/.test(value);
     return cached === uncached ? null : cached;
   }
   function parseSeeders(value) {
@@ -590,9 +633,17 @@
     }
   }
   var TRAKT_API = "https://api.trakt.tv";
+  var TRAKT_ACCOUNT_URL = "https://trakt.tv/join";
+  var TRAKT_APPLICATIONS_URL = "https://app.trakt.tv/settings/apps/api";
   var MAX_HISTORY_ITEMS2 = 100;
   var TOKEN_REFRESH_WINDOW_MS = 60000;
   var DEFAULT_RETRY_MS = 60000;
+  function parseTraktExternalLinkRequest(value) {
+    const url = getString4(getRecord4(value)?.url);
+    if (url === TRAKT_ACCOUNT_URL || url === TRAKT_APPLICATIONS_URL)
+      return url;
+    return /^https:\/\/trakt\.tv\/activate\/[A-Za-z0-9_-]+$/.test(url) ? url : "";
+  }
   function apiHeaders(state) {
     return {
       Accept: "application/json",
@@ -956,9 +1007,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "1.0.5",
+    version: "2.0.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 6,
+    ghVersion: 7,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -975,8 +1026,7 @@
       mediaType: "movie",
       episodeOrder: "oldest",
       watchHistory: [],
-      trakt: {},
-      externalLinkRequest: {}
+      trakt: {}
     },
     permissions: [
       "network-request",
@@ -1045,7 +1095,9 @@
   traktDisconnect.addEventListener("click", disconnectTrakt);
   externalLinks.forEach((link) => link.addEventListener("click", (event) => {
     event.preventDefault();
-    requestExternalLink(link.href);
+    copyExternalLink(link.href).then((copied) => {
+      traktStatus.textContent = copied ? "Link copied. Paste it into your browser." : "Could not copy the link. Right-click it and choose Copy Link.";
+    });
   }));
   loadPreferences();
   async function loadPreferences() {
@@ -1255,9 +1307,9 @@
       if (revision !== traktRevision)
         return;
       traktDevice.hidden = false;
-      traktDevice.textContent = `Enter ${code.userCode} at trakt.tv/activate`;
       const activation = `${code.verificationUrl.replace(/\/$/, "")}/${encodeURIComponent(code.userCode)}`;
-      requestExternalLink(activation);
+      const copied = await copyExternalLink(activation);
+      traktDevice.textContent = copied ? `Enter ${code.userCode} at trakt.tv/activate · Link copied` : `Open ${activation} in your browser`;
       traktStatus.textContent = "Waiting for Trakt authorization…";
       const connected = await pollDeviceToken(browserTransport, trakt, code, (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)));
       if (revision !== traktRevision)
@@ -1284,8 +1336,16 @@
         renderTrakt();
     }
   }
-  function requestExternalLink(url) {
-    preferences.set("externalLinkRequest", { url });
+  async function copyExternalLink(url) {
+    const safeUrl = parseTraktExternalLinkRequest({ url });
+    if (!safeUrl)
+      return false;
+    try {
+      await navigator.clipboard.writeText(safeUrl);
+      return true;
+    } catch {
+      return false;
+    }
   }
   async function syncTraktNow() {
     if (!trakt.tokens)

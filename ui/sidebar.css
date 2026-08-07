@@ -8,6 +8,9 @@
     --muted: #98989f;
     --accent: #22b8e6;
     --red: #d94a45;
+    --ok: #3bd37f;
+    --warn: #eab131;
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
 }
 
 * { box-sizing: border-box; }
@@ -44,14 +47,14 @@ button { color: inherit; }
 .brand strong { font-size: 14px; }
 .brand span { color: var(--muted); font-size: 10px; }
 
-.type-switch, .episode-order, .stream-sort {
+.type-switch {
     display: flex;
     padding: 2px;
     border-radius: 7px;
     background: var(--surface);
 }
 
-.type-switch button, .episode-order button, .stream-sort button {
+.type-switch button {
     border: 0;
     border-radius: 5px;
     padding: 5px 8px;
@@ -61,14 +64,12 @@ button { color: inherit; }
     font-size: 11px;
 }
 
-.type-switch button.active, .episode-order button.active, .stream-sort button.active {
+.type-switch button.active {
     background: #3a3a3f;
     color: var(--text);
 }
-.episode-order button:focus-visible, .stream-sort button:focus-visible {
-    outline: 1px solid var(--accent);
-    outline-offset: 1px;
-}
+
+.type-switch button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 
 .search { padding: 10px 14px 8px; }
 .search input {
@@ -209,28 +210,6 @@ section h3 { padding: 5px 7px; }
 }
 .content-heading button:hover, .content-heading button:focus-visible { background: var(--surface); outline: none; }
 .history-section { margin-bottom: 16px; }
-.season { margin-bottom: 4px; }
-.season summary {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    padding: 8px 7px;
-    border-radius: 6px;
-    color: var(--muted);
-    cursor: pointer;
-    font-size: 10px;
-    font-weight: 650;
-    letter-spacing: .08em;
-    list-style: none;
-    text-transform: uppercase;
-}
-.season summary::-webkit-details-marker { display: none; }
-.season summary::before { content: "›"; font-size: 17px; line-height: 10px; }
-.season[open] summary::before { transform: rotate(90deg); }
-.season summary:hover, .season summary:focus-visible { background: var(--surface); color: var(--text); outline: none; }
-.season-count { margin-left: auto; color: var(--muted); font-weight: 500; letter-spacing: 0; text-transform: none; }
-.season .row-list { margin-bottom: 7px; }
-.stream-sort { width: max-content; margin: 0 2px 6px auto; }
 .row-list { display: flex; flex-direction: column; gap: 2px; }
 
 .row {
@@ -256,70 +235,6 @@ section h3 { padding: 5px 7px; }
 .row-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .row-title { overflow: hidden; color: var(--text); font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
 .row-detail { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 18px; color: var(--muted); font-size: 11px; }
-.stream-quality, .stream-meta-badge {
-    display: inline-flex;
-    align-items: center;
-    min-height: 17px;
-    padding: 1px 6px;
-    border: 1px solid currentColor;
-    border-radius: 999px;
-    font-size: 10px;
-    font-weight: 750;
-    letter-spacing: .03em;
-    line-height: 1;
-}
-.stream-quality--uhd {
-    background: rgba(40, 150, 255, 0.16);
-    color: #43a7ff;
-}
-.stream-quality--fhd {
-    background: rgba(35, 190, 112, 0.14);
-    color: #3bd37f;
-}
-.stream-quality--hd {
-    background: rgba(234, 177, 49, 0.16);
-    color: #eab131;
-}
-.stream-quality--sd,
-.stream-quality--other {
-    background: rgba(160, 160, 170, 0.12);
-    color: #aaaab3;
-}
-.stream-size { color: var(--muted); }
-.stream-meta-badge {
-    border-color: var(--line);
-    background: rgba(160, 160, 170, 0.08);
-    color: var(--muted);
-}
-.stream-subtitles--yes {
-    border-color: rgba(59, 211, 127, 0.55);
-    background: rgba(35, 190, 112, 0.12);
-    color: #3bd37f;
-}
-.stream-subtitles--no, .stream-subtitles--unknown { opacity: .72; }
-.stream-cache--cached {
-    border-color: rgba(59, 211, 127, 0.55);
-    background: rgba(35, 190, 112, 0.12);
-    color: #3bd37f;
-}
-.stream-cache--uncached {
-    border-color: rgba(234, 177, 49, 0.55);
-    background: rgba(234, 177, 49, 0.12);
-    color: #eab131;
-}
-.stream-cache--unknown { opacity: .72; }
-.stream-addon {
-    display: inline-block;
-    max-width: 110px;
-    overflow: hidden;
-    padding: 1px 6px;
-    border-radius: 999px;
-    background: rgba(160, 160, 170, 0.14);
-    color: var(--muted);
-    font-size: 10px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
 .addon-warning {
     margin: 4px 2px 8px;
     padding: 6px 8px;
@@ -331,15 +246,86 @@ section h3 { padding: 5px 7px; }
 .row-play { color: var(--accent); font-size: 11px; }
 .row-play--watched { color: #3bd37f; font-size: 13px; font-weight: 750; }
 
-.loading { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-.loading div {
-    aspect-ratio: 2 / 3;
+/* Skeletons mirror the geometry they resolve into: poster tiles for the home grid,
+   and the summary / tier-heading / row stack for every list view. Shimmer sits on the
+   text runs rather than the containers, so the placeholder reads as text, not as slabs. */
+.loading--grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.sk-tile { aspect-ratio: 2 / 3; border-radius: 7px; }
+
+.loading--rows { display: flex; flex-direction: column; }
+/* Mirrors .next-episode box model exactly (1px border + 9px/10px padding + 8px margin) so the
+   list below lands in the same place. Kept neutral: a skeleton should not promise the accent. */
+.sk-lead {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 5px;
+    height: 56.2px;
+    margin-bottom: 8px;
+    padding: 9px 10px;
+    border: 1px solid var(--line);
     border-radius: 7px;
+}
+.sk-lead span:first-child { height: 13px; width: 46%; }
+.sk-lead span:last-child { height: 11px; width: 78%; }
+/* Left padding absorbs the gutter each real band puts before its first glyph: the tier chevron
+   (7 + 9 + 8) and the stream row's cache dot (4 + 12 + 7). Right-hand runs stand in for the
+   sort pill, the tier total, and the size column, so no run appears out of nowhere on resolve. */
+.sk-summary { display: flex; align-items: center; gap: 8px; height: 36px; padding: 6px 8px 8px; }
+.sk-summary span:first-child { flex: 1; height: 11px; }
+.sk-summary span:last-child { flex: none; width: 86px; height: 22px; border-radius: 6px; }
+
+.sk-tier { display: flex; align-items: center; height: 35px; padding: 7px 7px 7px 24px; }
+.sk-tier span:first-child { width: 44px; height: 15px; }
+.sk-tier span:last-child { margin-left: auto; width: 12px; height: 10px; }
+
+.sk-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-content: center;
+    row-gap: 4px;
+    column-gap: 7px;
+    height: 46.8px;
+    padding: 7px 6px 7px 23px;
+}
+.sk-row span:nth-child(1) { grid-column: 1; height: 12px; }
+.sk-row span:nth-child(2) { grid-column: 1; width: 40%; height: 9px; }
+.sk-row span:nth-child(3) { grid-area: 1 / 2 / 3 / 3; align-self: center; width: 46px; height: 11px; }
+.sk-row:nth-child(3n) span:nth-child(1) { width: 84%; }
+.sk-row:nth-child(3n + 1) span:nth-child(1) { width: 66%; }
+.sk-row:nth-child(3n + 2) span:nth-child(1) { width: 75%; }
+
+/* The episode list leads with the season chip strip, not a summary band, and its rows are
+   shorter than stream rows - so it needs its own shape rather than reusing the stream one. */
+.loading--episodes { display: flex; flex-direction: column; }
+.sk-chips { display: flex; align-items: center; gap: 4px; height: 33.4px; padding: 2px 4px 8px; }
+.sk-chips span { flex: none; width: 32px; height: 23.4px; border-radius: 6px; }
+.sk-chips span:last-child { margin-left: auto; width: 62px; height: 22px; }
+.sk-erow {
+    display: grid;
+    grid-template-columns: 26px 1fr;
+    align-items: center;
+    column-gap: 8px;
+    height: 34.2px;
+    margin-bottom: 1px;
+    padding: 8px 6px;
+}
+.sk-erow span { height: 12px; }
+.sk-erow:nth-child(3n) span:last-child { width: 72%; }
+.sk-erow:nth-child(3n + 1) span:last-child { width: 54%; }
+.sk-erow:nth-child(3n + 2) span:last-child { width: 63%; }
+
+.sk-tile, .loading span {
+    border-radius: 4px;
     background: linear-gradient(90deg, var(--surface) 25%, var(--surface-hover) 50%, var(--surface) 75%);
     background-size: 200% 100%;
     animation: shimmer 1.3s infinite;
 }
+.sk-tile { border-radius: 7px; }
 @keyframes shimmer { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) {
+    .sk-tile, .loading span { animation: none; }
+}
 
 .message, .empty {
     margin: 28px 8px;
@@ -357,6 +343,235 @@ section h3 { padding: 5px 7px; }
 .message button:hover { background: var(--surface-hover); }
 
 @media (max-width: 260px) {
-    .media-grid, .loading { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .media-grid, .loading--grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .brand span { display: none; }
 }
+
+/* ── stream screen ──────────────────────────────────────────────────────────
+   Facts identical on every row are hoisted into .stream-summary; rows carry
+   only what differs. Colour is limited to one cache dot. */
+
+.stream-summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px 8px;
+    color: var(--muted);
+    font-size: 11px;
+}
+.stream-summary > span {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.stream-sort-toggle {
+    flex: none;
+    border: 0;
+    border-radius: 6px;
+    padding: 4px 7px;
+    background: var(--surface);
+    color: var(--muted);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 10px;
+}
+.stream-sort-toggle:hover { background: var(--surface-hover); color: var(--text); }
+.stream-sort-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+
+.tier { margin-bottom: 2px; }
+.tier summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 7px;
+    border-radius: 6px;
+    color: var(--muted);
+    cursor: pointer;
+    list-style: none;
+}
+.tier summary::-webkit-details-marker { display: none; }
+.tier summary::before { content: "\203A"; width: 9px; font-size: 15px; line-height: 9px; }
+.tier[open] summary::before { transform: rotate(90deg); }
+.tier summary:hover, .tier summary:focus-visible { background: var(--surface); outline: none; }
+/* Resolution is the axis the list is navigated by, so it outranks every row label.
+   Closed tiers recede to muted; the open one is the loudest text on the screen. */
+.tier-name {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 15px;
+    font-weight: 640;
+    letter-spacing: -.01em;
+}
+.tier[open] .tier-name { color: var(--text); }
+.tier-ready {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--ok);
+    font-family: var(--mono);
+    font-size: 10px;
+}
+.tier-ready::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ok);
+}
+.tier-count {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+}
+.tier-body { padding-bottom: 6px; }
+
+.srow {
+    display: grid;
+    grid-template-columns: 12px 1fr auto;
+    align-items: center;
+    column-gap: 7px;
+    width: 100%;
+    padding: 7px 6px 7px 4px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+}
+.srow--nodot { grid-template-columns: 1fr auto; }
+.srow:hover, .srow:focus-visible { background: var(--surface-hover); outline: none; }
+.srow:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
+
+/* filled = ready now, hollow ring = will download, absent = not reported */
+.dot { width: 8px; height: 8px; border-radius: 50%; justify-self: center; }
+.dot--ok { background: var(--ok); box-shadow: 0 0 0 2px rgba(59, 211, 127, .18); }
+.dot--warn { border: 2px solid var(--warn); background: rgba(234, 177, 49, .14); }
+.dot--unknown { background: transparent; }
+
+.srow-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.srow-title { overflow: hidden; font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
+.srow--uncached .srow-title { color: #cfcfd6; }
+.srow-meta {
+    overflow: hidden;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 10px;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.srow-size {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.show-more {
+    width: 100%;
+    padding: 6px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 10px;
+    text-align: left;
+}
+.show-more:hover, .show-more:focus-visible { background: var(--surface); outline: none; }
+
+/* ── series screen ──────────────────────────────────────────────────────────
+   One season at a time. The strip scrolls sideways so a 20-season show costs
+   the same vertical space as a 3-season one. */
+
+.season-nav {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 4px 8px;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+.season-nav::-webkit-scrollbar { display: none; }
+.season-chip {
+    position: relative;
+    flex: none;
+    border: 0;
+    border-radius: 6px;
+    padding: 4px 9px;
+    background: var(--surface);
+    color: var(--muted);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 11px;
+}
+.season-chip:hover { background: var(--surface-hover); color: var(--text); }
+.season-chip.active { background: #34343a; color: var(--text); }
+.season-chip:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+/* marks the season holding the next episode still to watch */
+.season-chip[data-next]::after {
+    content: "";
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+}
+.season-order {
+    flex: none;
+    margin-left: auto;
+    border: 0;
+    border-radius: 6px;
+    padding: 4px 7px;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 10px;
+}
+.season-order:hover { background: var(--surface); color: var(--text); }
+.season-order:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+
+.episode-list { display: flex; flex-direction: column; gap: 1px; }
+.erow {
+    display: grid;
+    grid-template-columns: 26px 1fr auto;
+    align-items: center;
+    column-gap: 8px;
+    width: 100%;
+    padding: 8px 6px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+}
+.erow:hover, .erow:focus-visible { background: var(--surface-hover); outline: none; }
+.erow:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
+.erow:disabled { opacity: .42; cursor: default; }
+.erow:disabled:hover { background: transparent; }
+.erow--resuming { row-gap: 5px; }
+.erow-num {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+}
+.erow-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.erow--watched .erow-name, .erow--watched .erow-num { color: var(--muted); }
+.erow-mark { color: var(--ok); font-size: 12px; font-weight: 750; }
+.erow-airs { color: var(--muted); font-family: var(--mono); font-size: 10px; }
+.erow-bar {
+    grid-column: 2 / 4;
+    height: 3px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .12);
+}
+.erow-bar > span { display: block; height: 100%; background: var(--accent); }

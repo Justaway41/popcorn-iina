@@ -19,6 +19,8 @@ import {
     parseSeriesEpisodes,
     sortEpisodes,
     sortStreamsBySize,
+    sortStreamsForPlayback,
+    groupStreamsByResolution,
     findClosestQualityStream,
     mergeMediaResults
 } from "./stremio";
@@ -210,7 +212,8 @@ test("keeps only playable HTTP streams", () => {
             title: "WEB English",
             rawTitle: "4K WEB English\n💾 12 GB",
             url: "https://cdn.example/movie.mkv",
-            quality: "4K",
+            resolution: "2160p",
+            source: "",
             size: "12 GB",
             audioLanguages: ["English"],
             subtitleLanguages: null,
@@ -221,7 +224,8 @@ test("keeps only playable HTTP streams", () => {
             title: "Release Group",
             rawTitle: "Release.Group",
             url: "https://cdn.example/multi.mkv",
-            quality: "1080p",
+            resolution: "1080p",
+            source: "",
             size: "",
             audioLanguages: ["Multi"],
             subtitleLanguages: null,
@@ -232,7 +236,8 @@ test("keeps only playable HTTP streams", () => {
             title: "LAN",
             rawTitle: "LAN",
             url: "http://192.168.1.2/movie.mp4",
-            quality: "",
+            resolution: "",
+            source: "",
             size: "",
             audioLanguages: [],
             subtitleLanguages: null,
@@ -300,18 +305,18 @@ test("normalizes AIOStreams and Comet display metadata conservatively", () => {
     ]);
 });
 
-test("extracts numeric quality from an addon stream title", () => {
+test("extracts numeric resolution from an addon stream title", () => {
     expect(parsePlayableStreams({
         streams: [{ title: "Release.Name.1440p.WEB", url: "https://cdn.example/1440.mkv" }]
-    })[0]?.quality).toBe("1440p");
+    })[0]?.resolution).toBe("1440p");
 });
 
 test("sorts by parsed file size only and keeps unknown sizes last", () => {
     const streams = [
-        { title: "900 MB", size: "900 MB", quality: "4K" },
-        { title: "Unknown", size: "", quality: "1080p" },
-        { title: "12 GB first", size: "12 GB", quality: "720p" },
-        { title: "12 GB second", size: "12.0 GB", quality: "4K" }
+        { title: "900 MB", size: "900 MB", resolution: "2160p" },
+        { title: "Unknown", size: "", resolution: "1080p" },
+        { title: "12 GB first", size: "12 GB", resolution: "720p" },
+        { title: "12 GB second", size: "12.0 GB", resolution: "2160p" }
     ];
 
     expect(sortStreamsBySize(streams, "largest").map(({ title }) => title)).toEqual([
@@ -327,16 +332,16 @@ test("sorts by parsed file size only and keeps unknown sizes last", () => {
 
 test("recommends the closest resolution with higher quality winning ties", () => {
     const streams = [
-        { title: "720", quality: "720p" },
-        { title: "1080 first", quality: "1080p" },
-        { title: "1080 second", quality: "1080p" },
-        { title: "4K", quality: "4K" },
-        { title: "Unknown", quality: "" }
+        { title: "720", resolution: "720p" },
+        { title: "1080 first", resolution: "1080p" },
+        { title: "1080 second", resolution: "1080p" },
+        { title: "4K", resolution: "2160p" },
+        { title: "Unknown", resolution: "" }
     ];
     expect(findClosestQualityStream(streams, "1440p")?.title).toBe("1080 first");
     expect(findClosestQualityStream(streams, "900p")?.title).toBe("1080 first");
     expect(findClosestQualityStream(streams, "")?.title).toBe("4K");
-    expect(findClosestQualityStream([{ title: "Unknown", quality: "" }], "1080p")).toBeNull();
+    expect(findClosestQualityStream([{ title: "Unknown", resolution: "" }], "1080p")).toBeNull();
 });
 
 test("parses multiple audio languages without treating subtitle labels as audio", () => {
@@ -456,3 +461,120 @@ function media(id: string, type: "movie" | "series", name: string, releaseInfo: 
         malId: ""
     };
 }
+
+test("keeps a decorative emoji from inverting an explicit cache statement", () => {
+    // A resolution label such as "🚀 FHD" used to match the cached marker set while the
+    // cache line said "❌ Not Ready", leaving the stream permanently unknown.
+    expect(parsePlayableStreams({
+        streams: [{
+            name: "🚀 FHD",
+            description: "🎬 Dark 🍂 S03 🎞️ E04\n❌ Not Ready (TB) 🔍Comet",
+            url: "https://cdn.example/fhd.mkv",
+            behaviorHints: { filename: "Dark.S03E04.1080p.WEB-DL.x265.mkv" }
+        }]
+    })[0]?.cached).toBe(false);
+
+    expect(parsePlayableStreams({
+        streams: [{
+            name: "🔥4K UHD",
+            description: "⚡Ready (TB) 🔍Comet",
+            url: "https://cdn.example/uhd.mkv",
+            behaviorHints: { filename: "Dark.S03E04.2160p.WEB-DL.x265.mkv" }
+        }]
+    })[0]?.cached).toBe(true);
+});
+
+test("separates resolution from release source", () => {
+    const [sourceOnly, both, labelled] = parsePlayableStreams({
+        streams: [
+            {
+                name: "💩 Unknown",
+                url: "https://cdn.example/a.mkv",
+                behaviorHints: { filename: "Dark.S03E04.WEBRip.KvK.CasStudio.avi" }
+            },
+            {
+                name: "🔥4K UHD",
+                url: "https://cdn.example/b.mkv",
+                behaviorHints: { filename: "Dark.S03E04.2160p.NF.WEB-DL.DDP5.1.H.265-XEBEC.mkv" }
+            },
+            { name: "🚀 FHD", title: "Dark S03E04", url: "https://cdn.example/c.mkv" }
+        ]
+    });
+
+    // A source token must never occupy the resolution slot.
+    expect(sourceOnly).toMatchObject({ resolution: "", source: "WEBRip" });
+    expect(both).toMatchObject({ resolution: "2160p", source: "WEB-DL" });
+    // No literal token anywhere, so the standard abbreviation is the last resort.
+    expect(labelled).toMatchObject({ resolution: "1080p" });
+});
+
+test("normalizes 4K to 2160p so one tier is not split across two spellings", () => {
+    expect(parsePlayableStreams({
+        streams: [{ title: "Release.4K.WEB-DL", url: "https://cdn.example/4k.mkv" }]
+    })[0]?.resolution).toBe("2160p");
+});
+
+test("keeps streams visible to next-episode matching when only the title names a source", () => {
+    // Previously `quality` held "WEBRip" for these, qualityHeight() returned null, and
+    // findClosestQualityStream dropped every one of them - so no next episode was offered.
+    const streams = parsePlayableStreams({
+        streams: [
+            {
+                url: "https://cdn.example/a.mkv",
+                behaviorHints: { filename: "Dark.S03E04.1080p.WEBRip.x264-ION10.mkv" }
+            },
+            {
+                url: "https://cdn.example/b.mkv",
+                behaviorHints: { filename: "Dark.S03E04.2160p.WEBRip.DV.HDR10.mkv" }
+            }
+        ]
+    });
+    expect(findClosestQualityStream(streams, "1080p")?.resolution).toBe("1080p");
+});
+
+test("strips release-site tags but keeps plain group tags", () => {
+    const [cjkBracket, domain, group] = parsePlayableStreams({
+        streams: [
+            { title: "【高清剧集网 www BTHDTV com】Dark S03E04", url: "https://cdn.example/a.mkv" },
+            { title: "[47BT][暗黑 第三季]Dark S03E04 1080p", url: "https://cdn.example/b.mkv" },
+            { title: "[SubsPlease] Anime Title - 13", url: "https://cdn.example/c.mkv" }
+        ]
+    });
+    expect(cjkBracket.title).toBe("Dark · S03E04");
+    // Only the bracket carrying a site marker is removed. A bare tag like [47BT] is
+    // indistinguishable from a group tag, so it is left alone rather than guessed at.
+    expect(domain.title).not.toContain("暗黑");
+    expect(domain.title).toContain("[47BT]");
+    expect(group.title).toContain("[SubsPlease]");
+});
+
+test("orders cached streams first while keeping the size preference inside each group", () => {
+    const streams = [
+        { title: "uncached big", size: "40 GB", cached: false },
+        { title: "cached small", size: "2 GB", cached: true },
+        { title: "unknown mid", size: "10 GB", cached: null },
+        { title: "cached big", size: "20 GB", cached: true }
+    ];
+
+    expect(sortStreamsForPlayback(streams, "largest").map(({ title }) => title)).toEqual([
+        "cached big", "cached small", "unknown mid", "uncached big"
+    ]);
+    expect(sortStreamsForPlayback(streams, "smallest").map(({ title }) => title)).toEqual([
+        "cached small", "cached big", "unknown mid", "uncached big"
+    ]);
+    expect(streams.map(({ title }) => title)).toEqual([
+        "uncached big", "cached small", "unknown mid", "cached big"
+    ]);
+});
+
+test("groups streams into resolution tiers with unknown resolutions last", () => {
+    expect(groupStreamsByResolution([
+        { title: "a", resolution: "1080p" },
+        { title: "b", resolution: "" },
+        { title: "c", resolution: "2160p" },
+        { title: "d", resolution: "1080p" },
+        { title: "e", resolution: "720p" }
+    ]).map(({ resolution, streams }) => [resolution, streams.length])).toEqual([
+        ["2160p", 1], ["1080p", 2], ["720p", 1], ["other", 1]
+    ]);
+});

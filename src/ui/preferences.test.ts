@@ -15,13 +15,15 @@ test("uses IINA's preference-page API from window", () => {
     expect(preferencesSource).not.toContain("const preferences = iina.preferences");
 });
 
-test("relays Trakt links through IINA's native browser opener", () => {
+test("copies validated Trakt links without polling the global plugin", () => {
     expect(preferencesHtml).toContain('href="https://trakt.tv/join"');
     expect(preferencesHtml).toContain('href="https://app.trakt.tv/settings/apps/api"');
     expect(preferencesHtml.match(/data-external-url/g)).toHaveLength(2);
     expect(preferencesHtml).not.toContain('target="_blank"');
     expect(preferencesHtml.match(/rel="noopener noreferrer"/g)).toHaveLength(2);
-    expect(preferencesSource).toContain('preferences.set("externalLinkRequest"');
+    expect(preferencesSource).toContain("parseTraktExternalLinkRequest");
+    expect(preferencesSource).toContain("navigator.clipboard.writeText");
+    expect(preferencesSource).not.toContain('preferences.set("externalLinkRequest"');
     expect(preferencesSource).not.toContain("window.open(");
 });
 

@@ -237,9 +237,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "1.0.5",
+    version: "2.0.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 6,
+    ghVersion: 7,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -256,8 +256,7 @@
       mediaType: "movie",
       episodeOrder: "oldest",
       watchHistory: [],
-      trakt: {},
-      externalLinkRequest: {}
+      trakt: {}
     },
     permissions: [
       "network-request",
@@ -345,6 +344,24 @@
       return difference || a.index - b.index;
     }).map(({ stream }) => stream);
   }
+  function cacheRank(cached) {
+    return cached === true ? 0 : cached === null ? 1 : 2;
+  }
+  function sortStreamsForPlayback(streams, order) {
+    return sortStreamsBySize(streams, order).sort((a, b) => cacheRank(a.cached) - cacheRank(b.cached));
+  }
+  function groupStreamsByResolution(streams) {
+    const groups = new Map;
+    streams.forEach((stream) => {
+      const key = RESOLUTION_ORDER.includes(stream.resolution) ? stream.resolution : "other";
+      groups.set(key, [...groups.get(key) || [], stream]);
+    });
+    const rank = (value) => {
+      const index = RESOLUTION_ORDER.indexOf(value);
+      return index < 0 ? RESOLUTION_ORDER.length : index;
+    };
+    return [...groups.entries()].sort((a, b) => rank(a[0]) - rank(b[0])).map(([resolution, items]) => ({ resolution, streams: items }));
+  }
   function parseByteSize(value) {
     const match = value.trim().match(/^([\d.]+)\s*([KMGT])B$/i);
     if (!match)
@@ -355,7 +372,7 @@
   }
   function findClosestQualityStream(streams, previousQuality) {
     const known = streams.flatMap((stream, index) => {
-      const height = qualityHeight(stream.quality);
+      const height = qualityHeight(stream.resolution);
       return height === null ? [] : [{ stream, index, height }];
     });
     if (known.length === 0)
@@ -486,7 +503,8 @@
         title: cleanStreamTitle(rawTitle),
         rawTitle,
         url,
-        quality: metadata.match(/\b(4K|(?:2160|1440|1080|720|576|480|360|240)p|HDRip|BRRip|WEBRip)\b/i)?.[0] || "",
+        resolution: parseResolution(filename || metadata, metadata),
+        source: (filename.match(SOURCE_PATTERN) || metadata.match(SOURCE_PATTERN))?.[0] || "",
         size: structuredSize || metadata.match(/(?:💾\s*)?([\d.]+\s*[KMGT]B)\b/i)?.[1] || "",
         audioLanguages: parseAudioLanguages(metadata),
         subtitleLanguages: parseSubtitleLanguages(stream?.subtitles),
@@ -507,12 +525,36 @@
   }
   function cleanStreamTitle(value) {
     const firstLine = value.split(/\r?\n/).find((line) => line.trim())?.trim() || value.trim();
-    const cleaned = firstLine.replace(/\.(?:mkv|mp4|avi|mov|m4v|ts|m2ts|webm|iso)$/i, "").replace(/\p{Extended_Pictographic}|[\uFE0F\u200D]/gu, " ").replace(/[._]+/g, " ").replace(/\bH\s*26([45])\b/gi, "H.26$1").replace(/\bS(\d{1,2})\s+E(\d{1,3})\b/gi, "S$1E$2").replace(/\bWEB\s+DL\b/gi, "WEB-DL").replace(/\b(?:4K|(?:2160|1440|1080|720|576|480|360|240)p)\b/gi, " ").replace(/\b\d+(?:\.\d+)?\s*[KMGT]B\b/gi, " ").replace(/[|•]+/g, " ").replace(/\s+/g, " ").trim().replace(/\s+(?=(?:S\d{1,2}E\d{1,3}|WEB(?:-?DL|Rip)|BluRay|REMUX|HDR(?:10\+?)?|DV|DoVi|HEVC|AVC|AV1|x26[45]|H\.26[45])\b)/gi, " · ");
+    const cleaned = firstLine.replace(/\.(?:mkv|mp4|avi|mov|m4v|ts|m2ts|webm|iso)$/i, "").replace(/【[^】]*】/g, " ").replace(/\[[^\]]*(?:www\s*\.|\.com|\.net|\.org|\.tv|[一-鿿])[^\]]*\]/gi, " ").replace(/\b(?:www\s*\.\s*)?[a-z0-9-]+\s*\.\s*(?:com|net|org|tv|me)\b/gi, " ").replace(/\p{Extended_Pictographic}|[\uFE0F\u200D]/gu, " ").replace(/[._]+/g, " ").replace(/\bH\s*26([45])\b/gi, "H.26$1").replace(/\bS(\d{1,2})\s+E(\d{1,3})\b/gi, "S$1E$2").replace(/\bWEB\s+DL\b/gi, "WEB-DL").replace(/\b(?:4K|(?:2160|1440|1080|720|576|480|360|240)p)\b/gi, " ").replace(/\b\d+(?:\.\d+)?\s*[KMGT]B\b/gi, " ").replace(/[|•]+/g, " ").replace(/\s+/g, " ").trim().replace(/\s+(?=(?:S\d{1,2}E\d{1,3}|WEB(?:-?DL|Rip)|BluRay|REMUX|HDR(?:10\+?)?|DV|DoVi|HEVC|AVC|AV1|x26[45]|H\.26[45])\b)/gi, " · ");
     return cleaned || firstLine || "Stream";
   }
+  var RESOLUTION_PATTERN = /\b(4K|(?:2160|1440|1080|720|576|480|360|240)p)\b/i;
+  var SOURCE_PATTERN = /\b(WEB-?DL|WEBRip|BluRay|BRRip|HDRip|REMUX)\b/i;
+  var RESOLUTION_ALIASES = [
+    [/\b(?:4K\s*)?UHD\b/i, "2160p"],
+    [/\bQHD\b/i, "1440p"],
+    [/\bFHD\b/i, "1080p"],
+    [/\bHD\b/i, "720p"]
+  ];
+  var RESOLUTION_ORDER = ["2160p", "1440p", "1080p", "720p", "576p", "480p", "360p", "240p"];
+  function normalizeResolution(value) {
+    if (!value)
+      return "";
+    return /^4k$/i.test(value) ? "2160p" : value.toLowerCase();
+  }
+  function parseResolution(primary, metadata) {
+    const literal = normalizeResolution(primary.match(RESOLUTION_PATTERN)?.[0] || "");
+    if (literal)
+      return literal;
+    return RESOLUTION_ALIASES.find(([pattern]) => pattern.test(metadata))?.[1] || "";
+  }
   function parseCacheStatus(value) {
-    const cached = /⚡|🚀|\[[^\]\r\n]{1,20}\+\]|\bcached\b|\binstant\b/i.test(value);
-    const uncached = /⬇|⏳|\buncached\b|\bnot\s+ready\b|\bdownload(?:ing)?\b/i.test(value);
+    if (/\b(?:uncached|not\s+ready|download(?:ing)?)\b/i.test(value))
+      return false;
+    if (/\b(?:cached|instant|ready)\b/i.test(value))
+      return true;
+    const cached = /⚡|\[[^\]\r\n]{1,20}\+\]/.test(value);
+    const uncached = /⬇|⏳/.test(value);
     return cached === uncached ? null : cached;
   }
   function parseSeeders(value) {
@@ -635,15 +677,6 @@
   function getSizeSortControl(order) {
     return order === "largest" ? { label: "Largest File", next: "smallest" } : { label: "Smallest File", next: "largest" };
   }
-  function getOpenSeasonNumbers(sections) {
-    const openSeasons = new Set;
-    Array.from(sections).forEach((section) => {
-      const season = Number(section.dataset.season);
-      if (section.open && Number.isFinite(season))
-        openSeasons.add(season);
-    });
-    return openSeasons;
-  }
   function initApp() {
     iina.onMessage(MESSAGE_NAMES.Configuration, (data) => {
       applyConfiguration(data);
@@ -661,7 +694,7 @@
       if (!payload?.media || !payload?.episode || !Array.isArray(payload?.episodes)) {
         return;
       }
-      loadStreams(payload.media, payload.episode, payload.episodes, payload.quality, true);
+      loadStreams(payload.media, payload.episode, payload.episodes, payload.resolution, true);
     });
     document.addEventListener("DOMContentLoaded", () => {
       document.documentElement.dataset.version = CLIENT_VERSION;
@@ -741,7 +774,7 @@
     ui.searchInput.value = query;
     ui.back.classList.add("hidden");
     ui.title.textContent = query ? "Search Results" : watchHistory.length > 0 ? "Browse" : "Trending";
-    setLoading();
+    setLoading("grid");
     retryAction = () => loadHome(query);
     try {
       if (!query) {
@@ -828,7 +861,7 @@
     view = { kind: "episodes", media };
     ui.back.classList.remove("hidden");
     ui.title.textContent = media.name;
-    setLoading();
+    setLoading("episodes");
     retryAction = () => loadEpisodes(media);
     try {
       const details = await loadMediaDetails(media, request.signal);
@@ -864,7 +897,7 @@
     view = { kind: "streams", media, episode, episodes };
     ui.back.classList.remove("hidden");
     ui.title.textContent = episode ? formatEpisodeTitle(media, episode) : media.name;
-    setLoading();
+    setLoading("rows", recommendNext);
     retryAction = () => loadStreams(media, episode, episodes, preferredQuality, recommendNext);
     try {
       await refreshConfiguration();
@@ -1042,64 +1075,124 @@
   function mediaIdentity(media) {
     return media.imdbId || media.providerId || media.id;
   }
-  function renderEpisodes(media, episodes, focusOrder, openSeasons = new Set) {
+  function getDefaultSeason(episodes, watched, available = isEpisodeAvailable) {
+    const ordered = sortEpisodes(episodes, "oldest");
+    const next = ordered.find((episode) => available(episode) && !watched(episode));
+    return (next || ordered[0])?.season ?? 0;
+  }
+  function renderEpisodes(media, episodes, focusOrder, selectedSeason) {
     if (episodes.length === 0) {
       renderEmpty("No episodes found.");
       return;
     }
-    const fragment = document.createDocumentFragment();
-    const orderControl = document.createElement("div");
-    orderControl.className = "episode-order";
-    ["oldest", "newest"].forEach((order) => {
-      const value = order;
-      const button = document.createElement("button");
-      button.type = "button";
-      button.id = getEpisodeOrderButtonId(value);
-      button.textContent = getEpisodeOrderLabel(value);
-      button.classList.toggle("active", episodeOrder === value);
-      button.setAttribute("aria-pressed", String(episodeOrder === value));
-      button.addEventListener("click", () => {
-        if (episodeOrder === value)
-          return;
-        const expanded = getOpenSeasonNumbers(ui.content.querySelectorAll("details.season"));
-        episodeOrder = value;
-        iina.postMessage(MESSAGE_NAMES.SetEpisodeOrder, { episodeOrder });
-        renderEpisodes(media, episodes, value, expanded);
-      });
-      orderControl.appendChild(button);
-    });
-    fragment.appendChild(orderControl);
     const seasons = new Map;
     sortEpisodes(episodes, episodeOrder).forEach((episode) => {
-      const values = seasons.get(episode.season) || [];
-      values.push(episode);
-      seasons.set(episode.season, values);
+      seasons.set(episode.season, [...seasons.get(episode.season) || [], episode]);
     });
-    seasons.forEach((values, season) => {
-      const section = document.createElement("details");
-      section.className = "season";
-      section.dataset.season = String(season);
-      section.open = openSeasons.has(season);
-      const heading = document.createElement("summary");
-      const seasonName = document.createElement("span");
-      seasonName.textContent = `Season ${season}`;
-      const count = document.createElement("span");
-      count.className = "season-count";
-      count.textContent = `${values.length} ${values.length === 1 ? "episode" : "episodes"}`;
-      heading.append(seasonName, count);
-      section.appendChild(heading);
-      const list = document.createElement("div");
-      list.className = "row-list";
-      values.forEach((episode) => {
-        const available = isEpisodeAvailable(episode);
-        list.appendChild(rowButton(`S${pad(episode.season)}E${pad(episode.episode)} · ${episode.name}`, available ? formatDate(episode.aired) : `Available ${formatDate(episode.aired)}`, () => void loadStreams(media, episode, episodes), !available, available && isWatched(episode.id)));
+    const numbers = [...seasons.keys()].sort((a, b) => a - b);
+    const nextSeason = getDefaultSeason(episodes, (episode) => isWatched(episode.id));
+    const active = selectedSeason !== undefined && seasons.has(selectedSeason) ? selectedSeason : seasons.has(nextSeason) ? nextSeason : numbers[0];
+    const fragment = document.createDocumentFragment();
+    const nav = document.createElement("div");
+    nav.className = "season-nav";
+    nav.setAttribute("role", "tablist");
+    nav.setAttribute("aria-label", "Seasons");
+    numbers.forEach((season) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "season-chip";
+      chip.textContent = season === 0 ? "Specials" : `S${season}`;
+      chip.title = season === 0 ? "Specials" : `Season ${season}`;
+      chip.setAttribute("role", "tab");
+      chip.setAttribute("aria-selected", String(season === active));
+      chip.classList.toggle("active", season === active);
+      if (season === nextSeason)
+        chip.dataset.next = "";
+      chip.setAttribute("data-clickable", "");
+      chip.addEventListener("click", () => {
+        if (season === active)
+          return;
+        renderEpisodes(media, episodes, undefined, season);
       });
-      section.appendChild(list);
-      fragment.appendChild(section);
+      nav.appendChild(chip);
     });
+    const order = episodeOrder === "newest" ? "oldest" : "newest";
+    const orderButton = document.createElement("button");
+    orderButton.type = "button";
+    orderButton.className = "season-order";
+    orderButton.id = getEpisodeOrderButtonId(episodeOrder);
+    orderButton.textContent = episodeOrder === "newest" ? "NEWEST ↑" : "OLDEST ↓";
+    orderButton.title = `Sort ${getEpisodeOrderLabel(order)}`;
+    orderButton.setAttribute("data-clickable", "");
+    orderButton.addEventListener("click", () => {
+      episodeOrder = order;
+      iina.postMessage(MESSAGE_NAMES.SetEpisodeOrder, { episodeOrder });
+      renderEpisodes(media, episodes, order, active);
+    });
+    nav.appendChild(orderButton);
+    fragment.appendChild(nav);
+    const list = document.createElement("div");
+    list.className = "episode-list";
+    (seasons.get(active) || []).forEach((episode) => {
+      list.appendChild(episodeRow(media, episode, episodes));
+    });
+    fragment.appendChild(list);
     showContent(fragment);
     if (focusOrder)
       document.getElementById(getEpisodeOrderButtonId(focusOrder))?.focus();
+  }
+  function episodeRow(media, episode, episodes) {
+    const available = isEpisodeAvailable(episode);
+    const watched = available && isWatched(episode.id);
+    const progress = available && !watched ? getEntryProgress(episode.id) : null;
+    const resume = getProgressDisplay(progress, watched);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "erow";
+    button.disabled = !available;
+    button.classList.toggle("erow--watched", watched);
+    if (available) {
+      button.setAttribute("data-clickable", "");
+      button.addEventListener("click", () => void loadStreams(media, episode, episodes));
+    }
+    const number = document.createElement("span");
+    number.className = "erow-num";
+    number.textContent = pad(episode.episode);
+    const name = document.createElement("span");
+    name.className = "erow-name";
+    name.textContent = episode.name;
+    name.title = episode.name;
+    button.append(number, name);
+    if (!available) {
+      const airs = document.createElement("span");
+      airs.className = "erow-airs";
+      const date = formatDate(episode.aired);
+      airs.textContent = date ? `Airs ${date}` : "Unaired";
+      button.appendChild(airs);
+    } else if (watched) {
+      const mark = document.createElement("span");
+      mark.className = "erow-mark";
+      mark.textContent = "✓";
+      mark.title = "Watched";
+      button.appendChild(mark);
+    } else {
+      button.appendChild(document.createElement("span"));
+    }
+    if (resume) {
+      const track = document.createElement("span");
+      track.className = "erow-bar";
+      track.title = resume.label;
+      track.setAttribute("role", "progressbar");
+      track.setAttribute("aria-valuemin", "0");
+      track.setAttribute("aria-valuemax", "100");
+      track.setAttribute("aria-valuenow", String(resume.percent));
+      const fill = document.createElement("span");
+      fill.style.width = `${resume.percent}%`;
+      track.appendChild(fill);
+      button.appendChild(track);
+      button.classList.add("erow--resuming");
+    }
+    return button;
   }
   function renderStreams(media, episode, episodes, streams, failedAddons, englishSubtitles, preferredQuality, recommendNext = false) {
     if (streams.length === 0) {
@@ -1118,88 +1211,206 @@
           media,
           ...episode ? { episode } : {},
           episodes,
-          quality: stream.quality
+          resolution: stream.resolution
         },
         ...resumePercent === null ? {} : { resumePercent }
       });
     };
+    const varying = getVaryingStreamFields(streams);
     if (recommendNext) {
       const recommendation = findClosestQualityStream(streams, preferredQuality || "");
       if (recommendation) {
-        const button = rowButton("Play Next Episode", buildStreamDetails(recommendation, englishSubtitles), () => playStream(recommendation), false, false, recommendation.rawTitle);
+        const button = rowButton("Play Next Episode", buildNextEpisodeDetail(recommendation), () => playStream(recommendation), false, false, recommendation.rawTitle);
         button.classList.add("next-episode");
         content.appendChild(button);
       }
     }
+    const seriesPrefix = episode ? buildSeriesPrefixPattern(media, episode) : null;
     let sizeOrder = "largest";
-    const sort = document.createElement("div");
-    sort.className = "stream-sort";
+    const summary = document.createElement("div");
+    summary.className = "stream-summary";
+    const summaryText = document.createElement("span");
     const sortButton = document.createElement("button");
     sortButton.type = "button";
-    sortButton.className = "active";
+    sortButton.className = "stream-sort-toggle";
     sortButton.title = "Toggle file-size sorting";
     sortButton.setAttribute("data-clickable", "");
-    sort.appendChild(sortButton);
+    summary.append(summaryText, sortButton);
     const list = document.createElement("div");
-    list.className = "row-list";
     const renderList = () => {
-      const control = getSizeSortControl(sizeOrder);
-      sortButton.textContent = control.label;
-      list.replaceChildren(...sortStreamsBySize(streams, sizeOrder).map((stream) => rowButton(stream.title, buildStreamDetails(stream, englishSubtitles), () => playStream(stream), false, false, stream.rawTitle)));
+      sortButton.textContent = getSizeSortControl(sizeOrder).label;
+      summaryText.textContent = buildStreamSummary(streams, varying, englishSubtitles);
+      list.replaceChildren(...buildStreamTiers(streams, sizeOrder, varying, seriesPrefix, playStream));
     };
     sortButton.addEventListener("click", () => {
       sizeOrder = getSizeSortControl(sizeOrder).next;
       renderList();
     });
     renderList();
-    content.append(sort, list);
+    content.append(summary, list);
     showContent(content);
   }
-  function buildStreamDetails(stream, englishSubtitles) {
-    const fragment = document.createDocumentFragment();
-    const addon = document.createElement("span");
-    addon.className = "stream-addon";
-    addon.textContent = stream.addonName;
-    fragment.appendChild(addon);
-    const cacheDetails = getCacheBadge(stream.cached);
-    const cache = document.createElement("span");
-    cache.className = `stream-meta-badge stream-cache--${cacheDetails.state}`;
-    cache.textContent = cacheDetails.label;
-    cache.title = cacheDetails.title;
-    fragment.appendChild(cache);
-    if (stream.seeders !== null) {
-      const seeders = document.createElement("span");
-      seeders.className = "stream-meta-badge stream-seeders";
-      seeders.textContent = `${stream.seeders} seeders`;
-      seeders.title = "Reported torrent seeders";
-      fragment.appendChild(seeders);
-    }
-    if (stream.quality) {
-      const quality = document.createElement("span");
-      quality.className = `stream-quality ${getQualityClass(stream.quality)}`;
-      quality.textContent = stream.quality;
-      fragment.appendChild(quality);
-    }
-    const audioDetails = getAudioBadge(stream.audioLanguages);
-    const audio = document.createElement("span");
-    audio.className = "stream-meta-badge stream-audio";
-    audio.textContent = audioDetails.label;
-    audio.title = audioDetails.title;
-    fragment.appendChild(audio);
-    const subtitleDetails = getSubtitleBadge(stream.subtitleLanguages, englishSubtitles);
-    const subtitles = document.createElement("span");
-    subtitles.className = `stream-meta-badge stream-subtitles stream-subtitles--${subtitleDetails.state}`;
-    subtitles.textContent = subtitleDetails.label;
-    subtitles.title = subtitleDetails.title;
-    fragment.appendChild(subtitles);
-    if (stream.size) {
-      const size = document.createElement("span");
-      size.className = "stream-size";
-      size.textContent = stream.size;
-      fragment.appendChild(size);
-    }
-    return fragment;
+  function buildNextEpisodeDetail(stream) {
+    return [
+      stream.resolution,
+      stream.source,
+      stream.audioLanguages.length > 0 ? getAudioBadge(stream.audioLanguages).label : "",
+      stream.size,
+      stream.cached === true ? "Ready" : stream.cached === false ? "Not cached" : ""
+    ].filter(Boolean).join(" · ");
   }
+  function getVaryingStreamFields(streams) {
+    const differs = (read) => new Set(streams.map(read)).size > 1;
+    return {
+      addon: differs((stream) => stream.addonName),
+      cache: differs((stream) => stream.cached),
+      source: differs((stream) => stream.source)
+    };
+  }
+  function buildStreamSummary(streams, varying, englishSubtitles) {
+    const first = streams[0];
+    const parts = [`${streams.length} ${streams.length === 1 ? "stream" : "streams"}`];
+    if (!varying.addon && first)
+      parts.push(first.addonName);
+    if (englishSubtitles === true)
+      parts.push("EN subs");
+    else if (englishSubtitles === false)
+      parts.push("no EN subs");
+    if (!varying.source && first?.source)
+      parts.push(first.source);
+    if (!varying.cache && first) {
+      parts.push(first.cached === null ? "cache unknown" : first.cached ? "all ready" : "none cached");
+    }
+    return parts.join(" · ");
+  }
+  function getTierRowCap(readyCount) {
+    return Math.min(Math.max(readyCount, 5), 15);
+  }
+  function buildSeriesPrefixPattern(media, episode) {
+    const name = media.name.trim();
+    if (!name)
+      return null;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+    const season = String(episode.season);
+    const number = String(episode.episode);
+    return new RegExp(`^\\s*${escaped}[\\s(]*(?:\\d{4}\\)?)?[\\s\\-–·()]*` + `(?:s0?${season}\\s*[.\\s]?e0?${number}|s0?${season}|0?${season}x0?${number}` + `|season\\s*0?${season})?[\\s\\-–·]*`, "i");
+  }
+  function buildStreamTiers(streams, sizeOrder, varying, seriesPrefix, playStream) {
+    const tiers = groupStreamsByResolution(streams);
+    const openTier = getDefaultTier(tiers);
+    return tiers.map(({ resolution, streams: tierStreams }) => {
+      const ordered = sortStreamsForPlayback(tierStreams, sizeOrder);
+      const ready = ordered.filter((stream) => stream.cached === true).length;
+      const cap = getTierRowCap(ready);
+      const section = document.createElement("details");
+      section.className = "tier";
+      section.dataset.tier = resolution;
+      section.open = resolution === openTier;
+      const heading = document.createElement("summary");
+      const name = document.createElement("span");
+      name.className = "tier-name";
+      name.textContent = resolution;
+      heading.appendChild(name);
+      if (ready > 0) {
+        const readyLabel = document.createElement("span");
+        readyLabel.className = "tier-ready";
+        readyLabel.textContent = `${ready} ready`;
+        readyLabel.title = `${ready} ready to play without downloading`;
+        heading.appendChild(readyLabel);
+      }
+      const count = document.createElement("span");
+      count.className = "tier-count";
+      count.textContent = String(ordered.length);
+      heading.appendChild(count);
+      section.appendChild(heading);
+      const body = document.createElement("div");
+      body.className = "tier-body";
+      const draw = (limit) => {
+        body.replaceChildren(...ordered.slice(0, limit).map((stream) => streamRow(stream, varying, seriesPrefix, () => playStream(stream))));
+        if (limit < ordered.length) {
+          const more = document.createElement("button");
+          more.type = "button";
+          more.className = "show-more";
+          more.textContent = `Show ${ordered.length - limit} more`;
+          more.setAttribute("data-clickable", "");
+          more.addEventListener("click", () => draw(ordered.length));
+          body.appendChild(more);
+        }
+      };
+      draw(cap);
+      section.appendChild(body);
+      section.addEventListener("toggle", () => {
+        if (section.open)
+          lastOpenTier = resolution;
+      });
+      return section;
+    });
+  }
+  function getDefaultTier(tiers, remembered = lastOpenTier) {
+    if (remembered && tiers.some(({ resolution }) => resolution === remembered))
+      return remembered;
+    const withReady = tiers.find(({ streams }) => streams.some((stream) => stream.cached === true));
+    if (withReady)
+      return withReady.resolution;
+    return tiers.reduce((best, tier) => tier.streams.length > best.streams.length ? tier : best, tiers[0])?.resolution || "";
+  }
+  function streamRow(stream, varying, seriesPrefix, action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "srow";
+    button.setAttribute("data-clickable", "");
+    button.addEventListener("click", action);
+    if (varying.cache) {
+      const dot = document.createElement("span");
+      const state = stream.cached === true ? "ok" : stream.cached === false ? "warn" : "unknown";
+      dot.className = `dot dot--${state}`;
+      dot.title = getCacheBadge(stream.cached).title;
+      button.appendChild(dot);
+    } else {
+      button.classList.add("srow--nodot");
+    }
+    const main = document.createElement("span");
+    main.className = "srow-main";
+    const title = document.createElement("span");
+    title.className = "srow-title";
+    title.textContent = stripSeriesPrefix(stream.title, seriesPrefix);
+    title.title = stream.rawTitle;
+    main.appendChild(title);
+    const meta = buildRowMeta(stream, varying);
+    if (meta) {
+      const line = document.createElement("span");
+      line.className = "srow-meta";
+      line.textContent = meta;
+      main.appendChild(line);
+    }
+    button.appendChild(main);
+    const size = document.createElement("span");
+    size.className = "srow-size";
+    size.textContent = stream.size || "—";
+    button.appendChild(size);
+    if (stream.cached === false)
+      button.classList.add("srow--uncached");
+    return button;
+  }
+  function stripSeriesPrefix(title, pattern) {
+    if (!pattern)
+      return title;
+    const stripped = title.replace(pattern, "").replace(/^[-–·(\s]+/, "").trim();
+    return stripped || title;
+  }
+  function buildRowMeta(stream, varying) {
+    const parts = [];
+    if (varying.source && stream.source)
+      parts.push(stream.source);
+    if (stream.audioLanguages.length > 0)
+      parts.push(getAudioBadge(stream.audioLanguages).label);
+    if (varying.addon)
+      parts.push(stream.addonName);
+    if (stream.cached !== true && stream.seeders !== null)
+      parts.push(`${stream.seeders} seeders`);
+    return parts.join(" · ");
+  }
+  var lastOpenTier = null;
   function getAudioBadge(languages) {
     if (languages.length === 0) {
       return { label: "Audio ?", title: "Audio language not provided" };
@@ -1214,15 +1425,6 @@
       title: `Audio: ${languages.map((language) => language === "Other" ? "other languages" : language).join(", ")}`
     };
   }
-  function getSubtitleBadge(streamLanguages, externalEnglishAvailable) {
-    if (streamLanguages?.includes("English") || externalEnglishAvailable === true) {
-      return { label: "EN Subs", title: "English subtitles available", state: "yes" };
-    }
-    if (streamLanguages !== null || externalEnglishAvailable === false) {
-      return { label: "No EN Subs", title: "English subtitles not found", state: "no" };
-    }
-    return { label: "Subs ?", title: "Subtitle availability unknown", state: "unknown" };
-  }
   function getCacheBadge(cached) {
     if (cached === true) {
       return { label: "Cached", title: "Ready to play from debrid cache", state: "cached" };
@@ -1231,19 +1433,6 @@
       return { label: "Uncached", title: "Not currently available in debrid cache", state: "uncached" };
     }
     return { label: "Cache ?", title: "Cache status not provided", state: "unknown" };
-  }
-  function getQualityClass(quality) {
-    const normalized = quality.toLowerCase();
-    if (normalized === "4k" || normalized === "2160p" || normalized === "1440p") {
-      return "stream-quality--uhd";
-    }
-    if (normalized === "1080p")
-      return "stream-quality--fhd";
-    if (normalized === "720p")
-      return "stream-quality--hd";
-    if (["576p", "480p", "360p", "240p"].includes(normalized))
-      return "stream-quality--sd";
-    return "stream-quality--other";
   }
   function rowButton(title, subtitle, action, disabled = false, watched = false, titleTooltip = "") {
     const button = document.createElement("button");
@@ -1283,10 +1472,43 @@
       throw new Error(`Request failed with HTTP ${response.status}.`);
     return await response.json();
   }
-  function setLoading() {
-    ui.loading.classList.remove("hidden");
+  function setLoading(shape = "rows", leadCard = false) {
+    ui.loading.className = `loading loading--${shape}`;
+    ui.loading.replaceChildren(...buildSkeleton(shape, leadCard));
     ui.content.classList.add("hidden");
     ui.error.classList.add("hidden");
+  }
+  var SKELETON_RUNS = {
+    "sk-tile": 0,
+    "sk-lead": 2,
+    "sk-summary": 2,
+    "sk-tier": 2,
+    "sk-row": 3,
+    "sk-chips": 4,
+    "sk-erow": 2
+  };
+  function getSkeletonCells(shape, leadCard = false) {
+    if (shape === "grid")
+      return Array.from({ length: 6 }, () => "sk-tile");
+    if (shape === "episodes") {
+      return ["sk-chips", ...Array.from({ length: 8 }, () => "sk-erow")];
+    }
+    return [
+      ...leadCard ? ["sk-lead"] : [],
+      "sk-summary",
+      "sk-tier",
+      ...Array.from({ length: 6 }, () => "sk-row")
+    ];
+  }
+  function buildSkeleton(shape, leadCard) {
+    return getSkeletonCells(shape, leadCard).map((className) => {
+      const node = document.createElement("div");
+      node.className = className;
+      for (let index = 0;index < (SKELETON_RUNS[className] || 0); index += 1) {
+        node.appendChild(document.createElement("span"));
+      }
+      return node;
+    });
   }
   function showContent(content) {
     ui.loading.classList.add("hidden");
