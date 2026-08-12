@@ -266,7 +266,7 @@ git var GIT_COMMITTER_IDENT
 
 ## Current Working State
 
-As of 2026-08-07:
+As of 2026-08-12:
 
 - `2.0.0` is released: the sidebar declutter (resolution tiers, season chip strip, `quality` split
   into `resolution` + `source`) and the uninstall-crash fix.
@@ -274,6 +274,18 @@ As of 2026-08-07:
   removal, and navigation fixes: the season is restored when returning from a stream list, a search
   query survives a Movies/TV switch, and the search field has a clear control. All are described in
   their runtime-flow sections above and verified in IINA.
+- `2.2.0` adds Simkl scrobbling beside Trakt. Both targets run from one funnel, `sendScrobble` in
+  `src/plugin/main.ts` (renamed from `sendTrakt`, with `traktStopSent` renamed `scrobbleStopSent`),
+  and each is enabled only by its own credentials being present. `src/shared/simkl.ts` is far
+  smaller than the Trakt module because Simkl's scrobble paths and body are identical to Trakt's —
+  so `buildScrobblePayload` is reused — and Simkl needs no client secret and issues long-lived
+  tokens, removing the refresh, expiry, and reconnect handling entirely. Authorization is Simkl's
+  PIN flow. History sync is deliberately not implemented; only scrobbling is.
+- Simkl was chosen over routing through a self-hosted CrossWatch instance after Trakt limited free
+  accounts to one connected community app. The CrossWatch design is kept at
+  `docs/superpowers/specs/2026-08-12-crosswatch-scrobble-design.md` and its implementation on the
+  `feat/crosswatch-scrobble` branch; both are superseded by the Simkl design beside it. Simkl has no
+  such limit, so no relay is needed.
 - `SetMediaType` and `RequestConfiguration` are independent messages with no ordering guarantee, so
   a configuration reply can still carry the previous media type. `applyConfiguration` holds a local
   switch in `pendingMediaType` until the plugin echoes it back; without that, switching type while a
