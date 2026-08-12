@@ -1006,6 +1006,98 @@
     const number = getFiniteNumber(value);
     return number !== null && number >= 0 ? number : null;
   }
+
+  // src/shared/simkl.ts
+  class SimklError extends Error {
+    status;
+    retryAt;
+    constructor(status, retryAt = 0, message = `Simkl request failed with status ${status}.`) {
+      super(message);
+      this.status = status;
+      this.retryAt = retryAt;
+      this.name = "SimklError";
+    }
+  }
+  var SIMKL_API = "https://api.simkl.com";
+  var SIMKL_PIN_URL = "https://simkl.com/pin";
+  var SIMKL_DEVELOPER_URL = "https://simkl.com/settings/developer";
+  var DEFAULT_RETRY_MS2 = 60000;
+  function parseSimklExternalLinkRequest(value) {
+    const url = getString4(getRecord4(value)?.url);
+    return url === SIMKL_PIN_URL || url === SIMKL_DEVELOPER_URL ? url : "";
+  }
+  function parseSimklState(value) {
+    const item = getRecord4(parseJson(value));
+    return {
+      clientId: getString4(item?.clientId),
+      accessToken: getString4(item?.accessToken),
+      lastError: getString4(item?.lastError),
+      retryAt: getNonNegativeNumber(item?.retryAt)
+    };
+  }
+  async function requestSimklPin(transport, state, now = Date.now()) {
+    const data = await request2(transport, state, "GET", pinPath(state), null, now);
+    const item = getRecord4(data);
+    const userCode = getString4(item?.user_code);
+    const verificationUrl = getString4(item?.verification_url) || SIMKL_PIN_URL;
+    const expiresIn = getPositiveNumber2(item?.expires_in);
+    const interval = getPositiveNumber2(item?.interval);
+    if (!userCode || !expiresIn || !interval) {
+      throw new Error("Invalid Simkl pin response.");
+    }
+    return {
+      userCode,
+      verificationUrl,
+      expiresAt: now + expiresIn * 1000,
+      intervalMs: interval * 1000
+    };
+  }
+  async function pollSimklPin(transport, state, pin, wait) {
+    while (Date.now() < pin.expiresAt) {
+      const data = await request2(transport, state, "GET", pinPath(state, pin.userCode), null, Date.now());
+      const item = getRecord4(data);
+      const accessToken = getString4(item?.access_token);
+      if (isOk(item) && accessToken) {
+        return { ...state, accessToken, lastError: "", retryAt: 0 };
+      }
+      if (Date.now() + pin.intervalMs >= pin.expiresAt)
+        break;
+      await wait(pin.intervalMs);
+    }
+    throw new Error("Simkl pin expired before it was approved.");
+  }
+  function pinPath(state, userCode = "") {
+    const base = userCode ? `/oauth/pin/${encodeURIComponent(userCode)}` : "/oauth/pin";
+    return `${base}?client_id=${encodeURIComponent(state.clientId)}`;
+  }
+  function isOk(item) {
+    return getString4(item?.result).toUpperCase() === "OK";
+  }
+  function apiHeaders2(state) {
+    return {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "simkl-api-key": state.clientId,
+      ...state.accessToken ? { Authorization: `Bearer ${state.accessToken}` } : {}
+    };
+  }
+  async function request2(transport, state, method, path, body, now) {
+    const response = await transport(method, `${SIMKL_API}${path}`, body, apiHeaders2(state)).catch(() => {
+      throw new Error("Simkl request failed.");
+    });
+    if (response.status >= 200 && response.status < 300)
+      return response.data;
+    throw responseError2(response, now);
+  }
+  function responseError2(response, now) {
+    const retryAt = response.status === 429 ? now + (retryAfterMs2(response.headers) ?? DEFAULT_RETRY_MS2) : 0;
+    return new SimklError(response.status, retryAt, response.status === 429 ? "Simkl rate limit exceeded." : `Simkl request failed with status ${response.status}.`);
+  }
+  function retryAfterMs2(headers) {
+    const value = Object.entries(headers).find(([key]) => key.toLowerCase() === "retry-after")?.[1];
+    const seconds = Number(value);
+    return value !== undefined && Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : null;
+  }
   // Info.json
   var Info_default = {
     name: "Popcorn for IINA",
@@ -1030,7 +1122,8 @@
       episodeOrder: "oldest",
       watchHistory: [],
       trakt: {},
-      skipSegments: true
+      skipSegments: true,
+      simkl: {}
     },
     permissions: [
       "network-request",
@@ -1052,6 +1145,8 @@
   var addons = [];
   var trakt = parseTraktState(null);
   var traktRevision = 0;
+  var simkl = parseSimklState(null);
+  var simklRevision = 0;
   var manifests = new Map;
   document.documentElement.dataset.version = CLIENT_VERSION;
   var preferences = window.iina.preferences;
@@ -1073,6 +1168,13 @@
   var traktStatus = element("trakt-status");
   var traktError = element("trakt-error");
   var externalLinks = [...document.querySelectorAll("[data-external-url]")];
+  var simklClientId = element("simkl-client-id");
+  var simklConnect = element("simkl-connect");
+  var simklDisconnect = element("simkl-disconnect");
+  var simklPin = element("simkl-pin");
+  var simklStatus = element("simkl-status");
+  var simklError = element("simkl-error");
+  var simklLinks = [...document.querySelectorAll("[data-simkl-url]")];
   var browserTransport = async (method, url, body, headers) => {
     const response = await fetch(url, {
       method,
@@ -1104,16 +1206,26 @@
       traktStatus.textContent = copied ? "Link copied. Paste it into your browser." : "Could not copy the link. Right-click it and choose Copy Link.";
     });
   }));
+  simklClientId.addEventListener("change", saveSimklClientId);
+  simklConnect.addEventListener("click", () => void connectSimkl());
+  simklDisconnect.addEventListener("click", disconnectSimkl);
+  simklLinks.forEach((link) => link.addEventListener("click", (event) => {
+    event.preventDefault();
+    copyExternalLink(link.href).then((copied) => {
+      simklStatus.textContent = copied ? "Link copied. Paste it into your browser." : "Could not copy the link. Right-click it and choose Copy Link.";
+    });
+  }));
   skipSegments.addEventListener("change", () => {
     preferences.set("skipSegments", skipSegments.checked);
   });
   loadPreferences();
   async function loadPreferences() {
-    const [stored, legacy, storedTrakt, storedSkipSegments] = await Promise.all([
+    const [stored, legacy, storedTrakt, storedSkipSegments, storedSimkl] = await Promise.all([
       getPreference("addons"),
       getPreference("addonManifestUrl"),
       getPreference("trakt"),
-      getPreference("skipSegments")
+      getPreference("skipSegments"),
+      getPreference("simkl")
     ]);
     const storedAddons = parseAddons(stored);
     addons = parseAddons(stored, legacy);
@@ -1121,8 +1233,11 @@
     trakt = parseTraktState(storedTrakt);
     traktClientId.value = trakt.clientId;
     traktClientSecret.value = trakt.clientSecret;
+    simkl = parseSimklState(storedSimkl);
+    simklClientId.value = simkl.clientId;
     render();
     renderTrakt();
+    renderSimkl();
     const loaded = await Promise.allSettled(addons.map(async (addon) => {
       const manifest = await fetchManifest(addon.manifestUrl);
       manifests.set(addon.manifestUrl, manifest);
@@ -1271,6 +1386,74 @@
       setTraktError("");
     renderTrakt();
   }
+  function setSimklError(message) {
+    simklError.textContent = message;
+    simklError.hidden = !message;
+  }
+  function renderSimkl() {
+    const connected = simkl.accessToken !== "";
+    simklConnect.hidden = connected;
+    simklDisconnect.hidden = !connected;
+    simklStatus.textContent = connected ? simkl.lastError ? "Connected · Last scrobble failed" : "Connected" : "Not connected";
+    if (simkl.lastError)
+      setSimklError(simkl.lastError);
+  }
+  function saveSimkl(next) {
+    simkl = next;
+    preferences.set("simkl", next);
+    preferences.sync?.();
+    if (!next.lastError)
+      setSimklError("");
+    renderSimkl();
+  }
+  function saveSimklClientId() {
+    const clientId = simklClientId.value.trim();
+    if (clientId === simkl.clientId)
+      return;
+    simklRevision += 1;
+    simklPin.hidden = true;
+    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0 });
+  }
+  async function connectSimkl() {
+    setSimklError("");
+    const clientId = simklClientId.value.trim();
+    if (!clientId) {
+      setSimklError("Enter the Simkl Client ID.");
+      return;
+    }
+    const revision = ++simklRevision;
+    simklConnect.disabled = true;
+    try {
+      saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0 });
+      simklStatus.textContent = "Requesting a PIN…";
+      const pin = await requestSimklPin(browserTransport, simkl);
+      if (revision !== simklRevision)
+        return;
+      simklPin.hidden = false;
+      const copied = await copyExternalLink(pin.verificationUrl);
+      simklPin.textContent = copied ? `Enter ${pin.userCode} at simkl.com/pin · Link copied` : `Open ${pin.verificationUrl} and enter ${pin.userCode}`;
+      simklStatus.textContent = "Waiting for Simkl authorization…";
+      const connected = await pollSimklPin(browserTransport, simkl, pin, (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)));
+      if (revision !== simklRevision)
+        return;
+      saveSimkl(connected);
+      simklPin.hidden = true;
+    } catch (error) {
+      if (revision === simklRevision) {
+        setSimklError(error instanceof Error ? error.message : "Could not connect Simkl.");
+      }
+    } finally {
+      simklConnect.disabled = false;
+      if (revision === simklRevision)
+        renderSimkl();
+    }
+  }
+  function disconnectSimkl() {
+    simklRevision += 1;
+    simklPin.hidden = true;
+    setSimklError("");
+    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0 });
+  }
   function saveTraktCredentials() {
     const clientId = traktClientId.value.trim();
     const clientSecret = traktClientSecret.value.trim();
@@ -1347,7 +1530,7 @@
     }
   }
   async function copyExternalLink(url) {
-    const safeUrl = parseTraktExternalLinkRequest({ url });
+    const safeUrl = parseTraktExternalLinkRequest({ url }) || parseSimklExternalLinkRequest({ url });
     if (!safeUrl)
       return false;
     try {
