@@ -15,13 +15,23 @@ test("uses IINA's preference-page API from window", () => {
     expect(preferencesSource).not.toContain("const preferences = iina.preferences");
 });
 
-test("copies validated Trakt links without polling the global plugin", () => {
+test("copies validated external links without polling the global plugin", () => {
     expect(preferencesHtml).toContain('href="https://trakt.tv/join"');
     expect(preferencesHtml).toContain('href="https://app.trakt.tv/settings/apps/api"');
-    expect(preferencesHtml.match(/data-external-url/g)).toHaveLength(2);
+    expect(preferencesHtml).toContain('href="https://simkl.com/settings/developer"');
+    expect(preferencesHtml).toContain('href="https://simkl.com/pin"');
+
+    // Every outbound anchor is copy-only: marked for a copy handler, never a real navigation.
+    const anchors = preferencesHtml.match(/<a\s+href="https:\/\/[^>]*>/g) || [];
+    expect(anchors.length).toBeGreaterThan(0);
+    anchors.forEach((anchor) => {
+        expect(anchor).toMatch(/data-(external|simkl)-url/);
+        expect(anchor).toContain('rel="noopener noreferrer"');
+    });
     expect(preferencesHtml).not.toContain('target="_blank"');
-    expect(preferencesHtml.match(/rel="noopener noreferrer"/g)).toHaveLength(2);
+
     expect(preferencesSource).toContain("parseTraktExternalLinkRequest");
+    expect(preferencesSource).toContain("parseSimklExternalLinkRequest");
     expect(preferencesSource).toContain("navigator.clipboard.writeText");
     expect(preferencesSource).not.toContain('preferences.set("externalLinkRequest"');
     expect(preferencesSource).not.toContain("window.open(");

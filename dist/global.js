@@ -23,7 +23,8 @@
       episodeOrder: "oldest",
       watchHistory: [],
       trakt: {},
-      skipSegments: true
+      skipSegments: true,
+      simkl: {}
     },
     permissions: [
       "network-request",

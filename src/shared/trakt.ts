@@ -563,7 +563,7 @@ function historyKey(entry: WatchHistoryEntry): string {
         : entry.media.imdbId;
 }
 
-function parseJson(value: unknown): unknown {
+export function parseJson(value: unknown): unknown {
     if (typeof value !== "string") return value;
     try {
         return JSON.parse(value) as unknown;
@@ -577,13 +577,13 @@ function clampProgress(value: unknown): number | null {
     return progress === null ? null : Math.max(0, Math.min(100, progress));
 }
 
-function getRecord(value: unknown): Record<string, unknown> | null {
+export function getRecord(value: unknown): Record<string, unknown> | null {
     return typeof value === "object" && value !== null && !Array.isArray(value)
         ? value as Record<string, unknown>
         : null;
 }
 
-function getString(value: unknown): string {
+export function getString(value: unknown): string {
     return typeof value === "string" ? value : "";
 }
 
@@ -591,12 +591,12 @@ function getFiniteNumber(value: unknown): number | null {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function getPositiveNumber(value: unknown): number | null {
+export function getPositiveNumber(value: unknown): number | null {
     const number = getFiniteNumber(value);
     return number !== null && number > 0 ? number : null;
 }
 
-function getNonNegativeNumber(value: unknown): number {
+export function getNonNegativeNumber(value: unknown): number {
     const number = getFiniteNumber(value);
     return number !== null && number >= 0 ? number : 0;
 }

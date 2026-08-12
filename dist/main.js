@@ -844,7 +844,8 @@
       episodeOrder: "oldest",
       watchHistory: [],
       trakt: {},
-      skipSegments: true
+      skipSegments: true,
+      simkl: {}
     },
     permissions: [
       "network-request",
@@ -971,6 +972,83 @@
     ticksSinceSpawn = 0;
   }
 
+  // src/shared/simkl.ts
+  class SimklError extends Error {
+    status;
+    retryAt;
+    constructor(status, retryAt = 0, message = `Simkl request failed with status ${status}.`) {
+      super(message);
+      this.status = status;
+      this.retryAt = retryAt;
+      this.name = "SimklError";
+    }
+  }
+  var SIMKL_API = "https://api.simkl.com";
+  var DEFAULT_RETRY_MS2 = 60000;
+  function parseSimklState(value) {
+    const item = getRecord4(parseJson(value));
+    return {
+      clientId: getString4(item?.clientId),
+      accessToken: getString4(item?.accessToken),
+      lastError: getString4(item?.lastError),
+      retryAt: getNonNegativeNumber(item?.retryAt)
+    };
+  }
+  function isSimklConnected(state) {
+    return state.clientId !== "" && state.accessToken !== "";
+  }
+  async function simklScrobble(transport, state, action, context, progress, now = Date.now()) {
+    if (!isSimklConnected(state))
+      return state;
+    if (!isImdbId(context.media.imdbId))
+      return state;
+    if (state.retryAt > now)
+      return state;
+    try {
+      await request2(transport, state, "POST", `/scrobble/${action}`, buildScrobblePayload(context, progress), now);
+      return { ...state, lastError: "", retryAt: 0 };
+    } catch (error) {
+      if (error instanceof SimklError && error.status === 401) {
+        return {
+          ...state,
+          accessToken: "",
+          lastError: "Simkl connection was rejected. Reconnect required.",
+          retryAt: 0
+        };
+      }
+      return {
+        ...state,
+        lastError: error instanceof SimklError ? error.message : "Simkl request failed.",
+        retryAt: error instanceof SimklError ? error.retryAt : 0
+      };
+    }
+  }
+  function apiHeaders2(state) {
+    return {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "simkl-api-key": state.clientId,
+      ...state.accessToken ? { Authorization: `Bearer ${state.accessToken}` } : {}
+    };
+  }
+  async function request2(transport, state, method, path, body, now) {
+    const response = await transport(method, `${SIMKL_API}${path}`, body, apiHeaders2(state)).catch(() => {
+      throw new Error("Simkl request failed.");
+    });
+    if (response.status >= 200 && response.status < 300)
+      return response.data;
+    throw responseError2(response, now);
+  }
+  function responseError2(response, now) {
+    const retryAt = response.status === 429 ? now + (retryAfterMs2(response.headers) ?? DEFAULT_RETRY_MS2) : 0;
+    return new SimklError(response.status, retryAt, response.status === 429 ? "Simkl rate limit exceeded." : `Simkl request failed with status ${response.status}.`);
+  }
+  function retryAfterMs2(headers) {
+    const value = Object.entries(headers).find(([key]) => key.toLowerCase() === "retry-after")?.[1];
+    const seconds = Number(value);
+    return value !== undefined && Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : null;
+  }
+
   // src/plugin/trakt.ts
   function createIinaTransport(http) {
     return async (method, url, body, headers) => {
@@ -1039,6 +1117,36 @@
   }
   function sameConnection(current, input) {
     return current.clientId === input.clientId && current.clientSecret === input.clientSecret && current.tokens?.accessToken === input.tokens?.accessToken && current.tokens?.refreshToken === input.tokens?.refreshToken && current.tokens?.expiresAt === input.tokens?.expiresAt;
+  }
+
+  // src/plugin/simkl.ts
+  function createIinaSimklClient(http, preferences, onError) {
+    const transport = createIinaTransport(http);
+    const read = () => parseSimklState(preferences.get("simkl"));
+    let pending = Promise.resolve();
+    return {
+      sendPlayback(action, context, progress) {
+        const result = pending.then(async () => {
+          const state = read();
+          if (!state.accessToken)
+            return;
+          try {
+            const next = await simklScrobble(transport, state, action, context, progress);
+            if (sameConnection2(read(), state)) {
+              preferences.set("simkl", next);
+              preferences.sync();
+            }
+          } catch (error) {
+            onError(error);
+          }
+        });
+        pending = result.then(() => {}, () => {});
+        return result;
+      }
+    };
+  }
+  function sameConnection2(current, input) {
+    return current.clientId === input.clientId && current.accessToken === input.accessToken;
   }
 
   // src/plugin/intro.ts
@@ -1131,6 +1239,9 @@
   var trakt = createIinaTraktClient(http, preferences, (error) => {
     logDebug("Popcorn: Trakt request failed:", formatError(error));
   });
+  var simkl = createIinaSimklClient(http, preferences, (error) => {
+    logDebug("Popcorn: Simkl request failed:", formatError(error));
+  });
   var windowReady = false;
   var pendingShowSidebar = false;
   var sidebarVisible = false;
@@ -1142,7 +1253,7 @@
   var lastProgressSavedAt = 0;
   var isReplacingPlayback = false;
   var reachedNaturalEof = false;
-  var traktStopSent = false;
+  var scrobbleStopSent = false;
   var watchHistory = parseWatchHistory(preferences.get("watchHistory"));
   var introInterval = null;
   var recapInterval = null;
@@ -1212,8 +1323,8 @@
     const playing = !mpv.getFlag("pause");
     keepAwakeTick(playing);
     const percent = mpv.getNumber("percent-pos");
-    if (playing && shouldSendWatchedStop(percent, traktStopSent)) {
-      sendTrakt("stop", percent);
+    if (playing && shouldSendWatchedStop(percent, scrobbleStopSent)) {
+      sendScrobble("stop", percent);
     }
     if (playing && shouldSaveProgress(now, lastProgressSavedAt, PROGRESS_SAVE_INTERVAL_MS)) {
       savePlaybackProgress();
@@ -1229,13 +1340,14 @@
     sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history: watchHistory });
     lastProgressSavedAt = Date.now();
   }
-  function sendTrakt(action, percent) {
+  function sendScrobble(action, percent) {
     const context = activePlaybackContext;
-    if (!context || !Number.isFinite(percent) || traktStopSent)
+    if (!context || !Number.isFinite(percent) || scrobbleStopSent)
       return;
     if (action === "stop")
-      traktStopSent = true;
+      scrobbleStopSent = true;
     trakt.sendPlayback(action, context, percent);
+    simkl.sendPlayback(action, context, percent);
   }
   function checkpointPlayback(forceStop = false) {
     const context = activePlaybackContext;
@@ -1245,7 +1357,7 @@
     if (!Number.isFinite(percent))
       return;
     savePlaybackProgress(percent);
-    sendTrakt(forceStop || percent >= 90 ? "stop" : "pause", percent);
+    sendScrobble(forceStop || percent >= 90 ? "stop" : "pause", percent);
   }
   function stopPlaybackMonitoring() {
     lastPlaybackTickAt = 0;
@@ -1286,7 +1398,7 @@
     const title = sanitizeMediaTitle(payload.title || "Popcorn");
     checkpointPlayback();
     activePlaybackContext = payload.playbackContext || null;
-    traktStopSent = false;
+    scrobbleStopSent = false;
     pendingResumePercent = typeof payload.resumePercent === "number" && Number.isFinite(payload.resumePercent) && payload.resumePercent >= 0 && payload.resumePercent <= 100 ? payload.resumePercent : null;
     isReplacingPlayback = true;
     reachedNaturalEof = false;
@@ -1640,7 +1752,7 @@
       clearIntro();
       stopPlaybackMonitoring();
       activePlaybackContext = null;
-      traktStopSent = false;
+      scrobbleStopSent = false;
       pendingResumePercent = null;
       setPlayerUIHidden(true);
       setWindowTitle("Popcorn");
@@ -1656,7 +1768,7 @@
       mpv.command("seek", [String(pendingResumePercent), "absolute-percent+exact"]);
       pendingResumePercent = null;
     }
-    sendTrakt("start", mpv.getNumber("percent-pos"));
+    sendScrobble("start", mpv.getNumber("percent-pos"));
     const revision = playbackRevision;
     resolvePlaybackIntervals(revision);
     prefetchNextEpisode(revision);
@@ -1667,7 +1779,7 @@
     if (mpv.getFlag("pause"))
       checkpointPlayback();
     else
-      sendTrakt("start", mpv.getNumber("percent-pos"));
+      sendScrobble("start", mpv.getNumber("percent-pos"));
   });
   event.on("mpv.eof-reached.changed", () => {
     if (mpv.getFlag("eof-reached"))
@@ -1682,7 +1794,7 @@
     windowReady = false;
     sidebarVisible = false;
     activePlaybackContext = null;
-    traktStopSent = false;
+    scrobbleStopSent = false;
     pendingResumePercent = null;
     isReplacingPlayback = false;
     reachedNaturalEof = false;

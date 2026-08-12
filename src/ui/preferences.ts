@@ -13,6 +13,13 @@ import {
     parseAddons
 } from "../shared/addons";
 import { parseWatchHistory } from "../shared/history";
+import {
+    parseSimklExternalLinkRequest,
+    parseSimklState,
+    pollSimklPin,
+    requestSimklPin,
+    type SimklState
+} from "../shared/simkl";
 import { parseSkipSegments } from "../shared/stremio";
 import {
     mergeWatchHistory,
@@ -39,6 +46,8 @@ declare global {
 let addons: StremioAddon[] = [];
 let trakt = parseTraktState(null);
 let traktRevision = 0;
+let simkl = parseSimklState(null);
+let simklRevision = 0;
 const manifests = new Map<string, AddonManifest>();
 
 document.documentElement.dataset.version = CLIENT_VERSION;
@@ -61,6 +70,13 @@ const traktDevice = element<HTMLParagraphElement>("trakt-device");
 const traktStatus = element<HTMLParagraphElement>("trakt-status");
 const traktError = element<HTMLParagraphElement>("trakt-error");
 const externalLinks = [...document.querySelectorAll<HTMLAnchorElement>("[data-external-url]")];
+const simklClientId = element<HTMLInputElement>("simkl-client-id");
+const simklConnect = element<HTMLButtonElement>("simkl-connect");
+const simklDisconnect = element<HTMLButtonElement>("simkl-disconnect");
+const simklPin = element<HTMLParagraphElement>("simkl-pin");
+const simklStatus = element<HTMLParagraphElement>("simkl-status");
+const simklError = element<HTMLParagraphElement>("simkl-error");
+const simklLinks = [...document.querySelectorAll<HTMLAnchorElement>("[data-simkl-url]")];
 
 const browserTransport: TraktTransport = async (method, url, body, headers) => {
     const response = await fetch(url, {
@@ -99,6 +115,18 @@ externalLinks.forEach((link) => link.addEventListener("click", (event) => {
     });
 }));
 
+simklClientId.addEventListener("change", saveSimklClientId);
+simklConnect.addEventListener("click", () => void connectSimkl());
+simklDisconnect.addEventListener("click", disconnectSimkl);
+simklLinks.forEach((link) => link.addEventListener("click", (event) => {
+    event.preventDefault();
+    void copyExternalLink(link.href).then((copied) => {
+        simklStatus.textContent = copied
+            ? "Link copied. Paste it into your browser."
+            : "Could not copy the link. Right-click it and choose Copy Link.";
+    });
+}));
+
 skipSegments.addEventListener("change", () => {
     preferences.set("skipSegments", skipSegments.checked);
 });
@@ -106,11 +134,12 @@ skipSegments.addEventListener("change", () => {
 void loadPreferences();
 
 async function loadPreferences(): Promise<void> {
-    const [stored, legacy, storedTrakt, storedSkipSegments] = await Promise.all([
+    const [stored, legacy, storedTrakt, storedSkipSegments, storedSimkl] = await Promise.all([
         getPreference("addons"),
         getPreference("addonManifestUrl"),
         getPreference("trakt"),
-        getPreference("skipSegments")
+        getPreference("skipSegments"),
+        getPreference("simkl")
     ]);
     const storedAddons = parseAddons(stored);
     addons = parseAddons(stored, legacy);
@@ -118,8 +147,11 @@ async function loadPreferences(): Promise<void> {
     trakt = parseTraktState(storedTrakt);
     traktClientId.value = trakt.clientId;
     traktClientSecret.value = trakt.clientSecret;
+    simkl = parseSimklState(storedSimkl);
+    simklClientId.value = simkl.clientId;
     render();
     renderTrakt();
+    renderSimkl();
 
     const loaded = await Promise.allSettled(addons.map(async (addon) => {
         const manifest = await fetchManifest(addon.manifestUrl);
@@ -280,6 +312,85 @@ function saveTrakt(next: TraktState): void {
     renderTrakt();
 }
 
+function setSimklError(message: string): void {
+    simklError.textContent = message;
+    simklError.hidden = !message;
+}
+
+function renderSimkl(): void {
+    const connected = simkl.accessToken !== "";
+    simklConnect.hidden = connected;
+    simklDisconnect.hidden = !connected;
+    simklStatus.textContent = connected
+        ? simkl.lastError ? "Connected · Last scrobble failed" : "Connected"
+        : "Not connected";
+    if (simkl.lastError) setSimklError(simkl.lastError);
+}
+
+function saveSimkl(next: SimklState): void {
+    simkl = next;
+    preferences.set("simkl", next);
+    preferences.sync?.();
+    if (!next.lastError) setSimklError("");
+    renderSimkl();
+}
+
+function saveSimklClientId(): void {
+    const clientId = simklClientId.value.trim();
+    if (clientId === simkl.clientId) return;
+    // A different application means the stored token no longer belongs to it.
+    simklRevision += 1;
+    simklPin.hidden = true;
+    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0 });
+}
+
+async function connectSimkl(): Promise<void> {
+    setSimklError("");
+    const clientId = simklClientId.value.trim();
+    if (!clientId) {
+        setSimklError("Enter the Simkl Client ID.");
+        return;
+    }
+
+    const revision = ++simklRevision;
+    simklConnect.disabled = true;
+    try {
+        saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0 });
+        simklStatus.textContent = "Requesting a PIN…";
+        const pin = await requestSimklPin(browserTransport, simkl);
+        if (revision !== simklRevision) return;
+        simklPin.hidden = false;
+        const copied = await copyExternalLink(pin.verificationUrl);
+        simklPin.textContent = copied
+            ? `Enter ${pin.userCode} at simkl.com/pin · Link copied`
+            : `Open ${pin.verificationUrl} and enter ${pin.userCode}`;
+        simklStatus.textContent = "Waiting for Simkl authorization…";
+        const connected = await pollSimklPin(
+            browserTransport,
+            simkl,
+            pin,
+            (ms) => new Promise((resolve) => window.setTimeout(resolve, ms))
+        );
+        if (revision !== simklRevision) return;
+        saveSimkl(connected);
+        simklPin.hidden = true;
+    } catch (error) {
+        if (revision === simklRevision) {
+            setSimklError(error instanceof Error ? error.message : "Could not connect Simkl.");
+        }
+    } finally {
+        simklConnect.disabled = false;
+        if (revision === simklRevision) renderSimkl();
+    }
+}
+
+function disconnectSimkl(): void {
+    simklRevision += 1;
+    simklPin.hidden = true;
+    setSimklError("");
+    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0 });
+}
+
 function saveTraktCredentials(): void {
     const clientId = traktClientId.value.trim();
     const clientSecret = traktClientSecret.value.trim();
@@ -361,7 +472,7 @@ async function connectTrakt(): Promise<void> {
 }
 
 async function copyExternalLink(url: string): Promise<boolean> {
-    const safeUrl = parseTraktExternalLinkRequest({ url });
+    const safeUrl = parseTraktExternalLinkRequest({ url }) || parseSimklExternalLinkRequest({ url });
     if (!safeUrl) return false;
     try {
         await navigator.clipboard.writeText(safeUrl);

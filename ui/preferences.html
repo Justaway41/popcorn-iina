@@ -119,6 +119,27 @@
         <p id="trakt-error" class="addon-error" role="alert" hidden></p>
     </section>
 
+    <section class="pref-section trakt-section" aria-labelledby="simkl-heading">
+        <h3 id="simkl-heading">Simkl Scrobbling</h3>
+        <p class="small secondary pref-help">
+            Create a Simkl application, then enter its Client ID. Simkl needs no secret. What you
+            play here is reported to Simkl as you watch.
+        </p>
+        <p class="small trakt-links">
+            <a href="https://simkl.com/settings/developer" data-simkl-url rel="noopener noreferrer">Copy developer settings link</a>
+            <a href="https://simkl.com/pin" data-simkl-url rel="noopener noreferrer">Copy PIN entry link</a>
+        </p>
+        <label for="simkl-client-id">Client ID</label>
+        <input id="simkl-client-id" type="text" autocomplete="off" spellcheck="false">
+        <div class="trakt-actions">
+            <button id="simkl-connect" type="button">Connect Simkl</button>
+            <button id="simkl-disconnect" type="button" hidden>Disconnect</button>
+        </div>
+        <p id="simkl-pin" class="trakt-device" hidden></p>
+        <p id="simkl-status" class="small secondary" role="status">Not connected</p>
+        <p id="simkl-error" class="addon-error" role="alert" hidden></p>
+    </section>
+
     <template id="addon-row-template">
         <div class="addon-row">
             <input class="addon-enabled" type="checkbox">

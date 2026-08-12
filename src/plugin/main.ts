@@ -35,6 +35,7 @@ import {
     shouldSendWatchedStop
 } from "./playback";
 import { keepAwakeTick, startKeepAwake, stopKeepAwake } from "./sleep";
+import { createIinaSimklClient } from "./simkl";
 import { createIinaTraktClient } from "./trakt";
 import {
     findChapterCredits,
@@ -52,6 +53,9 @@ const { core, event, global, http, mpv, overlay, preferences, sidebar, utils } =
 const trakt = createIinaTraktClient(http, preferences, (error) => {
     logDebug("Popcorn: Trakt request failed:", formatError(error));
 });
+const simkl = createIinaSimklClient(http, preferences, (error) => {
+    logDebug("Popcorn: Simkl request failed:", formatError(error));
+});
 
 let windowReady = false;
 let pendingShowSidebar = false;
@@ -64,7 +68,7 @@ let pendingResumePercent: number | null = null;
 let lastProgressSavedAt = 0;
 let isReplacingPlayback = false;
 let reachedNaturalEof = false;
-let traktStopSent = false;
+let scrobbleStopSent = false;
 let watchHistory = parseWatchHistory(preferences.get("watchHistory"));
 let introInterval: IntroInterval | null = null;
 let recapInterval: IntroInterval | null = null;
@@ -135,8 +139,8 @@ function updatePlaybackMonitoring(): void {
     const playing = !mpv.getFlag("pause");
     keepAwakeTick(playing);
     const percent = mpv.getNumber("percent-pos");
-    if (playing && shouldSendWatchedStop(percent, traktStopSent)) {
-        sendTrakt("stop", percent);
+    if (playing && shouldSendWatchedStop(percent, scrobbleStopSent)) {
+        sendScrobble("stop", percent);
     }
     if (playing && shouldSaveProgress(now, lastProgressSavedAt, PROGRESS_SAVE_INTERVAL_MS)) {
         savePlaybackProgress();
@@ -158,11 +162,12 @@ function savePlaybackProgress(percent = mpv.getNumber("percent-pos")): void {
     lastProgressSavedAt = Date.now();
 }
 
-function sendTrakt(action: TraktScrobbleAction, percent: number): void {
+function sendScrobble(action: TraktScrobbleAction, percent: number): void {
     const context = activePlaybackContext;
-    if (!context || !Number.isFinite(percent) || traktStopSent) return;
-    if (action === "stop") traktStopSent = true;
+    if (!context || !Number.isFinite(percent) || scrobbleStopSent) return;
+    if (action === "stop") scrobbleStopSent = true;
     void trakt.sendPlayback(action, context, percent);
+    void simkl.sendPlayback(action, context, percent);
 }
 
 function checkpointPlayback(forceStop = false): void {
@@ -171,7 +176,7 @@ function checkpointPlayback(forceStop = false): void {
     const percent = forceStop ? 100 : mpv.getNumber("percent-pos");
     if (!Number.isFinite(percent)) return;
     savePlaybackProgress(percent);
-    sendTrakt(
+    sendScrobble(
         forceStop || percent >= 90 ? "stop" : "pause",
         percent
     );
@@ -217,7 +222,7 @@ function playItem(payload: PlayItemPayload): void {
     const title = sanitizeMediaTitle(payload.title || "Popcorn");
     checkpointPlayback();
     activePlaybackContext = payload.playbackContext || null;
-    traktStopSent = false;
+    scrobbleStopSent = false;
     pendingResumePercent = typeof payload.resumePercent === "number" &&
         Number.isFinite(payload.resumePercent) &&
         payload.resumePercent >= 0 &&
@@ -674,7 +679,7 @@ event.on("mpv.file-loaded", () => {
         clearIntro();
         stopPlaybackMonitoring();
         activePlaybackContext = null;
-        traktStopSent = false;
+        scrobbleStopSent = false;
         pendingResumePercent = null;
         setPlayerUIHidden(true);
         setWindowTitle("Popcorn");
@@ -690,7 +695,7 @@ event.on("mpv.file-loaded", () => {
         mpv.command("seek", [String(pendingResumePercent), "absolute-percent+exact"]);
         pendingResumePercent = null;
     }
-    sendTrakt("start", mpv.getNumber("percent-pos"));
+    sendScrobble("start", mpv.getNumber("percent-pos"));
     const revision = playbackRevision;
     void resolvePlaybackIntervals(revision);
     void prefetchNextEpisode(revision);
@@ -699,7 +704,7 @@ event.on("mpv.file-loaded", () => {
 event.on("mpv.pause.changed", () => {
     if (isReplacingPlayback) return;
     if (mpv.getFlag("pause")) checkpointPlayback();
-    else sendTrakt("start", mpv.getNumber("percent-pos"));
+    else sendScrobble("start", mpv.getNumber("percent-pos"));
 });
 event.on("mpv.eof-reached.changed", () => {
     if (mpv.getFlag("eof-reached")) reachedNaturalEof = true;
@@ -713,7 +718,7 @@ event.on("iina.window-will-close", () => {
     windowReady = false;
     sidebarVisible = false;
     activePlaybackContext = null;
-    traktStopSent = false;
+    scrobbleStopSent = false;
     pendingResumePercent = null;
     isReplacingPlayback = false;
     reachedNaturalEof = false;
