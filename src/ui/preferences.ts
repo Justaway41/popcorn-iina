@@ -341,7 +341,7 @@ function saveSimklClientId(): void {
     // A different application means the stored token no longer belongs to it.
     simklRevision += 1;
     simklPin.hidden = true;
-    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0 });
+    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "" });
 }
 
 async function connectSimkl(): Promise<void> {
@@ -355,7 +355,7 @@ async function connectSimkl(): Promise<void> {
     const revision = ++simklRevision;
     simklConnect.disabled = true;
     try {
-        saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0 });
+        saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "" });
         simklStatus.textContent = "Requesting a PIN…";
         const pin = await requestSimklPin(browserTransport, simkl);
         if (revision !== simklRevision) return;
@@ -388,7 +388,8 @@ function disconnectSimkl(): void {
     simklRevision += 1;
     simklPin.hidden = true;
     setSimklError("");
-    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0 });
+    // Drop the sync cursor too, so reconnecting a different account pulls its full history.
+    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "" });
 }
 
 function saveTraktCredentials(): void {

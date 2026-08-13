@@ -1032,7 +1032,8 @@
       clientId: getString4(item?.clientId),
       accessToken: getString4(item?.accessToken),
       lastError: getString4(item?.lastError),
-      retryAt: getNonNegativeNumber(item?.retryAt)
+      retryAt: getNonNegativeNumber(item?.retryAt),
+      lastActivityAt: getString4(item?.lastActivityAt)
     };
   }
   async function requestSimklPin(transport, state, now = Date.now()) {
@@ -1102,9 +1103,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.2.0",
+    version: "2.2.1",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 9,
+    ghVersion: 10,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1412,7 +1413,7 @@
       return;
     simklRevision += 1;
     simklPin.hidden = true;
-    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0 });
+    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "" });
   }
   async function connectSimkl() {
     setSimklError("");
@@ -1424,7 +1425,7 @@
     const revision = ++simklRevision;
     simklConnect.disabled = true;
     try {
-      saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0 });
+      saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "" });
       simklStatus.textContent = "Requesting a PIN…";
       const pin = await requestSimklPin(browserTransport, simkl);
       if (revision !== simklRevision)
@@ -1452,7 +1453,7 @@
     simklRevision += 1;
     simklPin.hidden = true;
     setSimklError("");
-    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0 });
+    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "" });
   }
   function saveTraktCredentials() {
     const clientId = traktClientId.value.trim();

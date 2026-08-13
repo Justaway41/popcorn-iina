@@ -536,7 +536,7 @@ function historyUploadPayload(entries: WatchHistoryEntry[]) {
     };
 }
 
-function remoteMedia(
+export function remoteMedia(
     imdbId: string,
     type: "movie" | "series",
     name: string,
@@ -572,7 +572,7 @@ export function parseJson(value: unknown): unknown {
     }
 }
 
-function clampProgress(value: unknown): number | null {
+export function clampProgress(value: unknown): number | null {
     const progress = getFiniteNumber(value);
     return progress === null ? null : Math.max(0, Math.min(100, progress));
 }
@@ -587,7 +587,7 @@ export function getString(value: unknown): string {
     return typeof value === "string" ? value : "";
 }
 
-function getFiniteNumber(value: unknown): number | null {
+export function getFiniteNumber(value: unknown): number | null {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 

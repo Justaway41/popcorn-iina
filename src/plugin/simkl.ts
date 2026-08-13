@@ -1,7 +1,9 @@
+import type { WatchHistoryEntry } from "../shared/history";
 import type { PlaybackContext } from "../shared/messages";
 import {
     parseSimklState,
     simklScrobble,
+    syncSimklHistory,
     type SimklScrobbleAction,
     type SimklState
 } from "../shared/simkl";
@@ -13,6 +15,7 @@ export interface IinaSimklClient {
         context: PlaybackContext,
         progress: number
     ): Promise<void>;
+    sync(history: WatchHistoryEntry[]): Promise<WatchHistoryEntry[]>;
 }
 
 export function createIinaSimklClient(
@@ -22,27 +25,48 @@ export function createIinaSimklClient(
 ): IinaSimklClient {
     const transport = createIinaTransport(http);
     const read = () => parseSimklState(preferences.get("simkl"));
+    // Only write back if the connection did not change underneath us, so a request in
+    // flight cannot resurrect a token cleared in preferences.
+    const saveIfCurrent = (input: SimklState, output: SimklState) => {
+        if (!sameConnection(read(), input)) return;
+        preferences.set("simkl", output);
+        preferences.sync();
+    };
     let pending = Promise.resolve();
+    const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
+        const result = pending.then(operation);
+        pending = result.then(() => {}, () => {});
+        return result;
+    };
 
     return {
         sendPlayback(action, context, progress) {
-            const result = pending.then(async () => {
+            return enqueue(async () => {
                 const state = read();
                 if (!state.accessToken) return;
                 try {
-                    const next = await simklScrobble(transport, state, action, context, progress);
-                    // Only write back if the connection did not change underneath us, so a
-                    // scrobble in flight cannot resurrect a token cleared in preferences.
-                    if (sameConnection(read(), state)) {
-                        preferences.set("simkl", next);
-                        preferences.sync();
-                    }
+                    saveIfCurrent(
+                        state,
+                        await simklScrobble(transport, state, action, context, progress)
+                    );
                 } catch (error) {
                     onError(error);
                 }
             });
-            pending = result.then(() => {}, () => {});
-            return result;
+        },
+        sync(history) {
+            return enqueue(async () => {
+                const state = read();
+                if (!state.accessToken) return history;
+                try {
+                    const result = await syncSimklHistory(transport, state, history);
+                    saveIfCurrent(state, result.state);
+                    return result.history;
+                } catch (error) {
+                    onError(error);
+                    return history;
+                }
+            });
         }
     };
 }
