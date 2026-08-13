@@ -655,16 +655,18 @@ event.on("iina.window-loaded", () => {
     });
     windowReady = true;
     global.postMessage("playerReady", {});
-    void trakt.sync(watchHistory).then((synced) => {
-        const history = mergeWatchHistory(
-            parseWatchHistory(preferences.get("watchHistory")),
-            synced
-        );
-        watchHistory = history;
-        preferences.set("watchHistory", history);
-        preferences.sync();
-        sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history });
-    });
+    void trakt.sync(watchHistory)
+        .then((synced) => simkl.sync(synced))
+        .then((synced) => {
+            const history = mergeWatchHistory(
+                parseWatchHistory(preferences.get("watchHistory")),
+                synced
+            );
+            watchHistory = history;
+            preferences.set("watchHistory", history);
+            preferences.sync();
+            sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history });
+        });
     if (pendingShowSidebar) {
         pendingShowSidebar = false;
         showSidebarWithDelay();

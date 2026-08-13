@@ -7,9 +7,11 @@ import {
     isSimklConnected,
     parseSimklExternalLinkRequest,
     parseSimklState,
+    parseSimklHistory,
     pollSimklPin,
     requestSimklPin,
-    simklScrobble
+    simklScrobble,
+    syncSimklHistory
 } from "./simkl";
 
 const movie = {
@@ -44,7 +46,8 @@ const connected = {
     clientId: "client-id",
     accessToken: "access-token",
     lastError: "",
-    retryAt: 0
+    retryAt: 0,
+    lastActivityAt: ""
 };
 
 interface Call {
@@ -74,7 +77,9 @@ function ok(data: unknown): TraktResponse {
 }
 
 test("parses stored state defensively", () => {
-    const empty = { clientId: "", accessToken: "", lastError: "", retryAt: 0 };
+    const empty = {
+        clientId: "", accessToken: "", lastError: "", retryAt: 0, lastActivityAt: ""
+    };
     expect(parseSimklState(null)).toEqual(empty);
     expect(parseSimklState("nonsense")).toEqual(empty);
     expect(parseSimklState({ clientId: 5, accessToken: [], retryAt: -3 })).toEqual(empty);
@@ -82,8 +87,15 @@ test("parses stored state defensively", () => {
         clientId: "abc",
         accessToken: "tok",
         lastError: "boom",
-        retryAt: 42
-    })).toEqual({ clientId: "abc", accessToken: "tok", lastError: "boom", retryAt: 42 });
+        retryAt: 42,
+        lastActivityAt: "2026-08-13T10:00:00Z"
+    })).toEqual({
+        clientId: "abc",
+        accessToken: "tok",
+        lastError: "boom",
+        retryAt: 42,
+        lastActivityAt: "2026-08-13T10:00:00Z"
+    });
 });
 
 test("needs a client id and a token to count as connected", () => {
@@ -253,4 +265,166 @@ test("never lets a transport rejection carry the url into the error", async () =
 
     expect(state.lastError).toBe("Simkl request failed.");
     expect(state.lastError).not.toContain("client-id");
+});
+
+const activities = ok({ all: "2026-08-13T10:00:00Z" });
+
+test("skips the item lists when nothing changed since the last sync", async () => {
+    const { calls, transport } = recorder([activities]);
+
+    const result = await syncSimklHistory(
+        transport,
+        { ...connected, lastActivityAt: "2026-08-13T10:00:00Z" },
+        []
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toContain("/sync/activities");
+    expect(result.history).toEqual([]);
+});
+
+test("pulls the full lists on a first sync and stores the activity cursor", async () => {
+    const { calls, transport } = recorder([
+        activities,
+        ok({
+            movies: [{
+                last_watched_at: "2026-08-10T20:00:00Z",
+                status: "completed",
+                movie: { title: "Spider-Man", year: 2002, ids: { imdb: "tt0145487" } }
+            }],
+            shows: [{
+                last_watched_at: "2026-08-11T21:00:00Z",
+                status: "watching",
+                last_watched: "S03E04",
+                show: { title: "Dark", year: 2017, ids: { imdb: "tt5753856" } }
+            }]
+        }),
+        ok([])
+    ]);
+
+    const result = await syncSimklHistory(transport, connected, []);
+
+    expect(calls.map((call) => call.url)).toEqual([
+        "https://api.simkl.com/sync/activities",
+        "https://api.simkl.com/sync/all-items/",
+        "https://api.simkl.com/sync/playback"
+    ]);
+    expect(result.state.lastActivityAt).toBe("2026-08-13T10:00:00Z");
+    expect(result.history.map((entry) => entry.id)).toEqual([
+        "tt5753856:3:4",
+        "tt0145487"
+    ]);
+    expect(result.history.every((entry) => entry.watched)).toBe(true);
+});
+
+test("sends the stored cursor as date_from on later syncs", async () => {
+    const { calls, transport } = recorder([activities, ok({}), ok([])]);
+
+    await syncSimklHistory(
+        transport,
+        { ...connected, lastActivityAt: "2026-08-01T00:00:00Z" },
+        []
+    );
+
+    expect(calls[1].url).toContain("date_from=2026-08-01T00%3A00%3A00Z");
+    expect(calls[2].url).toContain("date_from=2026-08-01T00%3A00%3A00Z");
+});
+
+test("treats bare anime episode numbers as season one", () => {
+    const history = parseSimklHistory({
+        anime: [{
+            last_watched_at: "2026-08-12T09:00:00Z",
+            last_watched: "E148",
+            show: { title: "Hunter x Hunter", year: 2011, ids: { imdb: "tt2098220" } }
+        }]
+    }, []);
+
+    expect(history).toHaveLength(1);
+    expect(history[0].id).toBe("tt2098220:1:148");
+    expect(history[0].episode?.season).toBe(1);
+    expect(history[0].episode?.episode).toBe(148);
+});
+
+test("turns paused playback sessions into unwatched progress entries", () => {
+    const history = parseSimklHistory(null, [
+        {
+            id: 123,
+            progress: 45.5,
+            paused_at: "2026-08-12T10:30:00Z",
+            type: "episode",
+            episode: { season: 3, episode: 4, title: "The Travellers" },
+            show: { title: "Dark", year: 2017, ids: { imdb: "tt5753856" } }
+        },
+        {
+            id: 124,
+            progress: 75,
+            paused_at: "2026-08-12T11:15:00Z",
+            type: "movie",
+            movie: { title: "Spider-Man", year: 2002, ids: { imdb: "tt0145487" } }
+        }
+    ]);
+
+    expect(history.map((entry) => [entry.id, entry.watched, entry.progress])).toEqual([
+        ["tt0145487", false, 75],
+        ["tt5753856:3:4", false, 45.5]
+    ]);
+    expect(history[1].episode?.name).toBe("The Travellers");
+});
+
+test("drops remote items that carry no usable imdb id or position", () => {
+    const history = parseSimklHistory({
+        movies: [
+            { status: "plantowatch", movie: { title: "Ajin 2", ids: { tmdb: "1" } } },
+            { last_watched_at: "2026-08-12T09:00:00Z", movie: { title: "Ajin 2", ids: {} } }
+        ],
+        shows: [{
+            last_watched_at: "2026-08-12T09:00:00Z",
+            last_watched: null,
+            show: { title: "Dark", ids: { imdb: "tt5753856" } }
+        }]
+    }, [{ progress: 10, paused_at: "", type: "movie", movie: { ids: { imdb: "tt0145487" } } }]);
+
+    expect(history).toEqual([]);
+});
+
+test("keeps a local watched flag when simkl only reports paused progress", async () => {
+    const { transport } = recorder([
+        activities,
+        ok({}),
+        ok([{
+            progress: 12,
+            paused_at: "2026-08-12T10:30:00Z",
+            type: "movie",
+            movie: { title: "Spider-Man", year: 2002, ids: { imdb: "tt0145487" } }
+        }])
+    ]);
+    const local = [{
+        id: "tt0145487",
+        media: movie,
+        lastPlayedAt: "2026-08-12T12:00:00Z",
+        watched: true,
+        progress: 100
+    }];
+
+    const result = await syncSimklHistory(transport, connected, local);
+
+    expect(result.history).toHaveLength(1);
+    expect(result.history[0].watched).toBe(true);
+});
+
+test("reports a sync failure without clearing local history", async () => {
+    const { transport } = recorder([{ status: 429, data: null, headers: { "retry-after": "30" } }]);
+    const local = [{
+        id: "tt0145487",
+        media: movie,
+        lastPlayedAt: "2026-08-12T12:00:00Z",
+        watched: true,
+        progress: 100
+    }];
+
+    const result = await syncSimklHistory(transport, connected, local, 1000);
+
+    expect(result.history).toBe(local);
+    expect(result.state.retryAt).toBe(1000 + 30_000);
+    expect(result.state.accessToken).toBe("access-token");
 });

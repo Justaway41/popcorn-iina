@@ -824,9 +824,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.2.0",
+    version: "2.2.1",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 9,
+    ghVersion: 10,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -991,7 +991,8 @@
       clientId: getString4(item?.clientId),
       accessToken: getString4(item?.accessToken),
       lastError: getString4(item?.lastError),
-      retryAt: getNonNegativeNumber(item?.retryAt)
+      retryAt: getNonNegativeNumber(item?.retryAt),
+      lastActivityAt: getString4(item?.lastActivityAt)
     };
   }
   function isSimklConnected(state) {
@@ -1022,6 +1023,144 @@
         retryAt: error instanceof SimklError ? error.retryAt : 0
       };
     }
+  }
+  async function syncSimklHistory(transport, state, local, now = Date.now()) {
+    if (!isSimklConnected(state) || state.retryAt > now)
+      return { state, history: local };
+    try {
+      const activities = getRecord4(await request2(transport, state, "GET", "/sync/activities", null, now));
+      const activityAt = getString4(activities?.all);
+      if (activityAt && activityAt === state.lastActivityAt) {
+        return { state: { ...state, lastError: "", retryAt: 0 }, history: local };
+      }
+      const cursor = state.lastActivityAt ? `?date_from=${encodeURIComponent(state.lastActivityAt)}` : "";
+      const items = await request2(transport, state, "GET", `/sync/all-items/${cursor}`, null, now);
+      const playback = await request2(transport, state, "GET", `/sync/playback${cursor}`, null, now);
+      return {
+        state: {
+          ...state,
+          lastActivityAt: activityAt || state.lastActivityAt,
+          lastError: "",
+          retryAt: 0
+        },
+        history: mergeWatchHistory(local, parseSimklHistory(items, playback))
+      };
+    } catch (error) {
+      if (error instanceof SimklError && error.status === 401) {
+        return {
+          state: {
+            ...state,
+            accessToken: "",
+            lastError: "Simkl connection was rejected. Reconnect required.",
+            retryAt: 0
+          },
+          history: local
+        };
+      }
+      return {
+        state: {
+          ...state,
+          lastError: error instanceof SimklError ? error.message : "Simkl request failed.",
+          retryAt: error instanceof SimklError ? error.retryAt : 0
+        },
+        history: local
+      };
+    }
+  }
+  function parseSimklHistory(items, playback) {
+    const lists = getRecord4(items);
+    const entries = [
+      ...listEntries(lists?.shows),
+      ...listEntries(lists?.anime),
+      ...listEntries(lists?.movies),
+      ...Array.isArray(playback) ? playback.flatMap(parsePlayback) : []
+    ];
+    return mergeWatchHistory([], entries);
+  }
+  function listEntries(value) {
+    return Array.isArray(value) ? value.flatMap(parseListItem) : [];
+  }
+  function parseListItem(value) {
+    const item = getRecord4(value);
+    const playedAt = getString4(item?.last_watched_at);
+    if (!item || !playedAt)
+      return [];
+    const movie = getRecord4(item.movie);
+    if (movie) {
+      const imdbId2 = getString4(getRecord4(movie.ids)?.imdb);
+      const name2 = getString4(movie.title);
+      if (!isImdbId(imdbId2) || !name2)
+        return [];
+      return [{
+        id: imdbId2,
+        media: remoteMedia(imdbId2, "movie", name2, movie.year),
+        lastPlayedAt: playedAt,
+        watched: true,
+        progress: 100
+      }];
+    }
+    const show = getRecord4(item.show);
+    const imdbId = getString4(getRecord4(show?.ids)?.imdb);
+    const name = getString4(show?.title);
+    const position = parseLastWatched(item.last_watched);
+    if (!isImdbId(imdbId) || !name || !position)
+      return [];
+    return [seriesEntry(imdbId, name, show?.year, position, "", playedAt, true, 100)];
+  }
+  function parseLastWatched(value) {
+    const match = /^(?:S(\d+))?E(\d+)$/i.exec(getString4(value).trim());
+    if (!match)
+      return null;
+    return { season: match[1] ? Number(match[1]) : 1, episode: Number(match[2]) };
+  }
+  function parsePlayback(value) {
+    const item = getRecord4(value);
+    const playedAt = getString4(item?.paused_at);
+    const progress = clampProgress(item?.progress);
+    if (!item || !playedAt || progress === null)
+      return [];
+    const movie = getRecord4(item.movie);
+    if (movie) {
+      const imdbId2 = getString4(getRecord4(movie.ids)?.imdb);
+      const name2 = getString4(movie.title);
+      if (!isImdbId(imdbId2) || !name2)
+        return [];
+      return [{
+        id: imdbId2,
+        media: remoteMedia(imdbId2, "movie", name2, movie.year),
+        lastPlayedAt: playedAt,
+        watched: false,
+        progress
+      }];
+    }
+    const show = getRecord4(item.show);
+    const episode = getRecord4(item.episode);
+    const imdbId = getString4(getRecord4(show?.ids)?.imdb);
+    const name = getString4(show?.title);
+    const season = getFiniteNumber(episode?.season);
+    const number = getFiniteNumber(episode?.episode);
+    if (!isImdbId(imdbId) || !name || season === null || number === null)
+      return [];
+    return [seriesEntry(imdbId, name, show?.year, { season, episode: number }, getString4(episode?.title), playedAt, false, progress)];
+  }
+  function seriesEntry(imdbId, name, year, position, episodeName, playedAt, watched, progress) {
+    const id = `${imdbId}:${position.season}:${position.episode}`;
+    return {
+      id,
+      media: remoteMedia(imdbId, "series", name, year),
+      episode: {
+        id,
+        name: episodeName || `Episode ${position.season}x${position.episode}`,
+        season: position.season,
+        episode: position.episode,
+        aired: "",
+        description: "",
+        thumbnail: ""
+      },
+      lastPlayedAt: playedAt,
+      watched,
+      progress
+    };
   }
   function apiHeaders2(state) {
     return {
@@ -1123,25 +1262,45 @@
   function createIinaSimklClient(http, preferences, onError) {
     const transport = createIinaTransport(http);
     const read = () => parseSimklState(preferences.get("simkl"));
+    const saveIfCurrent = (input, output) => {
+      if (!sameConnection2(read(), input))
+        return;
+      preferences.set("simkl", output);
+      preferences.sync();
+    };
     let pending = Promise.resolve();
+    const enqueue = (operation) => {
+      const result = pending.then(operation);
+      pending = result.then(() => {}, () => {});
+      return result;
+    };
     return {
       sendPlayback(action, context, progress) {
-        const result = pending.then(async () => {
+        return enqueue(async () => {
           const state = read();
           if (!state.accessToken)
             return;
           try {
-            const next = await simklScrobble(transport, state, action, context, progress);
-            if (sameConnection2(read(), state)) {
-              preferences.set("simkl", next);
-              preferences.sync();
-            }
+            saveIfCurrent(state, await simklScrobble(transport, state, action, context, progress));
           } catch (error) {
             onError(error);
           }
         });
-        pending = result.then(() => {}, () => {});
-        return result;
+      },
+      sync(history) {
+        return enqueue(async () => {
+          const state = read();
+          if (!state.accessToken)
+            return history;
+          try {
+            const result = await syncSimklHistory(transport, state, history);
+            saveIfCurrent(state, result.state);
+            return result.history;
+          } catch (error) {
+            onError(error);
+            return history;
+          }
+        });
       }
     };
   }
@@ -1732,7 +1891,7 @@
     });
     windowReady = true;
     global.postMessage("playerReady", {});
-    trakt.sync(watchHistory).then((synced) => {
+    trakt.sync(watchHistory).then((synced) => simkl.sync(synced)).then((synced) => {
       const history = mergeWatchHistory(parseWatchHistory(preferences.get("watchHistory")), synced);
       watchHistory = history;
       preferences.set("watchHistory", history);
