@@ -21,7 +21,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.1.0`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.3.0`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -35,7 +35,10 @@ Supported behavior:
   stays on the rows;
 - tri-state cache state shown as a dot (ready / will download / not reported) and seeders when
   providers expose them;
-- local recent/watch progress plus optional user-supplied Trakt credentials;
+- local recent/watch progress plus optional user-supplied Trakt and Simkl credentials, with
+  history pulled back from both;
+- a Continue Watching strip of what is unfinished, one card per title, each naming the next
+  episode that has actually aired;
 - skip intro, end-credit next-episode control, and closest-quality next stream;
 - IINA sidebar, overlay, menu shortcut (`Shift+P`), window title, and display-sleep prevention.
 
@@ -139,8 +142,21 @@ consults sources in order of trustworthiness, each filling only what the previou
 Measured IntroDB coverage over 36 episodes of 12 popular shows: intro 92%, outro 97%, **recap 14%**.
 Skip Recap is wired end to end, but the database rarely holds recap entries, so it seldom appears.
 
-`applySegments` drops any interval ending past the file duration, whatever supplied it. Overlay
-precedence is recap → intro → next, since a recap runs before the intro.
+`sanitizeSegments` in `src/plugin/intro.ts` is the boundary for bad interval data, whatever
+supplied it: nothing may end past the file duration, and an intro or recap must also be shorter
+than `MAX_SKIP_SEGMENT_SEC` and end before the closing `NEXT_EPISODE_TAIL_SEC`. A rip chaptered
+only `Intro` then `Credits` otherwise yields an interval spanning the whole episode, and skipping
+it lands on the end of the file - which reads as the episode simply ending. Credits legitimately
+run to the end and keep the duration rule alone. Overlay precedence is recap → intro → next,
+since a recap runs before the intro.
+
+Interval resolution and next-episode prefetch are gated on `activePlaybackContext`: a file this
+plugin did not start belongs to whatever opened it, and the overlay must not appear over another
+plugin's playback.
+
+Pressing Next Episode from the overlay posts `ShowNextEpisode` before `playItem`, so the sidebar
+follows the player. Only end-of-file did that before, and skipping ahead left the stream list on
+the episode that had just finished.
 
 The overlay uses **simple mode** (`overlay.simpleMode()` + `setStyle` + `setContent`), not
 `overlay.loadFile`. Loading a page is asynchronous, and clickability set while it is still loading
@@ -169,10 +185,28 @@ absent value as on so existing installs keep the feature). Per the security rule
 Recently Watched cards carry a remove control. Because a card is itself a `<button>`, the control
 cannot nest inside it and rides alongside in a `.card-slot` wrapper, positioned opposite the
 watched badge. `src/ui/app.ts` drops the one node and posts `RemoveHistoryEntry`; `src/plugin/main.ts`
-re-reads the stored history before filtering, persists, and broadcasts `HistoryUpdated`. Removal is
+re-reads the stored history before filtering, persists, and broadcasts `HistoryUpdated`. A card
+stands for a title rather than an episode, so `removeHistoryEntry` drops every entry sharing the
+removed one's title - otherwise the episode before it takes its place on the next render. Removal is
 immediate and has no undo. It is local only: `mergeWatchHistory` unions local and remote entries, so
 an entry that still exists on Trakt returns on the next sync. Suppressing that would need a
 tombstone list, which does not exist yet.
+
+### Continue Watching
+
+`latestPerTitle` (`src/shared/history.ts`) collapses history to one entry per title, the most
+recent, since three episodes of one show are one thing in progress rather than three. The home
+strip holds what is unfinished: an episode or film part way through, or a show whose last episode
+is done and whose next one is ahead. Finished films wait in See all, which shows the full
+collapsed history with watched marks intact.
+
+History carries no episode list, so a card cannot name the next episode by itself. The strip
+paints first, then `resolveUpNext` looks the show up and either rewrites the card with the
+episode `findNextEpisode` reports - existing and aired - or removes it, because the show has
+nothing to watch right now. A failed lookup leaves the card as it was and opens the show instead
+of deleting something watchable. Episode lists are cached per session; failures are not cached.
+The strip refills to `HOME_HISTORY_CARDS` as cards drop out, so lookups cost one per shown card
+plus one per removal rather than one per history entry.
 
 ### Preferences and Trakt
 
@@ -280,7 +314,18 @@ As of 2026-08-12:
   smaller than the Trakt module because Simkl's scrobble paths and body are identical to Trakt's —
   so `buildScrobblePayload` is reused — and Simkl needs no client secret and issues long-lived
   tokens, removing the refresh, expiry, and reconnect handling entirely. Authorization is Simkl's
-  PIN flow. History sync is deliberately not implemented; only scrobbling is.
+  PIN flow.
+- `2.2.1` adds Simkl history sync, which the shipped `2.2.0` client lacked: it only ever posted, so
+  anything watched on another device stayed invisible. `syncSimklHistory` mirrors the Trakt sync and
+  stores the `/sync/activities` `all` timestamp as a cursor. Simkl suspends client ids that pull the
+  full list every time, so `/sync/activities` runs first and `date_from` is always sent.
+  `extended=full` is deliberately unused: it returns megabytes of per-episode history that the
+  100-item local cap would discard anyway, so each title contributes its `last_watched` position.
+- `2.3.0` reworks Recently Watched into Continue Watching, hardens skip-segment data against
+  intervals that seek out of the episode, keeps the overlay off playback Popcorn did not start, and
+  moves the sidebar with the player when Next Episode is used. The skip-intro fix is a guard on the
+  data, not a confirmed reproduction: the reported symptom was Skip Intro ending the episode, and an
+  over-long chapter interval is the plausible cause. If it recurs, capture the file's chapters.
 - Simkl was chosen over routing through a self-hosted CrossWatch instance after Trakt limited free
   accounts to one connected community app. The CrossWatch design is kept at
   `docs/superpowers/specs/2026-08-12-crosswatch-scrobble-design.md` and its implementation on the

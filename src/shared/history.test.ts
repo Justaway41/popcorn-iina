@@ -5,6 +5,7 @@ import type { PlaybackContext } from "./messages";
 import {
     getHistoryEntry,
     getResumePercent,
+    latestPerTitle,
     parseWatchHistory,
     recordPlayback,
     removeHistoryEntry
@@ -155,4 +156,41 @@ test("resumes only unfinished meaningful progress", () => {
     expect(getResumePercent(42.5, false)).toBe(42.5);
     expect(getResumePercent(90, false)).toBeNull();
     expect(getResumePercent(42.5, true)).toBeNull();
+});
+
+const show = {
+    id: "tt9",
+    imdbId: "tt9",
+    type: "series" as const,
+    name: "Show",
+    releaseInfo: "1999-",
+    poster: "poster.jpg"
+};
+
+const episode = (season: number, number: number) => ({
+    id: `tt9:${season}:${number}`,
+    name: `Episode ${number}`,
+    season,
+    episode: number,
+    aired: "",
+    description: "",
+    thumbnail: ""
+});
+
+const seriesEntries = [
+    { id: "tt9:1:3", media: show, episode: episode(1, 3), lastPlayedAt: "c", watched: true, progress: 100 },
+    { id: "tt9:1:2", media: show, episode: episode(1, 2), lastPlayedAt: "b", watched: true, progress: 100 },
+    { id: "tt1", media: movie, lastPlayedAt: "b", watched: false, progress: 40 },
+    { id: "tt9:1:1", media: show, episode: episode(1, 1), lastPlayedAt: "a", watched: true, progress: 100 }
+];
+
+test("collapses a show to the episode watched most recently", () => {
+    expect(latestPerTitle(seriesEntries).map((entry) => entry.id)).toEqual(["tt9:1:3", "tt1"]);
+    expect(latestPerTitle([])).toEqual([]);
+});
+
+test("removing an episode removes the whole show", () => {
+    expect(removeHistoryEntry(seriesEntries, "tt9:1:3").map((entry) => entry.id)).toEqual(["tt1"]);
+    // removing the collapsed card must not leave the earlier episodes behind
+    expect(removeHistoryEntry(seriesEntries, "tt9:1:1").map((entry) => entry.id)).toEqual(["tt1"]);
 });

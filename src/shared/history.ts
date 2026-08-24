@@ -43,12 +43,36 @@ export function recordPlayback(
     return [entry, ...entries.filter((item) => item.id !== id)].slice(0, MAX_HISTORY_ITEMS);
 }
 
+/**
+ * A card stands for a title, not an episode, so removing one drops every episode of that title;
+ * otherwise the episode before it takes its place on the very next render.
+ */
 export function removeHistoryEntry(
     entries: WatchHistoryEntry[],
     id: string
 ): WatchHistoryEntry[] {
-    if (!id) return entries;
-    return entries.filter((entry) => entry.id !== id);
+    const target = entries.find((entry) => entry.id === id);
+    if (!id || !target) return entries;
+    return entries.filter((entry) => historyTitleId(entry) !== historyTitleId(target));
+}
+
+/**
+ * One entry per title, the most recent one. Watching three episodes of a show is one thing in
+ * progress, not three, and listing each of them buries everything else.
+ * Expects entries newest first, which is how both `recordPlayback` and `mergeWatchHistory` order.
+ */
+export function latestPerTitle(entries: WatchHistoryEntry[]): WatchHistoryEntry[] {
+    const seen = new Set<string>();
+    return entries.filter((entry) => {
+        const id = historyTitleId(entry);
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+    });
+}
+
+export function historyTitleId(entry: WatchHistoryEntry): string {
+    return entry.media.imdbId || entry.media.providerId || entry.media.id;
 }
 
 export function getHistoryEntry(

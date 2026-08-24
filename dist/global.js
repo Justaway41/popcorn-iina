@@ -3,9 +3,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.2.1",
+    version: "2.3.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 10,
+    ghVersion: 11,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -261,9 +261,13 @@
     return [entry, ...entries.filter((item) => item.id !== id)].slice(0, MAX_HISTORY_ITEMS);
   }
   function removeHistoryEntry(entries, id) {
-    if (!id)
+    const target = entries.find((entry) => entry.id === id);
+    if (!id || !target)
       return entries;
-    return entries.filter((entry) => entry.id !== id);
+    return entries.filter((entry) => historyTitleId(entry) !== historyTitleId(target));
+  }
+  function historyTitleId(entry) {
+    return entry.media.imdbId || entry.media.providerId || entry.media.id;
   }
   function parseEntry(value) {
     const item = getRecord2(value);

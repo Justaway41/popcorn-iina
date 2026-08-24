@@ -144,6 +144,19 @@
       return [];
     }
   }
+  function latestPerTitle(entries) {
+    const seen = new Set;
+    return entries.filter((entry) => {
+      const id = historyTitleId(entry);
+      if (seen.has(id))
+        return false;
+      seen.add(id);
+      return true;
+    });
+  }
+  function historyTitleId(entry) {
+    return entry.media.imdbId || entry.media.providerId || entry.media.id;
+  }
   function getResumePercent(progress, watched) {
     return !watched && progress !== null && progress >= 5 && progress < 90 ? progress : null;
   }
@@ -238,9 +251,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.2.1",
+    version: "2.3.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 10,
+    ghVersion: 11,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -526,6 +539,20 @@
     const aired = Date.parse(episode.aired);
     return !Number.isFinite(aired) || aired <= now.getTime();
   }
+  function findNextEpisode(episodes, current, now = new Date) {
+    const sorted = episodes.filter((episode) => isEpisodeAvailable(episode, now)).sort((a, b) => {
+      if (a.season !== b.season)
+        return a.season - b.season;
+      if (a.episode !== b.episode)
+        return a.episode - b.episode;
+      return a.id.localeCompare(b.id);
+    });
+    const index = sorted.findIndex((episode) => episode.id === current.id);
+    if (index !== -1) {
+      return sorted[index + 1] || null;
+    }
+    return sorted.find((episode) => episode.season > current.season || episode.season === current.season && episode.episode > current.episode) || null;
+  }
   function isHttpUrl(value) {
     return /^https?:\/\/[^/]+/i.test(value.trim());
   }
@@ -651,6 +678,7 @@
   var episodeOrder = "oldest";
   var addons = [];
   var watchHistory = [];
+  var seriesEpisodes = new Map;
   var homeQuery = "";
   var view = { kind: "home", query: "" };
   var retryAction = null;
@@ -963,7 +991,7 @@
     if (failedSources > 0)
       fragment.appendChild(addonWarning(failedSources, "catalog"));
     if (!query && watchHistory.length > 0) {
-      const history = historySection(watchHistory.slice(0, 6), true);
+      const history = historySection(continueWatching(), true);
       const heading = contentHeading("Trending");
       history.dataset.historyChrome = "";
       heading.dataset.historyChrome = "";
@@ -986,15 +1014,69 @@
       renderEmpty("Nothing watched yet.");
       return;
     }
-    showContent(historySection(watchHistory, false));
+    showContent(historySection(latestPerTitle(watchHistory), false));
   }
-  function historySection(entries, showAll) {
+  function continueWatching() {
+    return latestPerTitle(watchHistory).filter((entry) => Boolean(entry.episode) || getResumePercent(entry.progress, entry.watched) !== null);
+  }
+  function isUpNext(entry) {
+    return Boolean(entry.episode) && getResumePercent(entry.progress, entry.watched) === null;
+  }
+  var HOME_HISTORY_CARDS = 6;
+  function historySection(entries, home) {
     const section = document.createElement("section");
     section.className = "history-section";
-    if (showAll)
-      section.appendChild(contentHeading("Recently Watched", renderHistory));
-    section.appendChild(mediaGrid(entries.map((entry) => removableSlot(entry, mediaCard(entry.media, entry.media.name, entry.episode ? `S${pad(entry.episode.season)}E${pad(entry.episode.episode)} · ${entry.episode.name}` : entry.media.releaseInfo, () => void openHistoryEntry(entry), entry.watched, entry.progress)))));
+    if (!home) {
+      section.appendChild(mediaGrid(entries.map((entry) => historySlot(entry, false))));
+      return section;
+    }
+    section.appendChild(contentHeading("Continue Watching", renderHistory));
+    const grid = mediaGrid([]);
+    section.appendChild(grid);
+    let next = 0;
+    const fill = () => {
+      while (grid.childElementCount < HOME_HISTORY_CARDS && next < entries.length) {
+        const entry = entries[next];
+        next += 1;
+        const upNext = isUpNext(entry);
+        const slot = historySlot(entry, upNext);
+        grid.appendChild(slot);
+        if (upNext)
+          resolveUpNext(entry, slot).then(fill);
+      }
+    };
+    fill();
     return section;
+  }
+  function historySlot(entry, upNext) {
+    const episode = entry.episode;
+    return removableSlot(entry, mediaCard(entry.media, entry.media.name, !episode ? entry.media.releaseInfo : upNext ? `After S${pad(episode.season)}E${pad(episode.episode)}` : `S${pad(episode.season)}E${pad(episode.episode)} · ${episode.name}`, () => upNext ? void loadEpisodes(entry.media) : void openHistoryEntry(entry), upNext ? false : entry.watched, upNext ? null : entry.progress));
+  }
+  async function resolveUpNext(entry, slot) {
+    const current = entry.episode;
+    if (!current)
+      return;
+    const details = await loadSeriesEpisodes(entry.media);
+    if (!details || details.episodes.length === 0 || !slot.isConnected)
+      return;
+    const next = findNextEpisode(details.episodes, current);
+    if (!next) {
+      slot.remove();
+      return;
+    }
+    slot.replaceWith(removableSlot(entry, mediaCard(entry.media, entry.media.name, `Next · S${pad(next.season)}E${pad(next.episode)} · ${next.name}`, () => void loadStreams(details.media, next, details.episodes), false, null)));
+  }
+  function loadSeriesEpisodes(media) {
+    const key = mediaIdentity(media);
+    const cached = seriesEpisodes.get(key);
+    if (cached)
+      return cached;
+    const request = loadMediaDetails(media, new AbortController().signal).then((details) => ({ media: details.media, episodes: details.episodes })).catch(() => {
+      seriesEpisodes.delete(key);
+      return null;
+    });
+    seriesEpisodes.set(key, request);
+    return request;
   }
   function removableSlot(entry, card) {
     const slot = document.createElement("div");
@@ -1011,7 +1093,7 @@
     return slot;
   }
   function removeFromHistory(entry, slot) {
-    watchHistory = watchHistory.filter((item) => item.id !== entry.id);
+    watchHistory = watchHistory.filter((item) => historyTitleId(item) !== historyTitleId(entry));
     iina.postMessage(MESSAGE_NAMES.RemoveHistoryEntry, { id: entry.id });
     slot.remove();
     if (watchHistory.length > 0)

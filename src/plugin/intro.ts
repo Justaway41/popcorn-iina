@@ -136,3 +136,24 @@ function stringValue(value: unknown): string {
 function numberValue(value: unknown): number | null {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
+
+/**
+ * The longest an intro or recap can plausibly run. A rip chaptered only "Intro" then "Credits"
+ * yields an interval that swallows the whole episode, and skipping it lands on the end of the
+ * file - which reads as the episode simply ending.
+ */
+const MAX_SKIP_SEGMENT_SEC = 300;
+
+/** Drops interval data that would seek the viewer out of the episode rather than past a segment. */
+export function sanitizeSegments(found: PlaybackSegments, duration: number): PlaybackSegments {
+    const known = Number.isFinite(duration) && duration > 0;
+    const inFile = (interval: IntroInterval | null) =>
+        interval && (!known || interval.end <= duration) ? interval : null;
+    const skippable = (interval: IntroInterval | null) => {
+        const inside = inFile(interval);
+        if (!inside || inside.end - inside.start > MAX_SKIP_SEGMENT_SEC) return null;
+        // Landing inside the tail would immediately offer Next Episode instead of the episode.
+        return !known || inside.end <= duration - NEXT_EPISODE_TAIL_SEC ? inside : null;
+    };
+    return { intro: skippable(found.intro), recap: skippable(found.recap), credits: inFile(found.credits) };
+}

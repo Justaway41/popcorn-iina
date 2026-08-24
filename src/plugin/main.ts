@@ -44,6 +44,7 @@ import {
     parseAniSkipInterval,
     parseIntroDbSegment,
     parseKitsuMalId,
+    sanitizeSegments,
     type IntroInterval,
     type OverlayAction
 } from "./intro";
@@ -347,6 +348,18 @@ function handleOverlayAction(data: unknown): void {
     if (requested === "next" && prefetchedNextEpisode) {
         const next = prefetchedNextEpisode;
         prefetchedNextEpisode = null;
+        // Move the sidebar with the player. Only the end of a file did this, so skipping ahead
+        // from the overlay left the stream list on the episode that just finished, and the next
+        // stream picked there would have been for the wrong episode.
+        const context = next.playbackContext;
+        if (context.episode) {
+            sidebar.postMessage(MESSAGE_NAMES.ShowNextEpisode, {
+                media: context.media,
+                episode: context.episode,
+                episodes: context.episodes,
+                resolution: context.resolution
+            });
+        }
         playItem(next);
     }
 }
@@ -465,14 +478,11 @@ function seekToSeconds(seconds: number): void {
     }
 }
 
-/** An interval running past the end of the file is bad data, whatever supplied it. */
 function applySegments(found: SegmentSources, duration: number): void {
-    const known = Number.isFinite(duration) && duration > 0;
-    const within = (interval: IntroInterval | null) =>
-        interval && (!known || interval.end <= duration) ? interval : null;
-    introInterval = within(found.intro);
-    recapInterval = within(found.recap);
-    creditsInterval = within(found.credits);
+    const segments = sanitizeSegments(found, duration);
+    introInterval = segments.intro;
+    recapInterval = segments.recap;
+    creditsInterval = segments.credits;
     updateIntroOverlay();
 }
 
@@ -699,6 +709,9 @@ event.on("mpv.file-loaded", () => {
     }
     sendScrobble("start", mpv.getNumber("percent-pos"));
     const revision = playbackRevision;
+    // A file this plugin did not start belongs to whatever opened it, so no skip controls and no
+    // next-episode prefetch: the overlay is Popcorn's and must not sit over another plugin's playback.
+    if (!activePlaybackContext) return;
     void resolvePlaybackIntervals(revision);
     void prefetchNextEpisode(revision);
 });

@@ -4,7 +4,7 @@ import type { WatchHistoryEntry } from "../shared/history";
 import type { Episode, EpisodeOrder, Media, MediaType, SizeOrder } from "../shared/stremio";
 
 import { loadEnabledAddonStreams, parseAddonManifest, parseAddons } from "../shared/addons";
-import { getResumePercent, parseWatchHistory } from "../shared/history";
+import { getResumePercent, historyTitleId, latestPerTitle, parseWatchHistory } from "../shared/history";
 import { MESSAGE_NAMES } from "../shared/messages";
 import { CLIENT_VERSION } from "../shared/version";
 import {
@@ -19,6 +19,7 @@ import {
     isCompatibleSubtitleId,
     isImdbId,
     findClosestQualityStream,
+    findNextEpisode,
     isEpisodeAvailable,
     parseEnglishSubtitleAvailability,
     parseEpisodeOrder,
@@ -60,6 +61,7 @@ let pendingMediaType: MediaType | null = null;
 let episodeOrder: EpisodeOrder = "oldest";
 let addons: StremioAddon[] = [];
 let watchHistory: WatchHistoryEntry[] = [];
+const seriesEpisodes = new Map<string, Promise<{ media: Media; episodes: Episode[] } | null>>();
 let homeQuery = "";
 let view: View = { kind: "home", query: "" };
 let retryAction: (() => Promise<void>) | null = null;
@@ -452,7 +454,7 @@ function renderMedia(items: Media[], query: string, failedSources = 0): void {
     if (failedSources > 0) fragment.appendChild(addonWarning(failedSources, "catalog"));
     if (!query && watchHistory.length > 0) {
         // Both only exist because history is non-empty, so both go when the last entry is removed.
-        const history = historySection(watchHistory.slice(0, 6), true);
+        const history = historySection(continueWatching(), true);
         const heading = contentHeading("Trending");
         history.dataset.historyChrome = "";
         heading.dataset.historyChrome = "";
@@ -481,24 +483,117 @@ function renderHistory(): void {
         renderEmpty("Nothing watched yet.");
         return;
     }
-    showContent(historySection(watchHistory, false));
+    showContent(historySection(latestPerTitle(watchHistory), false));
 }
 
-function historySection(entries: WatchHistoryEntry[], showAll: boolean): HTMLElement {
+/**
+ * One card per title, each with something left to do: an episode or film part way through, or a
+ * show whose last episode is finished and whose next one is still ahead. A finished film has
+ * nothing to continue, so it waits in See all.
+ */
+function continueWatching(): WatchHistoryEntry[] {
+    return latestPerTitle(watchHistory).filter((entry) =>
+        Boolean(entry.episode) || getResumePercent(entry.progress, entry.watched) !== null);
+}
+
+/**
+ * The episode list is not in history, so a finished show cannot name its next episode here
+ * without a lookup per card. Opening the show does it instead: the episode view already lands
+ * on the first unwatched episode.
+ */
+function isUpNext(entry: WatchHistoryEntry): boolean {
+    return Boolean(entry.episode) && getResumePercent(entry.progress, entry.watched) === null;
+}
+
+/** How many cards the home strip holds. See all carries the rest. */
+const HOME_HISTORY_CARDS = 6;
+
+function historySection(entries: WatchHistoryEntry[], home: boolean): HTMLElement {
     const section = document.createElement("section");
     section.className = "history-section";
-    if (showAll) section.appendChild(contentHeading("Recently Watched", renderHistory));
-    section.appendChild(mediaGrid(entries.map((entry) => removableSlot(entry, mediaCard(
+    if (!home) {
+        section.appendChild(mediaGrid(entries.map((entry) => historySlot(entry, false))));
+        return section;
+    }
+    section.appendChild(contentHeading("Continue Watching", renderHistory));
+    const grid = mediaGrid([]);
+    section.appendChild(grid);
+
+    let next = 0;
+    // A card whose show turns out to have nothing airing leaves, and the title behind it takes
+    // the free space, so the strip stays six wide as long as there are titles to fill it.
+    const fill = (): void => {
+        while (grid.childElementCount < HOME_HISTORY_CARDS && next < entries.length) {
+            const entry = entries[next];
+            next += 1;
+            const upNext = isUpNext(entry);
+            const slot = historySlot(entry, upNext);
+            grid.appendChild(slot);
+            if (upNext) void resolveUpNext(entry, slot).then(fill);
+        }
+    };
+    fill();
+    return section;
+}
+
+function historySlot(entry: WatchHistoryEntry, upNext: boolean): HTMLElement {
+    // See all is a record of what was watched, so the watched mark stays there; the home strip
+    // is a list of things to do, where it would only read as already handled.
+    const episode = entry.episode;
+    return removableSlot(entry, mediaCard(
         entry.media,
         entry.media.name,
-        entry.episode
-            ? `S${pad(entry.episode.season)}E${pad(entry.episode.episode)} · ${entry.episode.name}`
-            : entry.media.releaseInfo,
-        () => void openHistoryEntry(entry),
-        entry.watched,
-        entry.progress
-    )))));
-    return section;
+        !episode
+            ? entry.media.releaseInfo
+            : upNext
+                ? `After S${pad(episode.season)}E${pad(episode.episode)}`
+                : `S${pad(episode.season)}E${pad(episode.episode)} · ${episode.name}`,
+        () => upNext ? void loadEpisodes(entry.media) : void openHistoryEntry(entry),
+        upNext ? false : entry.watched,
+        upNext ? null : entry.progress
+    ));
+}
+
+/**
+ * A card offering the next episode has to mean it, and history carries no episode list to check
+ * against. So the strip paints first, then each up-next card names the episode that actually
+ * exists and has aired - or drops out, because the show has nothing left to watch right now.
+ * A lookup that fails leaves the card as it was rather than removing something watchable.
+ */
+async function resolveUpNext(entry: WatchHistoryEntry, slot: HTMLElement): Promise<void> {
+    const current = entry.episode;
+    if (!current) return;
+    const details = await loadSeriesEpisodes(entry.media);
+    if (!details || details.episodes.length === 0 || !slot.isConnected) return;
+    const next = findNextEpisode(details.episodes, current);
+    if (!next) {
+        slot.remove();
+        return;
+    }
+    slot.replaceWith(removableSlot(entry, mediaCard(
+        entry.media,
+        entry.media.name,
+        `Next · S${pad(next.season)}E${pad(next.episode)} · ${next.name}`,
+        () => void loadStreams(details.media, next, details.episodes),
+        false,
+        null
+    )));
+}
+
+/** The strip rebuilds on every return to home, and an episode list does not move that often. */
+function loadSeriesEpisodes(media: Media): Promise<{ media: Media; episodes: Episode[] } | null> {
+    const key = mediaIdentity(media);
+    const cached = seriesEpisodes.get(key);
+    if (cached) return cached;
+    const request = loadMediaDetails(media, new AbortController().signal)
+        .then((details) => ({ media: details.media, episodes: details.episodes }))
+        .catch(() => {
+            // Forget the failure so the next render tries again instead of inheriting it.
+            seriesEpisodes.delete(key);
+            return null;
+        });
+    seriesEpisodes.set(key, request);
+    return request;
 }
 
 /**
@@ -521,7 +616,8 @@ function removableSlot(entry: WatchHistoryEntry, card: HTMLButtonElement): HTMLE
 }
 
 function removeFromHistory(entry: WatchHistoryEntry, slot: HTMLElement): void {
-    watchHistory = watchHistory.filter((item) => item.id !== entry.id);
+    // The card stands for the whole title, so every episode of it goes with the one shown.
+    watchHistory = watchHistory.filter((item) => historyTitleId(item) !== historyTitleId(entry));
     iina.postMessage(MESSAGE_NAMES.RemoveHistoryEntry, { id: entry.id });
     // Drop the one node rather than re-rendering, so the home view keeps its loaded catalogs.
     slot.remove();

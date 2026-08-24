@@ -173,9 +173,13 @@
     return [entry, ...entries.filter((item) => item.id !== id)].slice(0, MAX_HISTORY_ITEMS);
   }
   function removeHistoryEntry(entries, id) {
-    if (!id)
+    const target = entries.find((entry) => entry.id === id);
+    if (!id || !target)
       return entries;
-    return entries.filter((entry) => entry.id !== id);
+    return entries.filter((entry) => historyTitleId(entry) !== historyTitleId(target));
+  }
+  function historyTitleId(entry) {
+    return entry.media.imdbId || entry.media.providerId || entry.media.id;
   }
   function parseEntry(value) {
     const item = getRecord2(value);
@@ -824,9 +828,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.2.1",
+    version: "2.3.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 10,
+    ghVersion: 11,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1392,6 +1396,18 @@
   function numberValue(value) {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
+  var MAX_SKIP_SEGMENT_SEC = 300;
+  function sanitizeSegments(found, duration) {
+    const known = Number.isFinite(duration) && duration > 0;
+    const inFile = (interval) => interval && (!known || interval.end <= duration) ? interval : null;
+    const skippable = (interval) => {
+      const inside = inFile(interval);
+      if (!inside || inside.end - inside.start > MAX_SKIP_SEGMENT_SEC)
+        return null;
+      return !known || inside.end <= duration - NEXT_EPISODE_TAIL_SEC ? inside : null;
+    };
+    return { intro: skippable(found.intro), recap: skippable(found.recap), credits: inFile(found.credits) };
+  }
 
   // src/plugin/main.ts
   var { core, event, global, http, mpv, overlay, preferences, sidebar, utils } = iina;
@@ -1649,6 +1665,15 @@
     if (requested === "next" && prefetchedNextEpisode) {
       const next = prefetchedNextEpisode;
       prefetchedNextEpisode = null;
+      const context = next.playbackContext;
+      if (context.episode) {
+        sidebar.postMessage(MESSAGE_NAMES.ShowNextEpisode, {
+          media: context.media,
+          episode: context.episode,
+          episodes: context.episodes,
+          resolution: context.resolution
+        });
+      }
       playItem(next);
     }
   }
@@ -1743,11 +1768,10 @@
     }
   }
   function applySegments(found, duration) {
-    const known = Number.isFinite(duration) && duration > 0;
-    const within = (interval) => interval && (!known || interval.end <= duration) ? interval : null;
-    introInterval = within(found.intro);
-    recapInterval = within(found.recap);
-    creditsInterval = within(found.credits);
+    const segments = sanitizeSegments(found, duration);
+    introInterval = segments.intro;
+    recapInterval = segments.recap;
+    creditsInterval = segments.credits;
     updateIntroOverlay();
   }
   async function loadAniSkipSegments(revision, knownMalId, providerId, episode, duration) {
@@ -1929,6 +1953,8 @@
     }
     sendScrobble("start", mpv.getNumber("percent-pos"));
     const revision = playbackRevision;
+    if (!activePlaybackContext)
+      return;
     resolvePlaybackIntervals(revision);
     prefetchNextEpisode(revision);
   });

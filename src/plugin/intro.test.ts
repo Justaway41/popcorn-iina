@@ -8,7 +8,8 @@ import {
     NEXT_EPISODE_TAIL_SEC,
     parseAniSkipInterval,
     parseIntroDbSegment,
-    parseKitsuMalId
+    parseKitsuMalId,
+    sanitizeSegments
 } from "./intro";
 
 test("uses an exact named intro chapter with the next chapter as its end", () => {
@@ -152,4 +153,23 @@ test("reads an IntroDB segment, treating an absent one as no data", () => {
     expect(parseIntroDbSegment({ intro: { start_sec: -5, end_sec: 100 } }, "intro")).toBeNull();
     expect(parseIntroDbSegment({ intro: { end_sec: 100 } }, "intro")).toBeNull();
     expect(parseIntroDbSegment(null, "intro")).toBeNull();
+});
+
+test("rejects skip intervals that would seek out of the episode", () => {
+    const intro = { start: 30, end: 120 };
+    const credits = { start: 1400, end: 1440 };
+    // a rip chaptered only "Intro" then "Credits" makes the whole episode look like an intro
+    expect(sanitizeSegments({ intro: { start: 0, end: 1400 }, recap: null, credits }, 1440))
+        .toEqual({ intro: null, recap: null, credits });
+    // nor may a skip land in the tail, where it would offer Next Episode instead of the episode
+    expect(sanitizeSegments({ intro: { start: 1300, end: 1400 }, recap: null, credits: null }, 1440))
+        .toEqual({ intro: null, recap: null, credits: null });
+    expect(sanitizeSegments({ intro, recap: { start: 0, end: 30 }, credits }, 1440))
+        .toEqual({ intro, recap: { start: 0, end: 30 }, credits });
+    // credits legitimately run to the end of the file
+    expect(sanitizeSegments({ intro, recap: null, credits: { start: 1400, end: 1500 } }, 1440))
+        .toEqual({ intro, recap: null, credits: null });
+    // an unknown duration cannot rule anything out beyond the length of the segment itself
+    expect(sanitizeSegments({ intro, recap: null, credits }, 0))
+        .toEqual({ intro, recap: null, credits });
 });

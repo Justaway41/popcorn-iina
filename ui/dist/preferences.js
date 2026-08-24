@@ -178,6 +178,19 @@
       return [];
     }
   }
+  function latestPerTitle(entries) {
+    const seen = new Set;
+    return entries.filter((entry) => {
+      const id = historyTitleId(entry);
+      if (seen.has(id))
+        return false;
+      seen.add(id);
+      return true;
+    });
+  }
+  function historyTitleId(entry) {
+    return entry.media.imdbId || entry.media.providerId || entry.media.id;
+  }
   function getResumePercent(progress, watched) {
     return !watched && progress !== null && progress >= 5 && progress < 90 ? progress : null;
   }
@@ -505,6 +518,20 @@
   function isEpisodeAvailable(episode, now = new Date) {
     const aired = Date.parse(episode.aired);
     return !Number.isFinite(aired) || aired <= now.getTime();
+  }
+  function findNextEpisode(episodes, current, now = new Date) {
+    const sorted = episodes.filter((episode) => isEpisodeAvailable(episode, now)).sort((a, b) => {
+      if (a.season !== b.season)
+        return a.season - b.season;
+      if (a.episode !== b.episode)
+        return a.episode - b.episode;
+      return a.id.localeCompare(b.id);
+    });
+    const index = sorted.findIndex((episode) => episode.id === current.id);
+    if (index !== -1) {
+      return sorted[index + 1] || null;
+    }
+    return sorted.find((episode) => episode.season > current.season || episode.season === current.season && episode.episode > current.episode) || null;
   }
   function isHttpUrl(value) {
     return /^https?:\/\/[^/]+/i.test(value.trim());
@@ -1103,9 +1130,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.2.1",
+    version: "2.3.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 10,
+    ghVersion: 11,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
