@@ -96,8 +96,8 @@
       catalogs: Array.isArray(manifest?.catalogs) ? manifest.catalogs.flatMap(parseCatalog) : []
     };
   }
-  async function loadAddonStreams(addons, load) {
-    const results = await Promise.allSettled(addons.map(load));
+  async function loadAddonStreams(addons, load, timeoutMs) {
+    const results = await Promise.allSettled(addons.map((addon) => withinTimeout(load(addon), timeoutMs)));
     const seen = new Set;
     const streams = [];
     let failedAddons = 0;
@@ -117,18 +117,32 @@
     });
     return { streams, failedAddons, successfulAddons };
   }
-  async function loadEnabledAddonStreams(addons, loadManifest, loadStreams) {
+  async function loadEnabledAddonStreams(addons, loadManifest, loadStreams, timeoutMs) {
     const enabled = addons.filter((addon) => addon.enabled);
     const manifests = await Promise.allSettled(enabled.map(async (addon) => ({
       addon,
-      manifest: await loadManifest(addon)
+      manifest: await withinTimeout(loadManifest(addon), timeoutMs)
     })));
     const streamAddons = manifests.flatMap((result2) => result2.status === "fulfilled" && result2.value.manifest.resources.includes("stream") ? [result2.value.addon] : []);
-    const result = await loadAddonStreams(streamAddons, loadStreams);
+    const result = await loadAddonStreams(streamAddons, loadStreams, timeoutMs);
     return {
       ...result,
       failedAddons: result.failedAddons + manifests.filter((item) => item.status === "rejected").length
     };
+  }
+  function withinTimeout(promise, timeoutMs) {
+    if (!timeoutMs || timeoutMs <= 0)
+      return promise;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Addon did not answer within ${timeoutMs} ms.`)), timeoutMs);
+      promise.then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      }, (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+    });
   }
   function getRecord(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
@@ -1140,9 +1154,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.3.1",
+    version: "2.4.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 12,
+    ghVersion: 13,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"

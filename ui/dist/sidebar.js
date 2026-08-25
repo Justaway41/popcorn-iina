@@ -62,8 +62,8 @@
       catalogs: Array.isArray(manifest?.catalogs) ? manifest.catalogs.flatMap(parseCatalog) : []
     };
   }
-  async function loadAddonStreams(addons, load) {
-    const results = await Promise.allSettled(addons.map(load));
+  async function loadAddonStreams(addons, load, timeoutMs) {
+    const results = await Promise.allSettled(addons.map((addon) => withinTimeout(load(addon), timeoutMs)));
     const seen = new Set;
     const streams = [];
     let failedAddons = 0;
@@ -83,18 +83,32 @@
     });
     return { streams, failedAddons, successfulAddons };
   }
-  async function loadEnabledAddonStreams(addons, loadManifest, loadStreams) {
+  async function loadEnabledAddonStreams(addons, loadManifest, loadStreams, timeoutMs) {
     const enabled = addons.filter((addon) => addon.enabled);
     const manifests = await Promise.allSettled(enabled.map(async (addon) => ({
       addon,
-      manifest: await loadManifest(addon)
+      manifest: await withinTimeout(loadManifest(addon), timeoutMs)
     })));
     const streamAddons = manifests.flatMap((result2) => result2.status === "fulfilled" && result2.value.manifest.resources.includes("stream") ? [result2.value.addon] : []);
-    const result = await loadAddonStreams(streamAddons, loadStreams);
+    const result = await loadAddonStreams(streamAddons, loadStreams, timeoutMs);
     return {
       ...result,
       failedAddons: result.failedAddons + manifests.filter((item) => item.status === "rejected").length
     };
+  }
+  function withinTimeout(promise, timeoutMs) {
+    if (!timeoutMs || timeoutMs <= 0)
+      return promise;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Addon did not answer within ${timeoutMs} ms.`)), timeoutMs);
+      promise.then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      }, (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+    });
   }
   function getRecord(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
@@ -251,9 +265,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.3.1",
+    version: "2.4.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 12,
+    ghVersion: 13,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -685,6 +699,39 @@
   var pendingConfigurationResolvers = [];
   var activeRequest = null;
   var addonManifests = new Map;
+  var STREAM_ADDON_TIMEOUT_MS = 8000;
+  var STREAM_CACHE_TTL_MS = 60000;
+  var STREAM_CACHE_CAPACITY = 20;
+  function createStreamCache(ttlMs, capacity, now) {
+    const entries = new Map;
+    return {
+      get(key) {
+        const entry = entries.get(key);
+        if (!entry)
+          return null;
+        if (now() - entry.at >= ttlMs) {
+          entries.delete(key);
+          return null;
+        }
+        return entry.result;
+      },
+      set(key, result) {
+        entries.delete(key);
+        entries.set(key, { at: now(), result });
+        while (entries.size > capacity) {
+          const oldest = entries.keys().next().value;
+          if (oldest === undefined)
+            break;
+          entries.delete(oldest);
+        }
+      },
+      clear() {
+        entries.clear();
+      }
+    };
+  }
+  var streamCache = createStreamCache(STREAM_CACHE_TTL_MS, STREAM_CACHE_CAPACITY, Date.now);
+  var addonsSignature = "";
   function replaceRequest(previous) {
     previous?.abort();
     return new AbortController;
@@ -770,6 +817,16 @@
   function applyConfiguration(data) {
     const payload = data;
     addons = parseAddons(payload?.addons);
+    const signature = JSON.stringify(addons.map((addon) => [addon.manifestUrl, addon.enabled]));
+    if (signature !== addonsSignature) {
+      addonsSignature = signature;
+      streamCache.clear();
+      for (const addon of addons) {
+        if (!addon.enabled)
+          continue;
+        loadAddonManifest(addon, new AbortController().signal).catch(() => {});
+      }
+    }
     const incoming = parseMediaTypePreference(payload?.mediaType);
     if (pendingMediaType === null || incoming === pendingMediaType) {
       pendingMediaType = null;
@@ -962,16 +1019,20 @@
       if (request.signal.aborted)
         return;
       const videoId = episode?.id || media.imdbId || media.providerId || media.id;
-      const [result, englishSubtitles] = await Promise.all([
-        loadEnabledAddonStreams(addons, (addon) => loadAddonManifest(addon, request.signal), async (addon) => parsePlayableStreams(await fetchJson(buildStremioStreamUrl(addon.manifestUrl, media.type, videoId), request.signal))),
-        isCompatibleSubtitleId(videoId) ? fetchJson(buildOpenSubtitlesUrl(media.type, videoId), request.signal).then(parseEnglishSubtitleAvailability).catch(() => null) : Promise.resolve(null)
-      ]);
+      const cacheKey = `${media.type}:${videoId}`;
+      const cached = streamCache.get(cacheKey);
+      const subtitlesPending = isCompatibleSubtitleId(videoId) ? fetchJson(buildOpenSubtitlesUrl(media.type, videoId), request.signal).then(parseEnglishSubtitleAvailability).catch(() => null) : null;
+      const result = cached ?? await loadEnabledAddonStreams(addons, (addon) => loadAddonManifest(addon, request.signal), async (addon) => parsePlayableStreams(await fetchJson(buildStremioStreamUrl(addon.manifestUrl, media.type, videoId), request.signal)), STREAM_ADDON_TIMEOUT_MS).then((loaded) => {
+        if (loaded.successfulAddons > 0)
+          streamCache.set(cacheKey, loaded);
+        return loaded;
+      });
       if (request.signal.aborted)
         return;
       if (result.successfulAddons === 0) {
         throw new Error("Enable a stream addon in IINA Settings → Plugins → Popcorn for IINA.");
       }
-      renderStreams(media, episode, episodes, result.streams, result.failedAddons, englishSubtitles, preferredQuality, recommendNext);
+      renderStreams(media, episode, episodes, result.streams, result.failedAddons, preferredQuality, recommendNext, subtitlesPending);
     } catch (error) {
       if (!request.signal.aborted)
         showError(readError(error, "Could not load streams."));
@@ -1356,7 +1417,7 @@
     }
     return button;
   }
-  function renderStreams(media, episode, episodes, streams, failedAddons, englishSubtitles, preferredQuality, recommendNext = false) {
+  function renderStreams(media, episode, episodes, streams, failedAddons, preferredQuality, recommendNext = false, subtitlesPending) {
     if (streams.length === 0) {
       renderEmpty("No direct HTTP streams. The enabled addons may only return torrent entries.");
       return;
@@ -1389,6 +1450,7 @@
     }
     const seriesPrefix = episode ? buildSeriesPrefixPattern(media, episode) : null;
     let sizeOrder = "largest";
+    let englishSubtitles = null;
     const summary = document.createElement("div");
     summary.className = "stream-summary";
     const summaryText = document.createElement("span");
@@ -1411,6 +1473,14 @@
     renderList();
     content.append(summary, list);
     showContent(content);
+    if (subtitlesPending) {
+      subtitlesPending.then((value) => {
+        if (value === null || !summaryText.isConnected)
+          return;
+        englishSubtitles = value;
+        summaryText.textContent = buildStreamSummary(streams, varying, englishSubtitles);
+      });
+    }
   }
   function buildNextEpisodeDetail(stream) {
     return [

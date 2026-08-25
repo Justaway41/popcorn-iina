@@ -149,3 +149,37 @@ test("loads streams only from enabled addons that declare stream capability", as
     expect(result.streams.map(({ title }) => title)).toEqual(["Playable"]);
     expect(result).toMatchObject({ failedAddons: 1, successfulAddons: 1 });
 });
+
+test("a hung addon times out without blocking the others", async () => {
+    const addons = [
+        { name: "Slow", manifestUrl: "https://slow.example/manifest.json", enabled: true },
+        { name: "Fast", manifestUrl: "https://fast.example/manifest.json", enabled: true }
+    ];
+    const result = await loadAddonStreams(addons, (addon) =>
+        addon.name === "Slow"
+            ? new Promise(() => {})
+            : Promise.resolve([stream({ title: "Fast", url: "https://fast.example/video" })]),
+        20
+    );
+
+    expect(result.streams.map(({ title }) => title)).toEqual(["Fast"]);
+    expect(result).toMatchObject({ failedAddons: 1, successfulAddons: 1 });
+});
+
+test("a hung manifest times out like any other addon call", async () => {
+    const addons = [
+        { name: "Slow", manifestUrl: "https://slow.example/manifest.json", enabled: true },
+        { name: "Playable", manifestUrl: "https://play.example/manifest.json", enabled: true }
+    ];
+    const result = await loadEnabledAddonStreams(
+        addons,
+        (addon) => addon.name === "Slow"
+            ? new Promise(() => {})
+            : Promise.resolve(parseAddonManifest({ name: addon.name, resources: ["stream"] })),
+        (addon) => Promise.resolve([stream({ title: addon.name })]),
+        20
+    );
+
+    expect(result.successfulAddons).toBe(1);
+    expect(result.failedAddons).toBe(1);
+});

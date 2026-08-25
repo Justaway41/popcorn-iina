@@ -21,7 +21,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.3.1`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.4.0`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -113,6 +113,20 @@ The list is grouped into resolution tiers with a per-tier ready count. Within a 
 is the primary sort key and the size toggle is secondary, because availability, not file size,
 decides whether playback starts now. Each tier reveals as many rows as it has ready streams,
 bounded to 5-15.
+
+Stream loading is latency-shaped around its slowest optional part:
+
+- **Subtitles never gate the list.** The OpenSubtitles lookup runs beside the addon fetches, and
+  `renderStreams` paints immediately with an unknown-subtitle summary; when the answer lands it
+  patches the badge only if the summary node is still connected (a replaced view ends the update,
+  so no revision bookkeeping is needed).
+- **Per-addon timeout.** `loadAddonStreams`/`loadEnabledAddonStreams` accept a `timeoutMs`; each
+  addon call races its own clock (`STREAM_ADDON_TIMEOUT_MS`, 8s) so one hung host cannot hold the
+  list hostage. A timed-out addon counts as failed like any other rejection.
+- **Short-TTL session cache.** Successful per-title results are cached for 60s
+  (`STREAM_CACHE_TTL_MS`) keyed on `type:videoId`, capped at 20 entries with oldest-first
+  eviction (`createStreamCache`). Total failures stay uncached so Retry retries, and
+  `applyConfiguration` clears the cache whenever the addon set actually changes.
 
 Subtitle availability combines embedded stream metadata with OpenSubtitles results when an
 IMDb-compatible video ID exists. Unknown metadata must remain visibly unknown rather than being
@@ -333,6 +347,13 @@ As of 2026-08-12:
   rolls back state when `loadfile` throws; failed Kitsu→MAL lookups are no longer cached for the
   session; and the Continue Watching strip refills on removal/dropout and removes itself cleanly
   when emptied (title falls back to Browse/Trending).
+- `2.4.0` shapes stream loading for latency: the OpenSubtitles lookup no longer gates the list
+  (the summary badge patches in when the answer lands, touching only that text node); every
+  addon manifest and stream call races an 8s per-addon timeout so one hung host cannot hold the
+  list hostage; successful per-title results cache for 60s keyed on `type:videoId` (20 entries,
+  oldest-first eviction, cleared whenever the addon set changes, total failures stay uncached);
+  and manifests prefetch in the background as soon as configuration arrives, so opening a title
+  never waits on a manifest round trip first.
 - Simkl was chosen over routing through a self-hosted CrossWatch instance after Trakt limited free
   accounts to one connected community app. The CrossWatch design is kept at
   `docs/superpowers/specs/2026-08-12-crosswatch-scrobble-design.md` and its implementation on the

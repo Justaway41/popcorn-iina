@@ -99,9 +99,10 @@ export function parseAddonManifest(value: unknown): AddonManifest {
 
 export async function loadAddonStreams(
     addons: StremioAddon[],
-    load: (addon: StremioAddon) => Promise<PlayableStream[]>
+    load: (addon: StremioAddon) => Promise<PlayableStream[]>,
+    timeoutMs?: number
 ): Promise<AddonStreamLoadResult> {
-    const results = await Promise.allSettled(addons.map(load));
+    const results = await Promise.allSettled(addons.map((addon) => withinTimeout(load(addon), timeoutMs)));
     const seen = new Set<string>();
     const streams: AddonStream[] = [];
     let failedAddons = 0;
@@ -126,23 +127,48 @@ export async function loadAddonStreams(
 export async function loadEnabledAddonStreams(
     addons: StremioAddon[],
     loadManifest: (addon: StremioAddon) => Promise<AddonManifest>,
-    loadStreams: (addon: StremioAddon) => Promise<PlayableStream[]>
+    loadStreams: (addon: StremioAddon) => Promise<PlayableStream[]>,
+    timeoutMs?: number
 ): Promise<AddonStreamLoadResult> {
     const enabled = addons.filter((addon) => addon.enabled);
     const manifests = await Promise.allSettled(enabled.map(async (addon) => ({
         addon,
-        manifest: await loadManifest(addon)
+        manifest: await withinTimeout(loadManifest(addon), timeoutMs)
     })));
     const streamAddons = manifests.flatMap((result) => (
         result.status === "fulfilled" && result.value.manifest.resources.includes("stream")
             ? [result.value.addon]
             : []
     ));
-    const result = await loadAddonStreams(streamAddons, loadStreams);
+    const result = await loadAddonStreams(streamAddons, loadStreams, timeoutMs);
     return {
         ...result,
         failedAddons: result.failedAddons + manifests.filter((item) => item.status === "rejected").length
     };
+}
+
+/**
+ * A hung addon host must not hold the whole list hostage until the network stack gives up,
+ * so each addon call races its own clock; a loser counts as failed like any other rejection.
+ */
+function withinTimeout<T>(promise: Promise<T>, timeoutMs?: number): Promise<T> {
+    if (!timeoutMs || timeoutMs <= 0) return promise;
+    return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(
+            () => reject(new Error(`Addon did not answer within ${timeoutMs} ms.`)),
+            timeoutMs
+        );
+        promise.then(
+            (value) => {
+                clearTimeout(timer);
+                resolve(value);
+            },
+            (error: unknown) => {
+                clearTimeout(timer);
+                reject(error);
+            }
+        );
+    });
 }
 
 function getRecord(value: unknown): Record<string, unknown> | null {

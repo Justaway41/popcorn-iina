@@ -4,6 +4,7 @@ import {
     buildNextEpisodeDetail,
     buildRowMeta,
     buildStreamSummary,
+    createStreamCache,
     getAudioBadge,
     getDefaultTier,
     getTierRowCap,
@@ -54,6 +55,31 @@ test("replacing a request aborts the previous request only", () => {
 
     expect(previous.signal.aborted).toBe(true);
     expect(current.signal.aborted).toBe(false);
+});
+
+test("serves cached stream results only while fresh, bounded, and clearable", () => {
+    let now = 0;
+    const cache = createStreamCache(60_000, 2, () => now);
+    const result = { streams: [], failedAddons: 0, successfulAddons: 2 };
+
+    cache.set("movie:tt1", result);
+    expect(cache.get("movie:tt1")).toBe(result);
+
+    // exactly at the TTL the entry is stale, not fresh
+    now = 60_000;
+    expect(cache.get("movie:tt1")).toBeNull();
+
+    now = 60_001;
+    cache.set("series:tt2:1:1", result);
+    cache.set("series:tt2:1:2", result);
+    cache.set("series:tt2:1:3", result);
+    // capacity two: the oldest entry leaves first
+    expect(cache.get("series:tt2:1:1")).toBeNull();
+    expect(cache.get("series:tt2:1:2")).toBe(result);
+    expect(cache.get("series:tt2:1:3")).toBe(result);
+
+    cache.clear();
+    expect(cache.get("series:tt2:1:2")).toBeNull();
 });
 
 test("keeps ordered catalog results when another provider fails", () => {

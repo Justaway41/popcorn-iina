@@ -1,5 +1,5 @@
 import type { ConfigurationPayload, HistoryPayload, ShowNextEpisodePayload } from "../shared/messages";
-import type { AddonManifest, AddonStream, StremioAddon } from "../shared/addons";
+import type { AddonStreamLoadResult, AddonManifest, AddonStream, StremioAddon } from "../shared/addons";
 import type { WatchHistoryEntry } from "../shared/history";
 import type { Episode, EpisodeOrder, Media, MediaType, SizeOrder } from "../shared/stremio";
 
@@ -68,6 +68,54 @@ let retryAction: (() => Promise<void>) | null = null;
 let pendingConfigurationResolvers: Array<() => void> = [];
 let activeRequest: AbortController | null = null;
 const addonManifests = new Map<string, AddonManifest>();
+
+/** One slow or hung addon must not hold the stream list hostage. */
+const STREAM_ADDON_TIMEOUT_MS = 8000;
+/** Availability changes, so a revisit reuses stream results only this long. */
+const STREAM_CACHE_TTL_MS = 60_000;
+const STREAM_CACHE_CAPACITY = 20;
+
+/**
+ * Session cache for per-title addon stream results, oldest entry evicted first once full.
+ * The clock is injectable so freshness and eviction are testable without waiting.
+ */
+export function createStreamCache(
+    ttlMs: number,
+    capacity: number,
+    now: () => number
+): {
+    get(key: string): AddonStreamLoadResult | null;
+    set(key: string, result: AddonStreamLoadResult): void;
+    clear(): void;
+} {
+    const entries = new Map<string, { at: number; result: AddonStreamLoadResult }>();
+    return {
+        get(key: string): AddonStreamLoadResult | null {
+            const entry = entries.get(key);
+            if (!entry) return null;
+            if (now() - entry.at >= ttlMs) {
+                entries.delete(key);
+                return null;
+            }
+            return entry.result;
+        },
+        set(key: string, result: AddonStreamLoadResult): void {
+            entries.delete(key);
+            entries.set(key, { at: now(), result });
+            while (entries.size > capacity) {
+                const oldest = entries.keys().next().value;
+                if (oldest === undefined) break;
+                entries.delete(oldest);
+            }
+        },
+        clear(): void {
+            entries.clear();
+        }
+    };
+}
+
+const streamCache = createStreamCache(STREAM_CACHE_TTL_MS, STREAM_CACHE_CAPACITY, Date.now);
+let addonsSignature = "";
 
 export function replaceRequest(previous: AbortController | null): AbortController {
     previous?.abort();
@@ -172,6 +220,20 @@ export function initApp(): void {
 function applyConfiguration(data: unknown): void {
     const payload = data as ConfigurationPayload;
     addons = parseAddons(payload?.addons);
+    // A changed addon set can surface different streams, so results the old set produced must
+    // not be served; an unchanged set keeps the cache, since configuration refreshes often.
+    const signature = JSON.stringify(addons.map((addon) => [addon.manifestUrl, addon.enabled]));
+    if (signature !== addonsSignature) {
+        addonsSignature = signature;
+        streamCache.clear();
+        // Warm the manifest cache while the user browses, so opening a title never waits on a
+        // manifest round trip before the stream request can even start. Failures stay
+        // uncached and simply retry when a stream list actually needs the manifest.
+        for (const addon of addons) {
+            if (!addon.enabled) continue;
+            void loadAddonManifest(addon, new AbortController().signal).catch(() => {});
+        }
+    }
     // Setting the type and requesting configuration are separate messages, so a reply can arrive
     // still carrying the old type. Hold the local choice until the plugin reports it back, or
     // switching type during a search would silently flip straight back.
@@ -400,21 +462,28 @@ async function loadStreams(
         await refreshConfiguration();
         if (request.signal.aborted) return;
         const videoId = episode?.id || media.imdbId || media.providerId || media.id;
-        const [result, englishSubtitles] = await Promise.all([
-            loadEnabledAddonStreams(
-                addons,
-                (addon) => loadAddonManifest(addon, request.signal),
-                async (addon) => parsePlayableStreams(await fetchJson(
-                    buildStremioStreamUrl(addon.manifestUrl, media.type, videoId),
-                    request.signal
-                ))
-            ),
-            isCompatibleSubtitleId(videoId)
-                ? fetchJson(buildOpenSubtitlesUrl(media.type, videoId), request.signal)
-                    .then(parseEnglishSubtitleAvailability)
-                    .catch(() => null)
-                : Promise.resolve(null)
-        ]);
+        const cacheKey = `${media.type}:${videoId}`;
+        const cached = streamCache.get(cacheKey);
+        // Subtitles only feed the summary badge, so they load beside the streams instead of
+        // ahead of them; the list must not wait on a second provider.
+        const subtitlesPending = isCompatibleSubtitleId(videoId)
+            ? fetchJson(buildOpenSubtitlesUrl(media.type, videoId), request.signal)
+                .then(parseEnglishSubtitleAvailability)
+                .catch(() => null)
+            : null;
+        const result: AddonStreamLoadResult = cached ?? await loadEnabledAddonStreams(
+            addons,
+            (addon) => loadAddonManifest(addon, request.signal),
+            async (addon) => parsePlayableStreams(await fetchJson(
+                buildStremioStreamUrl(addon.manifestUrl, media.type, videoId),
+                request.signal
+            )),
+            STREAM_ADDON_TIMEOUT_MS
+        ).then((loaded) => {
+            // A total failure stays uncached so Retry actually retries.
+            if (loaded.successfulAddons > 0) streamCache.set(cacheKey, loaded);
+            return loaded;
+        });
         if (request.signal.aborted) return;
         if (result.successfulAddons === 0) {
             throw new Error("Enable a stream addon in IINA Settings → Plugins → Popcorn for IINA.");
@@ -425,9 +494,9 @@ async function loadStreams(
             episodes,
             result.streams,
             result.failedAddons,
-            englishSubtitles,
             preferredQuality,
-            recommendNext
+            recommendNext,
+            subtitlesPending
         );
     } catch (error) {
         if (!request.signal.aborted) showError(readError(error, "Could not load streams."));
@@ -935,9 +1004,9 @@ function renderStreams(
     episodes: Episode[],
     streams: AddonStream[],
     failedAddons: number,
-    englishSubtitles: boolean | null,
     preferredQuality?: string,
-    recommendNext = false
+    recommendNext = false,
+    subtitlesPending?: Promise<boolean | null> | null
 ): void {
     if (streams.length === 0) {
         renderEmpty("No direct HTTP streams. The enabled addons may only return torrent entries.");
@@ -978,6 +1047,7 @@ function renderStreams(
     const seriesPrefix = episode ? buildSeriesPrefixPattern(media, episode) : null;
 
     let sizeOrder: SizeOrder = "largest";
+    let englishSubtitles: boolean | null = null;
     const summary = document.createElement("div");
     summary.className = "stream-summary";
     const summaryText = document.createElement("span");
@@ -1007,6 +1077,16 @@ function renderStreams(
     renderList();
     content.append(summary, list);
     showContent(content);
+    // The badge lands whenever the subtitle answer does. Only the summary line changes, so the
+    // rows the user is already reading stay untouched; a replaced view disconnects this node,
+    // which is what ends the update - no revision bookkeeping needed.
+    if (subtitlesPending) {
+        void subtitlesPending.then((value) => {
+            if (value === null || !summaryText.isConnected) return;
+            englishSubtitles = value;
+            summaryText.textContent = buildStreamSummary(streams, varying, englishSubtitles);
+        });
+    }
 }
 
 /** The next-episode row stands alone, so it states everything rather than hoisting. */
