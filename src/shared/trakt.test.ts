@@ -160,6 +160,39 @@ test("merges by newest timestamp while keeping watched and rich metadata", () =>
     });
 });
 
+test("keeps distinct provider-only titles separate when merging", () => {
+    const first = {
+        id: "kitsu:1",
+        imdbId: "",
+        providerId: "kitsu:1",
+        type: "movie" as const,
+        name: "First",
+        releaseInfo: "",
+        poster: ""
+    };
+    const second = { ...first, id: "kitsu:2", providerId: "kitsu:2", name: "Second" };
+    const local = [
+        {
+            id: "kitsu:1",
+            media: first,
+            lastPlayedAt: "2026-07-25T10:00:00.000Z",
+            watched: false,
+            progress: 30
+        },
+        {
+            id: "kitsu:2",
+            media: second,
+            lastPlayedAt: "2026-07-26T10:00:00.000Z",
+            watched: false,
+            progress: 40
+        }
+    ];
+
+    const merged = mergeWatchHistory(local, []);
+    expect(merged).toHaveLength(2);
+    expect(merged.map((entry) => entry.media.name).sort()).toEqual(["First", "Second"]);
+});
+
 test("requests a device code and polls at the supplied interval", async () => {
     const state = parseTraktState({ clientId: "id", clientSecret: "secret" });
     const code = await requestDeviceCode(queueTransport([{

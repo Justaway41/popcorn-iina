@@ -1,4 +1,5 @@
 import type { WatchHistoryEntry } from "./history";
+import { historyTitleId } from "./history";
 import type { PlaybackContext } from "./messages";
 import { isImdbId } from "./stremio";
 
@@ -559,8 +560,8 @@ function timestamp(value: string): number {
 
 function historyKey(entry: WatchHistoryEntry): string {
     return entry.episode
-        ? `${entry.media.imdbId}:${entry.episode.season}:${entry.episode.episode}`
-        : entry.media.imdbId;
+        ? `${historyTitleId(entry)}:${entry.episode.season}:${entry.episode.episode}`
+        : historyTitleId(entry);
 }
 
 export function parseJson(value: unknown): unknown {

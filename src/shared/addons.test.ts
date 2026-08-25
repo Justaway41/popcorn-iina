@@ -8,7 +8,23 @@ import {
     parseAddonManifest,
     parseAddons
 } from "./addons";
-import { buildStremioStreamUrl } from "./stremio";
+import { buildStremioStreamUrl, type PlayableStream } from "./stremio";
+
+function stream(overrides: Partial<PlayableStream> = {}): PlayableStream {
+    return {
+        title: "Title",
+        rawTitle: "Title",
+        url: "https://example.example/video",
+        resolution: "",
+        source: "",
+        size: "",
+        audioLanguages: [],
+        subtitleLanguages: null,
+        cached: null,
+        seeders: null,
+        ...overrides
+    };
+}
 
 test("canonicalizes manifest URLs and preserves configuration queries", () => {
     expect(canonicalizeManifestUrl("stremio://addon.example/config?token=x")).toBe(
@@ -83,21 +99,14 @@ test("merges successful addons in order and reports failures", async () => {
     ];
     const result = await loadAddonStreams(addons, async (addon) => {
         if (addon.name === "Broken") throw new Error("offline");
-        return [{
-            title: addon.name,
-            url: addon.name === "Two" ? "https://same.example/video" : "https://one.example/video",
-            quality: "",
-            size: "",
-            audioLanguages: [],
-            subtitleLanguages: null
-        }, {
-            title: "Duplicate",
-            url: "https://same.example/video",
-            quality: "",
-            size: "",
-            audioLanguages: [],
-            subtitleLanguages: null
-        }];
+        return [
+            stream({
+                title: addon.name,
+                rawTitle: addon.name,
+                url: addon.name === "Two" ? "https://same.example/video" : "https://one.example/video"
+            }),
+            stream({ title: "Duplicate", url: "https://same.example/video" })
+        ];
     });
 
     expect(result.streams.map((stream) => [stream.title, stream.addonName])).toEqual([
@@ -126,14 +135,13 @@ test("loads streams only from enabled addons that declare stream capability", as
         },
         async (addon) => {
             streamCalls.push(addon.name);
-            return [{
+            return [stream({
                 title: addon.name,
+                rawTitle: addon.name,
                 url: `https://${addon.name}.example/video`,
-                quality: "1080p",
-                size: "1 GB",
-                audioLanguages: [],
-                subtitleLanguages: null
-            }];
+                resolution: "1080p",
+                size: "1 GB"
+            })];
         }
     );
 

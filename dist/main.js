@@ -788,7 +788,7 @@
     return Number.isFinite(parsed) ? parsed : 0;
   }
   function historyKey(entry) {
-    return entry.episode ? `${entry.media.imdbId}:${entry.episode.season}:${entry.episode.episode}` : entry.media.imdbId;
+    return entry.episode ? `${historyTitleId(entry)}:${entry.episode.season}:${entry.episode.episode}` : historyTitleId(entry);
   }
   function parseJson(value) {
     if (typeof value !== "string")
@@ -828,9 +828,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.3.0",
+    version: "2.3.1",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 11,
+    ghVersion: 12,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1572,6 +1572,8 @@
     }
     const title = sanitizeMediaTitle(payload.title || "Popcorn");
     checkpointPlayback();
+    const previousContext = activePlaybackContext;
+    const previousScrobbleStopSent = scrobbleStopSent;
     activePlaybackContext = payload.playbackContext || null;
     scrobbleStopSent = false;
     pendingResumePercent = typeof payload.resumePercent === "number" && Number.isFinite(payload.resumePercent) && payload.resumePercent >= 0 && payload.resumePercent <= 100 ? payload.resumePercent : null;
@@ -1579,7 +1581,16 @@
     reachedNaturalEof = false;
     clearIntro();
     core.osd("Loading stream...");
-    mpv.command("loadfile", [url, "replace", "-1", `force-media-title=${title}`]);
+    try {
+      mpv.command("loadfile", [url, "replace", "-1", `force-media-title=${title}`]);
+    } catch (error) {
+      activePlaybackContext = previousContext;
+      scrobbleStopSent = previousScrobbleStopSent;
+      pendingResumePercent = null;
+      isReplacingPlayback = false;
+      logDebug("Popcorn: Failed to start stream:", formatError(error));
+      utils.ask("Popcorn could not start this stream.");
+    }
   }
   function handleEndFile() {
     stopPlaybackMonitoring();
@@ -1866,7 +1877,9 @@
     if (cached !== undefined)
       return cached;
     const response = await http.get(`https://kitsu.io/api/edge/anime/${encodeURIComponent(kitsuId)}/mappings`, { params: {}, headers: { Accept: "application/vnd.api+json" }, data: {} });
-    const malId = response.statusCode >= 200 && response.statusCode < 300 ? parseKitsuMalId(response.data ?? safeJson2(response.text)) : "";
+    if (response.statusCode < 200 || response.statusCode >= 300)
+      return "";
+    const malId = parseKitsuMalId(response.data ?? safeJson2(response.text));
     kitsuMalIds.set(kitsuId, malId);
     return malId;
   }
@@ -1921,7 +1934,7 @@
       preferences.set("watchHistory", history);
       preferences.sync();
       sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history });
-    });
+    }).catch((error) => logDebug(`Startup history sync failed: ${formatError(error)}`));
     if (pendingShowSidebar) {
       pendingShowSidebar = false;
       showSidebarWithDelay();

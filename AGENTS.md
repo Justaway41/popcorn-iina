@@ -21,7 +21,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.3.0`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.3.1`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -326,6 +326,13 @@ As of 2026-08-12:
   moves the sidebar with the player when Next Episode is used. The skip-intro fix is a guard on the
   data, not a confirmed reproduction: the reported symptom was Skip Intro ending the episode, and an
   over-long chapter interval is the plausible cause. If it recurs, capture the file's chapters.
+- `2.3.1` is a correctness release: `historyKey` falls back to `providerId`/`id` so distinct
+  provider-only titles no longer collapse on Trakt/Simkl sync; aborted searches and episode loads
+  can no longer render stale results over a newer view; the Simkl PIN poll survives transient 5xx
+  and network errors like Trakt's poller; the startup sync chain carries a `.catch`; `playItem`
+  rolls back state when `loadfile` throws; failed Kitsu→MAL lookups are no longer cached for the
+  session; and the Continue Watching strip refills on removal/dropout and removes itself cleanly
+  when emptied (title falls back to Browse/Trending).
 - Simkl was chosen over routing through a self-hosted CrossWatch instance after Trakt limited free
   accounts to one connected community app. The CrossWatch design is kept at
   `docs/superpowers/specs/2026-08-12-crosswatch-scrobble-design.md` and its implementation on the

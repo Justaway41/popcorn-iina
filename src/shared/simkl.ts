@@ -103,23 +103,33 @@ export async function pollSimklPin(
     pin: SimklPin,
     wait: (ms: number) => Promise<void>
 ): Promise<SimklState> {
+    let intervalMs = pin.intervalMs;
     while (Date.now() < pin.expiresAt) {
-        const data = await request(
-            transport,
-            state,
-            "GET",
-            pinPath(state, pin.userCode),
-            null,
-            Date.now()
-        );
-        const item = getRecord(data);
+        let item: Record<string, unknown> | null = null;
+        try {
+            item = getRecord(await request(
+                transport,
+                state,
+                "GET",
+                pinPath(state, pin.userCode),
+                null,
+                Date.now()
+            ));
+        } catch (error: unknown) {
+            // A transient failure must not cancel authorization; only a rejected or
+            // invalid client id does, and only expiry ends the wait otherwise.
+            const simklError = error instanceof SimklError ? error : null;
+            if (simklError && simklError.status < 500 && simklError.status !== 429) throw simklError;
+            const retryAt = simklError?.retryAt ?? 0;
+            if (retryAt > Date.now()) intervalMs = Math.max(intervalMs, retryAt - Date.now());
+        }
         const accessToken = getString(item?.access_token);
         // Simkl answers `result: "KO"` for a code nobody has approved yet.
         if (isOk(item) && accessToken) {
             return { ...state, accessToken, lastError: "", retryAt: 0 };
         }
-        if (Date.now() + pin.intervalMs >= pin.expiresAt) break;
-        await wait(pin.intervalMs);
+        if (Date.now() + intervalMs >= pin.expiresAt) break;
+        await wait(intervalMs);
     }
     throw new Error("Simkl pin expired before it was approved.");
 }

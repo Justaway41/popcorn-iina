@@ -245,10 +245,12 @@ async function loadHome(query: string): Promise<void> {
                 buildCinemetaTrendingUrl(mediaType),
                 request.signal
             ));
+            if (request.signal.aborted) return;
             renderMedia(items, query);
             return;
         }
         const result = await searchCatalogs(query, request.signal);
+        if (request.signal.aborted) return;
         if (result.successfulSources === 0) {
             throw new Error("Could not search any catalog.");
         }
@@ -353,6 +355,7 @@ async function loadEpisodes(media: Media, season?: number): Promise<void> {
 
     try {
         const details = await loadMediaDetails(media, request.signal);
+        if (request.signal.aborted) return;
         if (!details.metadataAvailable) {
             renderEmpty("Episode metadata unavailable.");
             return;
@@ -508,6 +511,14 @@ function isUpNext(entry: WatchHistoryEntry): boolean {
 /** How many cards the home strip holds. See all carries the rest. */
 const HOME_HISTORY_CARDS = 6;
 
+interface HomeStrip {
+    section: HTMLElement;
+    fill(): void;
+}
+
+/** The live Continue Watching strip, if the home view is currently showing one. */
+let homeStrip: HomeStrip | null = null;
+
 function historySection(entries: WatchHistoryEntry[], home: boolean): HTMLElement {
     const section = document.createElement("section");
     section.className = "history-section";
@@ -526,6 +537,8 @@ function historySection(entries: WatchHistoryEntry[], home: boolean): HTMLElemen
         while (grid.childElementCount < HOME_HISTORY_CARDS && next < entries.length) {
             const entry = entries[next];
             next += 1;
+            // A title removed since this snapshot was taken must not come back from it.
+            if (!watchHistory.some((item) => item.id === entry.id)) continue;
             const upNext = isUpNext(entry);
             const slot = historySlot(entry, upNext);
             grid.appendChild(slot);
@@ -533,6 +546,7 @@ function historySection(entries: WatchHistoryEntry[], home: boolean): HTMLElemen
         }
     };
     fill();
+    homeStrip = { section, fill };
     return section;
 }
 
@@ -568,6 +582,7 @@ async function resolveUpNext(entry: WatchHistoryEntry, slot: HTMLElement): Promi
     const next = findNextEpisode(details.episodes, current);
     if (!next) {
         slot.remove();
+        refillHomeStrip();
         return;
     }
     slot.replaceWith(removableSlot(entry, mediaCard(
@@ -619,16 +634,35 @@ function removeFromHistory(entry: WatchHistoryEntry, slot: HTMLElement): void {
     // The card stands for the whole title, so every episode of it goes with the one shown.
     watchHistory = watchHistory.filter((item) => historyTitleId(item) !== historyTitleId(entry));
     iina.postMessage(MESSAGE_NAMES.RemoveHistoryEntry, { id: entry.id });
-    // Drop the one node rather than re-rendering, so the home view keeps its loaded catalogs.
+    // Drop the one node rather than re-rendering, so the view keeps its loaded catalogs.
     slot.remove();
-    if (watchHistory.length > 0) return;
-    if (view.kind === "history") {
-        renderEmpty("Nothing watched yet.");
+    if (view.kind !== "home") {
+        if (view.kind === "history" && watchHistory.length === 0) {
+            renderEmpty("Nothing watched yet.");
+        }
         return;
     }
-    // Leave the home view looking exactly as it would have rendered with no history at all.
-    ui.content.querySelectorAll("[data-history-chrome]").forEach((node) => node.remove());
-    if (view.kind === "home" && !view.query) ui.title.textContent = "Trending";
+    refillHomeStrip();
+}
+
+/**
+ * A removal or an up-next dropout frees a card space, so the title behind it takes it while any
+ * remain. Once nothing is left to continue, the strip leaves the home view looking exactly as it
+ * would have rendered that way in the first place.
+ */
+function refillHomeStrip(): void {
+    const strip = homeStrip;
+    if (!strip || !strip.section.isConnected) return;
+    strip.fill();
+    if (continueWatching().length > 0) return;
+    strip.section.remove();
+    homeStrip = null;
+    if (homeQuery) return;
+    if (watchHistory.length === 0) {
+        // The Trending heading exists only because history does, so it goes too.
+        ui.content.querySelectorAll("[data-history-chrome]").forEach((node) => node.remove());
+    }
+    ui.title.textContent = watchHistory.length > 0 ? "Browse" : "Trending";
 }
 
 function contentHeading(title: string, action?: () => void): HTMLElement {

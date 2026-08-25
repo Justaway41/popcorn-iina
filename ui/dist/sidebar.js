@@ -251,9 +251,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.3.0",
+    version: "2.3.1",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 11,
+    ghVersion: 12,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -831,10 +831,14 @@
     try {
       if (!query) {
         const items = parseMediaResponse(await fetchJson(buildCinemetaTrendingUrl(mediaType), request.signal));
+        if (request.signal.aborted)
+          return;
         renderMedia(items, query);
         return;
       }
       const result = await searchCatalogs(query, request.signal);
+      if (request.signal.aborted)
+        return;
       if (result.successfulSources === 0) {
         throw new Error("Could not search any catalog.");
       }
@@ -917,6 +921,8 @@
     retryAction = () => loadEpisodes(media, season);
     try {
       const details = await loadMediaDetails(media, request.signal);
+      if (request.signal.aborted)
+        return;
       if (!details.metadataAvailable) {
         renderEmpty("Episode metadata unavailable.");
         return;
@@ -1023,6 +1029,7 @@
     return Boolean(entry.episode) && getResumePercent(entry.progress, entry.watched) === null;
   }
   var HOME_HISTORY_CARDS = 6;
+  var homeStrip = null;
   function historySection(entries, home) {
     const section = document.createElement("section");
     section.className = "history-section";
@@ -1038,6 +1045,8 @@
       while (grid.childElementCount < HOME_HISTORY_CARDS && next < entries.length) {
         const entry = entries[next];
         next += 1;
+        if (!watchHistory.some((item) => item.id === entry.id))
+          continue;
         const upNext = isUpNext(entry);
         const slot = historySlot(entry, upNext);
         grid.appendChild(slot);
@@ -1046,6 +1055,7 @@
       }
     };
     fill();
+    homeStrip = { section, fill };
     return section;
   }
   function historySlot(entry, upNext) {
@@ -1062,6 +1072,7 @@
     const next = findNextEpisode(details.episodes, current);
     if (!next) {
       slot.remove();
+      refillHomeStrip();
       return;
     }
     slot.replaceWith(removableSlot(entry, mediaCard(entry.media, entry.media.name, `Next · S${pad(next.season)}E${pad(next.episode)} · ${next.name}`, () => void loadStreams(details.media, next, details.episodes), false, null)));
@@ -1096,15 +1107,29 @@
     watchHistory = watchHistory.filter((item) => historyTitleId(item) !== historyTitleId(entry));
     iina.postMessage(MESSAGE_NAMES.RemoveHistoryEntry, { id: entry.id });
     slot.remove();
-    if (watchHistory.length > 0)
-      return;
-    if (view.kind === "history") {
-      renderEmpty("Nothing watched yet.");
+    if (view.kind !== "home") {
+      if (view.kind === "history" && watchHistory.length === 0) {
+        renderEmpty("Nothing watched yet.");
+      }
       return;
     }
-    ui.content.querySelectorAll("[data-history-chrome]").forEach((node) => node.remove());
-    if (view.kind === "home" && !view.query)
-      ui.title.textContent = "Trending";
+    refillHomeStrip();
+  }
+  function refillHomeStrip() {
+    const strip = homeStrip;
+    if (!strip || !strip.section.isConnected)
+      return;
+    strip.fill();
+    if (continueWatching().length > 0)
+      return;
+    strip.section.remove();
+    homeStrip = null;
+    if (homeQuery)
+      return;
+    if (watchHistory.length === 0) {
+      ui.content.querySelectorAll("[data-history-chrome]").forEach((node) => node.remove());
+    }
+    ui.title.textContent = watchHistory.length > 0 ? "Browse" : "Trending";
   }
   function contentHeading(title, action) {
     const heading = document.createElement("div");

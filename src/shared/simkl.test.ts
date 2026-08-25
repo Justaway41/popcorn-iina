@@ -165,6 +165,24 @@ test("polls until the pin is approved", async () => {
     expect(result.lastError).toBe("");
 });
 
+test("keeps polling through a transient server error", async () => {
+    const { calls, transport } = recorder([
+        { status: 502, data: null, headers: {} },
+        ok({ result: "OK", access_token: "fresh-token" })
+    ]);
+    const pin = {
+        userCode: "ABC123",
+        verificationUrl: "https://simkl.com/pin",
+        expiresAt: Date.now() + 60_000,
+        intervalMs: 10
+    };
+
+    const result = await pollSimklPin(transport, connected, pin, async () => {});
+
+    expect(calls).toHaveLength(2);
+    expect(result.accessToken).toBe("fresh-token");
+});
+
 test("gives up once the pin has expired", async () => {
     const { transport } = recorder([ok({ result: "KO" })]);
     const pin = {

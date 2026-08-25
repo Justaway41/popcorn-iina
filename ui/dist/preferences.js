@@ -997,7 +997,7 @@
     return Number.isFinite(parsed) ? parsed : 0;
   }
   function historyKey(entry) {
-    return entry.episode ? `${entry.media.imdbId}:${entry.episode.season}:${entry.episode.episode}` : entry.media.imdbId;
+    return entry.episode ? `${historyTitleId(entry)}:${entry.episode.season}:${entry.episode.episode}` : historyTitleId(entry);
   }
   function parseJson(value) {
     if (typeof value !== "string")
@@ -1081,16 +1081,26 @@
     };
   }
   async function pollSimklPin(transport, state, pin, wait) {
+    let intervalMs = pin.intervalMs;
     while (Date.now() < pin.expiresAt) {
-      const data = await request2(transport, state, "GET", pinPath(state, pin.userCode), null, Date.now());
-      const item = getRecord4(data);
+      let item = null;
+      try {
+        item = getRecord4(await request2(transport, state, "GET", pinPath(state, pin.userCode), null, Date.now()));
+      } catch (error) {
+        const simklError = error instanceof SimklError ? error : null;
+        if (simklError && simklError.status < 500 && simklError.status !== 429)
+          throw simklError;
+        const retryAt = simklError?.retryAt ?? 0;
+        if (retryAt > Date.now())
+          intervalMs = Math.max(intervalMs, retryAt - Date.now());
+      }
       const accessToken = getString4(item?.access_token);
       if (isOk(item) && accessToken) {
         return { ...state, accessToken, lastError: "", retryAt: 0 };
       }
-      if (Date.now() + pin.intervalMs >= pin.expiresAt)
+      if (Date.now() + intervalMs >= pin.expiresAt)
         break;
-      await wait(pin.intervalMs);
+      await wait(intervalMs);
     }
     throw new Error("Simkl pin expired before it was approved.");
   }
@@ -1130,9 +1140,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.3.0",
+    version: "2.3.1",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 11,
+    ghVersion: 12,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"

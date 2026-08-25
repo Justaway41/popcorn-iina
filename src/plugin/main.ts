@@ -222,6 +222,8 @@ function playItem(payload: PlayItemPayload): void {
     }
     const title = sanitizeMediaTitle(payload.title || "Popcorn");
     checkpointPlayback();
+    const previousContext = activePlaybackContext;
+    const previousScrobbleStopSent = scrobbleStopSent;
     activePlaybackContext = payload.playbackContext || null;
     scrobbleStopSent = false;
     pendingResumePercent = typeof payload.resumePercent === "number" &&
@@ -234,7 +236,18 @@ function playItem(payload: PlayItemPayload): void {
     reachedNaturalEof = false;
     clearIntro();
     core.osd("Loading stream...");
-    mpv.command("loadfile", [url, "replace", "-1", `force-media-title=${title}`]);
+    try {
+        mpv.command("loadfile", [url, "replace", "-1", `force-media-title=${title}`]);
+    } catch (error) {
+        // The old file is still playing, so hand state back or progress and
+        // scrobbles would be recorded under the item we just failed to load.
+        activePlaybackContext = previousContext;
+        scrobbleStopSent = previousScrobbleStopSent;
+        pendingResumePercent = null;
+        isReplacingPlayback = false;
+        logDebug("Popcorn: Failed to start stream:", formatError(error));
+        utils.ask("Popcorn could not start this stream.");
+    }
 }
 
 function handleEndFile(): void {
@@ -606,9 +619,10 @@ async function loadKitsuMalId(providerId: string): Promise<string> {
         `https://kitsu.io/api/edge/anime/${encodeURIComponent(kitsuId)}/mappings`,
         { params: {}, headers: { Accept: "application/vnd.api+json" }, data: {} }
     );
-    const malId = response.statusCode >= 200 && response.statusCode < 300
-        ? parseKitsuMalId(response.data ?? safeJson(response.text))
-        : "";
+    // A successful answer without a mapping is a real "no MAL id"; a failed request is
+    // transient and must not be cached, or AniSkip stays broken until restart.
+    if (response.statusCode < 200 || response.statusCode >= 300) return "";
+    const malId = parseKitsuMalId(response.data ?? safeJson(response.text));
     kitsuMalIds.set(kitsuId, malId);
     return malId;
 }
@@ -676,7 +690,8 @@ event.on("iina.window-loaded", () => {
             preferences.set("watchHistory", history);
             preferences.sync();
             sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history });
-        });
+        })
+        .catch((error) => logDebug(`Startup history sync failed: ${formatError(error)}`));
     if (pendingShowSidebar) {
         pendingShowSidebar = false;
         showSidebarWithDelay();
