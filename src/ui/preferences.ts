@@ -61,6 +61,8 @@ const empty = element<HTMLParagraphElement>("addon-empty");
 const template = element<HTMLTemplateElement>("addon-row-template");
 const presetButtons = [...document.querySelectorAll<HTMLButtonElement>(".addon-preset")];
 const skipSegments = element<HTMLInputElement>("skip-segments");
+const preferredAudio = element<HTMLSelectElement>("preferred-audio");
+const preferredSubtitle = element<HTMLSelectElement>("preferred-subtitle");
 const traktClientId = element<HTMLInputElement>("trakt-client-id");
 const traktClientSecret = element<HTMLInputElement>("trakt-client-secret");
 const traktConnect = element<HTMLButtonElement>("trakt-connect");
@@ -131,19 +133,47 @@ skipSegments.addEventListener("change", () => {
     preferences.set("skipSegments", skipSegments.checked);
 });
 
+// These names mirror the canonical labels stream providers report, so a selection can be
+// matched against a stream's audio and subtitle language lists.
+const LANGUAGE_OPTIONS = [
+    "English", "Japanese", "Hindi", "Spanish", "French", "German", "Korean",
+    "Chinese", "Italian", "Portuguese", "Russian", "Tamil", "Telugu", "Arabic"
+];
+
+for (const select of [preferredAudio, preferredSubtitle]) {
+    const anyOption = document.createElement("option");
+    anyOption.value = "";
+    anyOption.textContent = "Any language";
+    select.appendChild(anyOption);
+    for (const language of LANGUAGE_OPTIONS) {
+        const option = document.createElement("option");
+        option.value = language;
+        option.textContent = language;
+        select.appendChild(option);
+    }
+    select.addEventListener("change", () => {
+        preferences.set(select.id === "preferred-audio" ? "preferredAudio" : "preferredSubtitle", select.value);
+    });
+}
+
 void loadPreferences();
 
 async function loadPreferences(): Promise<void> {
-    const [stored, legacy, storedTrakt, storedSkipSegments, storedSimkl] = await Promise.all([
-        getPreference("addons"),
-        getPreference("addonManifestUrl"),
-        getPreference("trakt"),
-        getPreference("skipSegments"),
-        getPreference("simkl")
-    ]);
+    const [stored, legacy, storedTrakt, storedSkipSegments, storedSimkl, storedAudio, storedSubtitle] =
+        await Promise.all([
+            getPreference("addons"),
+            getPreference("addonManifestUrl"),
+            getPreference("trakt"),
+            getPreference("skipSegments"),
+            getPreference("simkl"),
+            getPreference("preferredAudio"),
+            getPreference("preferredSubtitle")
+        ]);
     const storedAddons = parseAddons(stored);
     addons = parseAddons(stored, legacy);
     skipSegments.checked = parseSkipSegments(storedSkipSegments);
+    setLanguageSelect(preferredAudio, storedAudio);
+    setLanguageSelect(preferredSubtitle, storedSubtitle);
     trakt = parseTraktState(storedTrakt);
     traktClientId.value = trakt.clientId;
     traktClientSecret.value = trakt.clientSecret;
@@ -279,6 +309,11 @@ function save(shouldRender = true): void {
 
 function getPreference(key: string): Promise<unknown> {
     return new Promise((resolve) => preferences.get(key, resolve));
+}
+
+function setLanguageSelect(select: HTMLSelectElement, value: unknown): void {
+    const language = typeof value === "string" ? value.trim() : "";
+    select.value = LANGUAGE_OPTIONS.includes(language) ? language : "";
 }
 
 function setError(message: string): void {

@@ -3,9 +3,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.4.0",
+    version: "2.4.1",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 13,
+    ghVersion: 14,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -21,6 +21,8 @@
       addons: [],
       mediaType: "movie",
       episodeOrder: "oldest",
+      preferredAudio: "English",
+      preferredSubtitle: "English",
       watchHistory: [],
       trakt: {},
       skipSegments: true,
@@ -401,20 +403,47 @@
   function parseSkipSegments(value) {
     return value !== false;
   }
-  function findClosestQualityStream(streams, previousQuality) {
-    const known = streams.flatMap((stream, index) => {
+  function cacheRank(cached) {
+    return cached === true ? 0 : cached === null ? 1 : 2;
+  }
+  function pickNextEpisodeStream(streams, options = {}) {
+    const target = qualityHeight(options.previousResolution || "");
+    const preferredAudio = (options.preferredAudio || "").trim().toLowerCase();
+    const preferredSubtitle = (options.preferredSubtitle || "").trim().toLowerCase();
+    let bestStream = null;
+    let bestRank = [];
+    streams.forEach((stream, index) => {
       const height = qualityHeight(stream.resolution);
-      return height === null ? [] : [{ stream, index, height }];
+      if (height === null)
+        return;
+      const rank = [
+        cacheRank(stream.cached),
+        languageRank(stream.audioLanguages, preferredAudio),
+        languageRank(stream.subtitleLanguages, preferredSubtitle),
+        target === null ? -height : Math.abs(height - target),
+        -height,
+        index
+      ];
+      if (!bestStream || compareRanks(rank, bestRank) < 0) {
+        bestStream = stream;
+        bestRank = rank;
+      }
     });
-    if (known.length === 0)
-      return null;
-    const target = qualityHeight(previousQuality);
-    known.sort((a, b) => {
-      if (target === null)
-        return b.height - a.height || a.index - b.index;
-      return Math.abs(a.height - target) - Math.abs(b.height - target) || b.height - a.height || a.index - b.index;
-    });
-    return known[0].stream;
+    return bestStream;
+  }
+  function languageRank(languages, preferred) {
+    if (!preferred)
+      return 0;
+    if (!languages || languages.length === 0)
+      return 1;
+    return languages.some((language) => language.trim().toLowerCase() === preferred) ? 0 : 2;
+  }
+  function compareRanks(a, b) {
+    for (let index = 0;index < a.length; index += 1) {
+      if (a[index] !== b[index])
+        return a[index] - b[index];
+    }
+    return 0;
   }
   function isImdbId(value) {
     return /^tt\d+$/i.test(value.trim());
@@ -948,6 +977,9 @@
     }
     if (changed)
       preferences.sync();
+  }
+  function parseLanguagePreference(value) {
+    return typeof value === "string" ? value.trim() : "";
   }
 
   // src/plugin/global.ts
