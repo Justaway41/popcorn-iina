@@ -265,9 +265,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.4.0",
+    version: "2.4.1",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 13,
+    ghVersion: 14,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -283,6 +283,8 @@
       addons: [],
       mediaType: "movie",
       episodeOrder: "oldest",
+      preferredAudio: "English",
+      preferredSubtitle: "English",
       watchHistory: [],
       trakt: {},
       skipSegments: true,
@@ -402,21 +404,6 @@
     const amount = Number(match[1]);
     const power = ["K", "M", "G", "T"].indexOf(match[2].toUpperCase()) + 1;
     return Number.isFinite(amount) && amount >= 0 ? amount * 1024 ** power : null;
-  }
-  function findClosestQualityStream(streams, previousQuality) {
-    const known = streams.flatMap((stream, index) => {
-      const height = qualityHeight(stream.resolution);
-      return height === null ? [] : [{ stream, index, height }];
-    });
-    if (known.length === 0)
-      return null;
-    const target = qualityHeight(previousQuality);
-    known.sort((a, b) => {
-      if (target === null)
-        return b.height - a.height || a.index - b.index;
-      return Math.abs(a.height - target) - Math.abs(b.height - target) || b.height - a.height || a.index - b.index;
-    });
-    return known[0].stream;
   }
   function parseMediaResponse(value, source = { manifestUrl: CINEMETA_MANIFEST_URL }) {
     const metas = getRecord3(value)?.metas;
@@ -631,12 +618,6 @@
       return languages;
     return languages.length === 0 ? [generic] : [...languages, "Other"];
   }
-  function qualityHeight(quality) {
-    if (/^4k$/i.test(quality))
-      return 2160;
-    const match = quality.match(/^(\d{3,4})p$/i);
-    return match ? Number(match[1]) : null;
-  }
   function parseSubtitleLanguages(value) {
     if (!Array.isArray(value))
       return null;
@@ -699,7 +680,7 @@
   var pendingConfigurationResolvers = [];
   var activeRequest = null;
   var addonManifests = new Map;
-  var STREAM_ADDON_TIMEOUT_MS = 8000;
+  var STREAM_ADDON_TIMEOUT_MS = 15000;
   var STREAM_CACHE_TTL_MS = 60000;
   var STREAM_CACHE_CAPACITY = 20;
   function createStreamCache(ttlMs, capacity, now) {
@@ -759,6 +740,9 @@
   function getSizeSortControl(order) {
     return order === "largest" ? { label: "Largest File", next: "smallest" } : { label: "Smallest File", next: "largest" };
   }
+  function streamLoadErrorMessage(enabledCount = addons.filter((addon) => addon.enabled).length) {
+    return enabledCount === 0 ? "Enable a stream addon in IINA Settings → Plugins → Popcorn for IINA." : "No stream addon answered in time. They can be slow; try again.";
+  }
   function initApp() {
     iina.onMessage(MESSAGE_NAMES.Configuration, (data) => {
       applyConfiguration(data);
@@ -776,7 +760,7 @@
       if (!payload?.media || !payload?.episode || !Array.isArray(payload?.episodes)) {
         return;
       }
-      loadStreams(payload.media, payload.episode, payload.episodes, payload.resolution, true);
+      loadStreams(payload.media, payload.episode, payload.episodes);
     });
     document.addEventListener("DOMContentLoaded", () => {
       document.documentElement.dataset.version = CLIENT_VERSION;
@@ -1006,14 +990,14 @@
         showError(readError(error, "Could not load metadata."));
     }
   }
-  async function loadStreams(media, episode, episodes = [], preferredQuality, recommendNext = false) {
+  async function loadStreams(media, episode, episodes = []) {
     const request = replaceRequest(activeRequest);
     activeRequest = request;
     view = { kind: "streams", media, episode, episodes };
     ui.back.classList.remove("hidden");
     ui.title.textContent = episode ? formatEpisodeTitle(media, episode) : media.name;
-    setLoading("rows", recommendNext);
-    retryAction = () => loadStreams(media, episode, episodes, preferredQuality, recommendNext);
+    setLoading("rows");
+    retryAction = () => loadStreams(media, episode, episodes);
     try {
       await refreshConfiguration();
       if (request.signal.aborted)
@@ -1030,9 +1014,9 @@
       if (request.signal.aborted)
         return;
       if (result.successfulAddons === 0) {
-        throw new Error("Enable a stream addon in IINA Settings → Plugins → Popcorn for IINA.");
+        throw new Error(streamLoadErrorMessage());
       }
-      renderStreams(media, episode, episodes, result.streams, result.failedAddons, preferredQuality, recommendNext, subtitlesPending);
+      renderStreams(media, episode, episodes, result.streams, result.failedAddons, subtitlesPending);
     } catch (error) {
       if (!request.signal.aborted)
         showError(readError(error, "Could not load streams."));
@@ -1417,7 +1401,7 @@
     }
     return button;
   }
-  function renderStreams(media, episode, episodes, streams, failedAddons, preferredQuality, recommendNext = false, subtitlesPending) {
+  function renderStreams(media, episode, episodes, streams, failedAddons, subtitlesPending) {
     if (streams.length === 0) {
       renderEmpty("No direct HTTP streams. The enabled addons may only return torrent entries.");
       return;
@@ -1440,14 +1424,6 @@
       });
     };
     const varying = getVaryingStreamFields(streams);
-    if (recommendNext) {
-      const recommendation = findClosestQualityStream(streams, preferredQuality || "");
-      if (recommendation) {
-        const button = rowButton("Play Next Episode", buildNextEpisodeDetail(recommendation), () => playStream(recommendation), false, false, recommendation.rawTitle);
-        button.classList.add("next-episode");
-        content.appendChild(button);
-      }
-    }
     const seriesPrefix = episode ? buildSeriesPrefixPattern(media, episode) : null;
     let sizeOrder = "largest";
     let englishSubtitles = null;
@@ -1481,15 +1457,6 @@
         summaryText.textContent = buildStreamSummary(streams, varying, englishSubtitles);
       });
     }
-  }
-  function buildNextEpisodeDetail(stream) {
-    return [
-      stream.resolution,
-      stream.source,
-      stream.audioLanguages.length > 0 ? getAudioBadge(stream.audioLanguages).label : "",
-      stream.size,
-      stream.cached === true ? "Ready" : stream.cached === false ? "Not cached" : ""
-    ].filter(Boolean).join(" · ");
   }
   function getVaryingStreamFields(streams) {
     const differs = (read) => new Set(streams.map(read)).size > 1;
@@ -1666,74 +1633,40 @@
     }
     return { label: "Cache ?", title: "Cache status not provided", state: "unknown" };
   }
-  function rowButton(title, subtitle, action, disabled = false, watched = false, titleTooltip = "") {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "row";
-    button.disabled = disabled;
-    if (!disabled)
-      button.setAttribute("data-clickable", "");
-    const body = document.createElement("span");
-    body.className = "row-body";
-    const heading = document.createElement("span");
-    heading.className = "row-title";
-    heading.textContent = title;
-    if (titleTooltip)
-      heading.title = titleTooltip;
-    const detail = document.createElement("span");
-    detail.className = "row-detail";
-    if (typeof subtitle === "string") {
-      detail.textContent = subtitle;
-    } else {
-      detail.appendChild(subtitle);
-    }
-    const play = document.createElement("span");
-    play.className = `row-play${watched ? " row-play--watched" : ""}`;
-    play.textContent = watched ? "✓" : disabled ? "" : "▶";
-    if (watched)
-      play.title = "Watched";
-    body.append(heading, detail);
-    button.append(body, play);
-    if (!disabled)
-      button.addEventListener("click", action);
-    return button;
-  }
   async function fetchJson(url, signal) {
     const response = await fetch(url, { headers: { Accept: "application/json" }, signal });
     if (!response.ok)
       throw new Error(`Request failed with HTTP ${response.status}.`);
     return await response.json();
   }
-  function setLoading(shape = "rows", leadCard = false) {
+  function setLoading(shape = "rows") {
     ui.loading.className = `loading loading--${shape}`;
-    ui.loading.replaceChildren(...buildSkeleton(shape, leadCard));
+    ui.loading.replaceChildren(...buildSkeleton(shape));
     ui.content.classList.add("hidden");
     ui.error.classList.add("hidden");
   }
   var SKELETON_RUNS = {
     "sk-tile": 0,
-    "sk-lead": 2,
     "sk-summary": 2,
     "sk-tier": 2,
     "sk-row": 3,
     "sk-chips": 4,
     "sk-erow": 2
   };
-  function getSkeletonCells(shape, leadCard = false) {
+  function getSkeletonCells(shape) {
     if (shape === "grid")
       return Array.from({ length: 6 }, () => "sk-tile");
     if (shape === "episodes") {
       return ["sk-chips", ...Array.from({ length: 8 }, () => "sk-erow")];
     }
     return [
-      ...leadCard ? ["sk-lead"] : [],
       "sk-summary",
       "sk-tier",
       ...Array.from({ length: 6 }, () => "sk-row")
     ];
   }
-  function buildSkeleton(shape, leadCard) {
-    return getSkeletonCells(shape, leadCard).map((className) => {
+  function buildSkeleton(shape) {
+    return getSkeletonCells(shape).map((className) => {
       const node = document.createElement("div");
       node.className = className;
       for (let index = 0;index < (SKELETON_RUNS[className] || 0); index += 1) {

@@ -22,8 +22,8 @@ import {
     sortStreamsBySize,
     sortStreamsForPlayback,
     groupStreamsByResolution,
-    findClosestQualityStream,
-    mergeMediaResults
+    mergeMediaResults,
+    pickNextEpisodeStream
 } from "./stremio";
 import { parseAddonManifest } from "./addons";
 
@@ -333,16 +333,58 @@ test("sorts by parsed file size only and keeps unknown sizes last", () => {
 
 test("recommends the closest resolution with higher quality winning ties", () => {
     const streams = [
-        { title: "720", resolution: "720p" },
-        { title: "1080 first", resolution: "1080p" },
-        { title: "1080 second", resolution: "1080p" },
-        { title: "4K", resolution: "2160p" },
-        { title: "Unknown", resolution: "" }
+        { title: "720", resolution: "720p", cached: null, audioLanguages: [], subtitleLanguages: null },
+        { title: "1080 first", resolution: "1080p", cached: null, audioLanguages: [], subtitleLanguages: null },
+        { title: "1080 second", resolution: "1080p", cached: null, audioLanguages: [], subtitleLanguages: null },
+        { title: "4K", resolution: "2160p", cached: null, audioLanguages: [], subtitleLanguages: null },
+        { title: "Unknown", resolution: "", cached: null, audioLanguages: [], subtitleLanguages: null }
     ];
-    expect(findClosestQualityStream(streams, "1440p")?.title).toBe("1080 first");
-    expect(findClosestQualityStream(streams, "900p")?.title).toBe("1080 first");
-    expect(findClosestQualityStream(streams, "")?.title).toBe("4K");
-    expect(findClosestQualityStream([{ title: "Unknown", resolution: "" }], "1080p")).toBeNull();
+    const options = { previousResolution: "" };
+    expect(pickNextEpisodeStream(streams, { ...options, previousResolution: "1440p" })?.title).toBe("1080 first");
+    expect(pickNextEpisodeStream(streams, { ...options, previousResolution: "900p" })?.title).toBe("1080 first");
+    expect(pickNextEpisodeStream(streams, options)?.title).toBe("4K");
+    expect(pickNextEpisodeStream([{ ...streams[4] }], { previousResolution: "1080p" })).toBeNull();
+});
+
+test("next-episode pick prefers cache, then audio, then subtitles, then resolution", () => {
+    const base = { resolution: "1080p", subtitleLanguages: null as string[] | null };
+    const streams = [
+        { ...base, title: "uncached english", cached: false, audioLanguages: ["English"] },
+        { ...base, title: "cached other", cached: true, audioLanguages: ["Japanese"] },
+        { ...base, title: "cached english", cached: true, audioLanguages: ["English"] }
+    ];
+    expect(pickNextEpisodeStream(streams, {
+        previousResolution: "1080p",
+        preferredAudio: "english"
+    })?.title).toBe("cached english");
+
+    // unknown audio stays neutral: it beats a known mismatch, never a known match
+    const unknownAudio = [
+        { ...base, title: "unreported", cached: true, audioLanguages: [] },
+        { ...base, title: "japanese", cached: true, audioLanguages: ["Japanese"] }
+    ];
+    expect(pickNextEpisodeStream(unknownAudio, {
+        previousResolution: "1080p",
+        preferredAudio: "English"
+    })?.title).toBe("unreported");
+
+    // subtitle preference applies the same way, with unknown (null) neutral
+    const subtitles = [
+        { ...base, title: "no subs reported", cached: true, audioLanguages: [], subtitleLanguages: null },
+        { ...base, title: "polish", cached: true, audioLanguages: [], subtitleLanguages: ["Polish"] },
+        { ...base, title: "english subs", cached: true, audioLanguages: [], subtitleLanguages: ["English"] }
+    ];
+    expect(pickNextEpisodeStream(subtitles, {
+        previousResolution: "1080p",
+        preferredSubtitle: "English"
+    })?.title).toBe("english subs");
+
+    // without preferences the old behavior stands: cache first, then closest resolution
+    const noPrefs = [
+        { ...base, title: "cached 720", cached: true, resolution: "720p", audioLanguages: [], subtitleLanguages: null },
+        { ...base, title: "uncached 1080", cached: false, audioLanguages: [], subtitleLanguages: null }
+    ];
+    expect(pickNextEpisodeStream(noPrefs, { previousResolution: "1080p" })?.title).toBe("cached 720");
 });
 
 test("parses multiple audio languages without treating subtitle labels as audio", () => {
@@ -525,7 +567,7 @@ test("normalizes 4K to 2160p so one tier is not split across two spellings", () 
 
 test("keeps streams visible to next-episode matching when only the title names a source", () => {
     // Previously `quality` held "WEBRip" for these, qualityHeight() returned null, and
-    // findClosestQualityStream dropped every one of them - so no next episode was offered.
+    // next-episode matching dropped every one of them - so no next episode was offered.
     const streams = parsePlayableStreams({
         streams: [
             {
@@ -538,7 +580,7 @@ test("keeps streams visible to next-episode matching when only the title names a
             }
         ]
     });
-    expect(findClosestQualityStream(streams, "1080p")?.resolution).toBe("1080p");
+    expect(pickNextEpisodeStream(streams, { previousResolution: "1080p" })?.resolution).toBe("1080p");
 });
 
 test("strips release-site tags but keeps plain group tags", () => {

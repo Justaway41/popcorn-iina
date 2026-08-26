@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { migrateStructuredPreferences } from "./preferences";
+import { migrateStructuredPreferences, parseLanguagePreference } from "./preferences";
 
 const info = await Bun.file(
     new URL("../../Info.json", import.meta.url)
@@ -67,4 +67,12 @@ test("leaves structured preferences untouched", () => {
     });
 
     expect(syncs).toBe(0);
+});
+
+test("reads a language preference as trimmed text and nothing else", () => {
+    expect(parseLanguagePreference(" English ")).toBe("English");
+    expect(parseLanguagePreference("")).toBe("");
+    expect(parseLanguagePreference(42)).toBe("");
+    expect(parseLanguagePreference(undefined)).toBe("");
+    expect(parseLanguagePreference(null)).toBe("");
 });

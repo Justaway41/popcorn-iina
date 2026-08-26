@@ -313,20 +313,47 @@
   function parseSkipSegments(value) {
     return value !== false;
   }
-  function findClosestQualityStream(streams, previousQuality) {
-    const known = streams.flatMap((stream, index) => {
+  function cacheRank(cached) {
+    return cached === true ? 0 : cached === null ? 1 : 2;
+  }
+  function pickNextEpisodeStream(streams, options = {}) {
+    const target = qualityHeight(options.previousResolution || "");
+    const preferredAudio = (options.preferredAudio || "").trim().toLowerCase();
+    const preferredSubtitle = (options.preferredSubtitle || "").trim().toLowerCase();
+    let bestStream = null;
+    let bestRank = [];
+    streams.forEach((stream, index) => {
       const height = qualityHeight(stream.resolution);
-      return height === null ? [] : [{ stream, index, height }];
+      if (height === null)
+        return;
+      const rank = [
+        cacheRank(stream.cached),
+        languageRank(stream.audioLanguages, preferredAudio),
+        languageRank(stream.subtitleLanguages, preferredSubtitle),
+        target === null ? -height : Math.abs(height - target),
+        -height,
+        index
+      ];
+      if (!bestStream || compareRanks(rank, bestRank) < 0) {
+        bestStream = stream;
+        bestRank = rank;
+      }
     });
-    if (known.length === 0)
-      return null;
-    const target = qualityHeight(previousQuality);
-    known.sort((a, b) => {
-      if (target === null)
-        return b.height - a.height || a.index - b.index;
-      return Math.abs(a.height - target) - Math.abs(b.height - target) || b.height - a.height || a.index - b.index;
-    });
-    return known[0].stream;
+    return bestStream;
+  }
+  function languageRank(languages, preferred) {
+    if (!preferred)
+      return 0;
+    if (!languages || languages.length === 0)
+      return 1;
+    return languages.some((language) => language.trim().toLowerCase() === preferred) ? 0 : 2;
+  }
+  function compareRanks(a, b) {
+    for (let index = 0;index < a.length; index += 1) {
+      if (a[index] !== b[index])
+        return a[index] - b[index];
+    }
+    return 0;
   }
   function isImdbId(value) {
     return /^tt\d+$/i.test(value.trim());
@@ -842,9 +869,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.4.0",
+    version: "2.4.1",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 13,
+    ghVersion: 14,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -860,6 +887,8 @@
       addons: [],
       mediaType: "movie",
       episodeOrder: "oldest",
+      preferredAudio: "English",
+      preferredSubtitle: "English",
       watchHistory: [],
       trakt: {},
       skipSegments: true,
@@ -908,6 +937,9 @@
   }
   function shouldSendWatchedStop(progress, stopSent) {
     return !stopSent && Number.isFinite(progress) && progress >= 90;
+  }
+  function isPrefetchFresh(prefetchedAtMs, nowMs, maxAgeMs) {
+    return Number.isFinite(prefetchedAtMs) && nowMs - prefetchedAtMs >= 0 && nowMs - prefetchedAtMs < maxAgeMs;
   }
 
   // src/plugin/utils.ts
@@ -1423,6 +1455,32 @@
     return { intro: skippable(found.intro), recap: skippable(found.recap), credits: inFile(found.credits) };
   }
 
+  // src/plugin/preferences.ts
+  function migrateStructuredPreferences(preferences) {
+    const storedAddons = preferences.get("addons");
+    const addons = parseAddons(storedAddons, preferences.get("addonManifestUrl"));
+    let changed = false;
+    if (typeof storedAddons === "string" || addons.length > parseAddons(storedAddons).length) {
+      preferences.set("addons", addons);
+      changed = true;
+    }
+    const watchHistory = preferences.get("watchHistory");
+    if (typeof watchHistory === "string") {
+      preferences.set("watchHistory", parseWatchHistory(watchHistory));
+      changed = true;
+    }
+    const trakt = preferences.get("trakt");
+    if (typeof trakt === "string") {
+      preferences.set("trakt", parseTraktState(trakt));
+      changed = true;
+    }
+    if (changed)
+      preferences.sync();
+  }
+  function parseLanguagePreference(value) {
+    return typeof value === "string" ? value.trim() : "";
+  }
+
   // src/plugin/main.ts
   var { core, event, global, http, mpv, overlay, preferences, sidebar, utils } = iina;
   var trakt = createIinaTraktClient(http, preferences, (error) => {
@@ -1453,6 +1511,8 @@
   var overlayLabel = "";
   var overlayHandlerRegistered = false;
   var prefetchedNextEpisode = null;
+  var prefetchedNextEpisodeAt = 0;
+  var PREFETCH_FRESH_MS = 30 * 60000;
   var kitsuMalIds = new Map;
   var addonManifests = new Map;
   function setPlayerUIHidden(hidden) {
@@ -1639,6 +1699,7 @@
     recapInterval = null;
     creditsInterval = null;
     prefetchedNextEpisode = null;
+    prefetchedNextEpisodeAt = 0;
     overlayAction = null;
     overlayVisible = true;
     applyOverlayState();
@@ -1689,7 +1750,9 @@
     }
     if (requested === "next" && prefetchedNextEpisode) {
       const next = prefetchedNextEpisode;
+      const fresh = isPrefetchFresh(prefetchedNextEpisodeAt, Date.now(), PREFETCH_FRESH_MS);
       prefetchedNextEpisode = null;
+      prefetchedNextEpisodeAt = 0;
       const context = next.playbackContext;
       if (context.episode) {
         sidebar.postMessage(MESSAGE_NAMES.ShowNextEpisode, {
@@ -1698,6 +1761,10 @@
           episodes: context.episodes,
           resolution: context.resolution
         });
+      }
+      if (!fresh) {
+        core.osd("Stream link expired - pick a stream for the next episode.");
+        return;
       }
       playItem(next);
     }
@@ -1843,7 +1910,11 @@
       const result = await loadEnabledAddonStreams(parseAddons(preferences.get("addons"), preferences.get("addonManifestUrl")), loadAddonManifest, async (addon) => parsePlayableStreams(await requestJson(buildStremioStreamUrl(addon.manifestUrl, context.media.type, next.id))));
       if (!isCurrentRequest(revision, playbackRevision))
         return;
-      const stream = findClosestQualityStream(result.streams, context.resolution || "");
+      const stream = pickNextEpisodeStream(result.streams, {
+        previousResolution: context.resolution || "",
+        preferredAudio: parseLanguagePreference(preferences.get("preferredAudio")),
+        preferredSubtitle: parseLanguagePreference(preferences.get("preferredSubtitle"))
+      });
       if (!stream)
         return;
       prefetchedNextEpisode = {
@@ -1856,6 +1927,7 @@
           resolution: stream.resolution
         }
       };
+      prefetchedNextEpisodeAt = Date.now();
       updateIntroOverlay();
     } catch (error) {
       logDebug("Popcorn: Next episode prefetch failed:", formatError(error));

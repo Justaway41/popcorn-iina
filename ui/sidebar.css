@@ -282,11 +282,6 @@ section h3 { padding: 5px 7px; }
     cursor: pointer;
 }
 .row:hover, .row:focus-visible { background: var(--surface-hover); outline: none; }
-.next-episode {
-    margin-bottom: 8px;
-    border: 1px solid var(--accent);
-    background: var(--surface);
-}
 .row:disabled { opacity: .42; cursor: default; }
 .row:disabled:hover { background: transparent; }
 .row-body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -310,21 +305,6 @@ section h3 { padding: 5px 7px; }
 .sk-tile { aspect-ratio: 2 / 3; border-radius: 7px; }
 
 .loading--rows { display: flex; flex-direction: column; }
-/* Mirrors .next-episode box model exactly (1px border + 9px/10px padding + 8px margin) so the
-   list below lands in the same place. Kept neutral: a skeleton should not promise the accent. */
-.sk-lead {
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 5px;
-    height: 56.2px;
-    margin-bottom: 8px;
-    padding: 9px 10px;
-    border: 1px solid var(--line);
-    border-radius: 7px;
-}
-.sk-lead span:first-child { height: 13px; width: 46%; }
-.sk-lead span:last-child { height: 11px; width: 78%; }
 /* Left padding absorbs the gutter each real band puts before its first glyph: the tier chevron
    (7 + 9 + 8) and the stream row's cache dot (4 + 12 + 7). Right-hand runs stand in for the
    sort pill, the tier total, and the size column, so no run appears out of nowhere on resolve. */

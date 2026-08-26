@@ -32,3 +32,8 @@ export function migrateStructuredPreferences(preferences: PreferenceStore): void
 
     if (changed) preferences.sync();
 }
+
+/** A language preference is a free string; anything else reads as no preference. */
+export function parseLanguagePreference(value: unknown): string {
+    return typeof value === "string" ? value.trim() : "";
+}

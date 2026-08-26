@@ -18,7 +18,6 @@ import {
     getSearchableCatalogs,
     isCompatibleSubtitleId,
     isImdbId,
-    findClosestQualityStream,
     findNextEpisode,
     isEpisodeAvailable,
     parseEnglishSubtitleAvailability,
@@ -69,8 +68,11 @@ let pendingConfigurationResolvers: Array<() => void> = [];
 let activeRequest: AbortController | null = null;
 const addonManifests = new Map<string, AddonManifest>();
 
-/** One slow or hung addon must not hold the stream list hostage. */
-const STREAM_ADDON_TIMEOUT_MS = 8000;
+/**
+ * One slow or hung addon must not hold the stream list hostage, but aggregating addons collect
+ * sources from many providers and routinely need double-digit seconds, so the budget is generous.
+ */
+const STREAM_ADDON_TIMEOUT_MS = 15_000;
 /** Availability changes, so a revisit reuses stream results only this long. */
 const STREAM_CACHE_TTL_MS = 60_000;
 const STREAM_CACHE_CAPACITY = 20;
@@ -158,6 +160,13 @@ export function getSizeSortControl(
         : { label: "Smallest File", next: "largest" };
 }
 
+/** Zero answers means either nothing enabled or everything unreachable; those need different words. */
+export function streamLoadErrorMessage(enabledCount = addons.filter((addon) => addon.enabled).length): string {
+    return enabledCount === 0
+        ? "Enable a stream addon in IINA Settings → Plugins → Popcorn for IINA."
+        : "No stream addon answered in time. They can be slow; try again.";
+}
+
 export function initApp(): void {
     iina.onMessage(MESSAGE_NAMES.Configuration, (data) => {
         applyConfiguration(data);
@@ -174,7 +183,7 @@ export function initApp(): void {
         if (!payload?.media || !payload?.episode || !Array.isArray(payload?.episodes)) {
             return;
         }
-        void loadStreams(payload.media, payload.episode, payload.episodes, payload.resolution, true);
+        void loadStreams(payload.media, payload.episode, payload.episodes);
     });
 
     document.addEventListener("DOMContentLoaded", () => {
@@ -446,17 +455,15 @@ async function loadMovie(media: Media): Promise<void> {
 async function loadStreams(
     media: Media,
     episode?: Episode,
-    episodes: Episode[] = [],
-    preferredQuality?: string,
-    recommendNext = false
+    episodes: Episode[] = []
 ): Promise<void> {
     const request = replaceRequest(activeRequest);
     activeRequest = request;
     view = { kind: "streams", media, episode, episodes };
     ui.back.classList.remove("hidden");
     ui.title.textContent = episode ? formatEpisodeTitle(media, episode) : media.name;
-    setLoading("rows", recommendNext);
-    retryAction = () => loadStreams(media, episode, episodes, preferredQuality, recommendNext);
+    setLoading("rows");
+    retryAction = () => loadStreams(media, episode, episodes);
 
     try {
         await refreshConfiguration();
@@ -486,7 +493,7 @@ async function loadStreams(
         });
         if (request.signal.aborted) return;
         if (result.successfulAddons === 0) {
-            throw new Error("Enable a stream addon in IINA Settings → Plugins → Popcorn for IINA.");
+            throw new Error(streamLoadErrorMessage());
         }
         renderStreams(
             media,
@@ -494,8 +501,6 @@ async function loadStreams(
             episodes,
             result.streams,
             result.failedAddons,
-            preferredQuality,
-            recommendNext,
             subtitlesPending
         );
     } catch (error) {
@@ -1004,8 +1009,6 @@ function renderStreams(
     episodes: Episode[],
     streams: AddonStream[],
     failedAddons: number,
-    preferredQuality?: string,
-    recommendNext = false,
     subtitlesPending?: Promise<boolean | null> | null
 ): void {
     if (streams.length === 0) {
@@ -1029,21 +1032,6 @@ function renderStreams(
         });
     };
     const varying = getVaryingStreamFields(streams);
-    if (recommendNext) {
-        const recommendation = findClosestQualityStream(streams, preferredQuality || "");
-        if (recommendation) {
-            const button = rowButton(
-                "Play Next Episode",
-                buildNextEpisodeDetail(recommendation),
-                () => playStream(recommendation),
-                false,
-                false,
-                recommendation.rawTitle
-            );
-            button.classList.add("next-episode");
-            content.appendChild(button);
-        }
-    }
     const seriesPrefix = episode ? buildSeriesPrefixPattern(media, episode) : null;
 
     let sizeOrder: SizeOrder = "largest";
@@ -1087,19 +1075,6 @@ function renderStreams(
             summaryText.textContent = buildStreamSummary(streams, varying, englishSubtitles);
         });
     }
-}
-
-/** The next-episode row stands alone, so it states everything rather than hoisting. */
-export function buildNextEpisodeDetail(
-    stream: { resolution: string; source: string; size: string; cached: boolean | null; audioLanguages: string[] }
-): string {
-    return [
-        stream.resolution,
-        stream.source,
-        stream.audioLanguages.length > 0 ? getAudioBadge(stream.audioLanguages).label : "",
-        stream.size,
-        stream.cached === true ? "Ready" : stream.cached === false ? "Not cached" : ""
-    ].filter(Boolean).join(" · ");
 }
 
 /** Which per-stream facts actually differ. Anything identical on every row is chrome. */
@@ -1388,9 +1363,9 @@ async function fetchJson(url: string, signal: AbortSignal): Promise<unknown> {
  * The skeleton has to predict the shape it resolves into, or the page lurches on arrival.
  * Only the home view returns posters; every other view resolves into the summary/tier/row stack.
  */
-function setLoading(shape: SkeletonShape = "rows", leadCard = false): void {
+function setLoading(shape: SkeletonShape = "rows"): void {
     ui.loading.className = `loading loading--${shape}`;
-    ui.loading.replaceChildren(...buildSkeleton(shape, leadCard));
+    ui.loading.replaceChildren(...buildSkeleton(shape));
     ui.content.classList.add("hidden");
     ui.error.classList.add("hidden");
 }
@@ -1398,7 +1373,6 @@ function setLoading(shape: SkeletonShape = "rows", leadCard = false): void {
 /** Text runs per band, so a placeholder reads as text rather than as a solid slab. */
 const SKELETON_RUNS: Record<string, number> = {
     "sk-tile": 0,
-    "sk-lead": 2,
     "sk-summary": 2,
     "sk-tier": 2,
     "sk-row": 3,
@@ -1411,24 +1385,21 @@ type SkeletonShape = "grid" | "rows" | "episodes";
 /**
  * The band stack the skeleton stands in for. Heights live in the stylesheet and are matched to
  * the real elements, so this order is what keeps content from moving when the fetch resolves.
- * The lead card is reserved only when a next-episode recommendation was requested; it can still
- * turn out to have no matching stream, in which case the list settles up by that one band.
  */
-export function getSkeletonCells(shape: SkeletonShape, leadCard = false): string[] {
+export function getSkeletonCells(shape: SkeletonShape): string[] {
     if (shape === "grid") return Array.from({ length: 6 }, () => "sk-tile");
     if (shape === "episodes") {
         return ["sk-chips", ...Array.from({ length: 8 }, () => "sk-erow")];
     }
     return [
-        ...(leadCard ? ["sk-lead"] : []),
         "sk-summary",
         "sk-tier",
         ...Array.from({ length: 6 }, () => "sk-row")
     ];
 }
 
-function buildSkeleton(shape: SkeletonShape, leadCard: boolean): HTMLElement[] {
-    return getSkeletonCells(shape, leadCard).map((className) => {
+function buildSkeleton(shape: SkeletonShape): HTMLElement[] {
+    return getSkeletonCells(shape).map((className) => {
         const node = document.createElement("div");
         node.className = className;
         for (let index = 0; index < (SKELETON_RUNS[className] || 0); index += 1) {

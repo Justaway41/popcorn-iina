@@ -194,22 +194,59 @@ export function parseByteSize(value: string): number | null {
     return Number.isFinite(amount) && amount >= 0 ? amount * 1024 ** power : null;
 }
 
-export function findClosestQualityStream<T extends { resolution: string }>(
-    streams: T[],
-    previousQuality: string
-): T | null {
-    const known = streams.flatMap((stream, index) => {
+export interface NextEpisodeStreamOptions {
+    previousResolution?: string;
+    preferredAudio?: string;
+    preferredSubtitle?: string;
+}
+
+/**
+ * Picks the stream the overlay's Next Episode button will play. Availability decides whether
+ * playback starts now, so a stream reported cached ranks first; then come the user's audio and
+ * subtitle preferences - unknown states stay neutral and never read as negative - then the
+ * closest resolution to what is playing, with higher quality winning ties.
+ */
+export function pickNextEpisodeStream<T extends {
+    resolution: string;
+    cached: boolean | null;
+    audioLanguages: string[];
+    subtitleLanguages: string[] | null;
+}>(streams: T[], options: NextEpisodeStreamOptions = {}): T | null {
+    const target = qualityHeight(options.previousResolution || "");
+    const preferredAudio = (options.preferredAudio || "").trim().toLowerCase();
+    const preferredSubtitle = (options.preferredSubtitle || "").trim().toLowerCase();
+    let bestStream: T | null = null;
+    let bestRank: number[] = [];
+    streams.forEach((stream, index) => {
         const height = qualityHeight(stream.resolution);
-        return height === null ? [] : [{ stream, index, height }];
+        if (height === null) return;
+        const rank = [
+            cacheRank(stream.cached),
+            languageRank(stream.audioLanguages, preferredAudio),
+            languageRank(stream.subtitleLanguages, preferredSubtitle),
+            target === null ? -height : Math.abs(height - target),
+            -height,
+            index
+        ];
+        if (!bestStream || compareRanks(rank, bestRank) < 0) {
+            bestStream = stream;
+            bestRank = rank;
+        }
     });
-    if (known.length === 0) return null;
-    const target = qualityHeight(previousQuality);
-    known.sort((a, b) => {
-        if (target === null) return b.height - a.height || a.index - b.index;
-        return Math.abs(a.height - target) - Math.abs(b.height - target) ||
-            b.height - a.height || a.index - b.index;
-    });
-    return known[0].stream;
+    return bestStream;
+}
+
+function languageRank(languages: string[] | null, preferred: string): number {
+    if (!preferred) return 0;
+    if (!languages || languages.length === 0) return 1;
+    return languages.some((language) => language.trim().toLowerCase() === preferred) ? 0 : 2;
+}
+
+function compareRanks(a: number[], b: number[]): number {
+    for (let index = 0; index < a.length; index += 1) {
+        if (a[index] !== b[index]) return a[index] - b[index];
+    }
+    return 0;
 }
 
 export function parseMediaResponse(

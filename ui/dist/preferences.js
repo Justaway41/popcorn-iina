@@ -383,21 +383,6 @@
     const power = ["K", "M", "G", "T"].indexOf(match[2].toUpperCase()) + 1;
     return Number.isFinite(amount) && amount >= 0 ? amount * 1024 ** power : null;
   }
-  function findClosestQualityStream(streams, previousQuality) {
-    const known = streams.flatMap((stream, index) => {
-      const height = qualityHeight(stream.resolution);
-      return height === null ? [] : [{ stream, index, height }];
-    });
-    if (known.length === 0)
-      return null;
-    const target = qualityHeight(previousQuality);
-    known.sort((a, b) => {
-      if (target === null)
-        return b.height - a.height || a.index - b.index;
-      return Math.abs(a.height - target) - Math.abs(b.height - target) || b.height - a.height || a.index - b.index;
-    });
-    return known[0].stream;
-  }
   function parseMediaResponse(value, source = { manifestUrl: CINEMETA_MANIFEST_URL }) {
     const metas = getRecord3(value)?.metas;
     if (!Array.isArray(metas)) {
@@ -610,12 +595,6 @@
     if (!generic)
       return languages;
     return languages.length === 0 ? [generic] : [...languages, "Other"];
-  }
-  function qualityHeight(quality) {
-    if (/^4k$/i.test(quality))
-      return 2160;
-    const match = quality.match(/^(\d{3,4})p$/i);
-    return match ? Number(match[1]) : null;
   }
   function parseSubtitleLanguages(value) {
     if (!Array.isArray(value))
@@ -1154,9 +1133,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.4.0",
+    version: "2.4.1",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 13,
+    ghVersion: 14,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1172,6 +1151,8 @@
       addons: [],
       mediaType: "movie",
       episodeOrder: "oldest",
+      preferredAudio: "English",
+      preferredSubtitle: "English",
       watchHistory: [],
       trakt: {},
       skipSegments: true,
@@ -1211,6 +1192,8 @@
   var template = element("addon-row-template");
   var presetButtons = [...document.querySelectorAll(".addon-preset")];
   var skipSegments = element("skip-segments");
+  var preferredAudio = element("preferred-audio");
+  var preferredSubtitle = element("preferred-subtitle");
   var traktClientId = element("trakt-client-id");
   var traktClientSecret = element("trakt-client-secret");
   var traktConnect = element("trakt-connect");
@@ -1270,18 +1253,53 @@
   skipSegments.addEventListener("change", () => {
     preferences.set("skipSegments", skipSegments.checked);
   });
+  var LANGUAGE_OPTIONS = [
+    "English",
+    "Japanese",
+    "Hindi",
+    "Spanish",
+    "French",
+    "German",
+    "Korean",
+    "Chinese",
+    "Italian",
+    "Portuguese",
+    "Russian",
+    "Tamil",
+    "Telugu",
+    "Arabic"
+  ];
+  for (const select of [preferredAudio, preferredSubtitle]) {
+    const anyOption = document.createElement("option");
+    anyOption.value = "";
+    anyOption.textContent = "Any language";
+    select.appendChild(anyOption);
+    for (const language of LANGUAGE_OPTIONS) {
+      const option = document.createElement("option");
+      option.value = language;
+      option.textContent = language;
+      select.appendChild(option);
+    }
+    select.addEventListener("change", () => {
+      preferences.set(select.id === "preferred-audio" ? "preferredAudio" : "preferredSubtitle", select.value);
+    });
+  }
   loadPreferences();
   async function loadPreferences() {
-    const [stored, legacy, storedTrakt, storedSkipSegments, storedSimkl] = await Promise.all([
+    const [stored, legacy, storedTrakt, storedSkipSegments, storedSimkl, storedAudio, storedSubtitle] = await Promise.all([
       getPreference("addons"),
       getPreference("addonManifestUrl"),
       getPreference("trakt"),
       getPreference("skipSegments"),
-      getPreference("simkl")
+      getPreference("simkl"),
+      getPreference("preferredAudio"),
+      getPreference("preferredSubtitle")
     ]);
     const storedAddons = parseAddons(stored);
     addons = parseAddons(stored, legacy);
     skipSegments.checked = parseSkipSegments(storedSkipSegments);
+    setLanguageSelect(preferredAudio, storedAudio);
+    setLanguageSelect(preferredSubtitle, storedSubtitle);
     trakt = parseTraktState(storedTrakt);
     traktClientId.value = trakt.clientId;
     traktClientSecret.value = trakt.clientSecret;
@@ -1412,6 +1430,10 @@
   }
   function getPreference(key) {
     return new Promise((resolve) => preferences.get(key, resolve));
+  }
+  function setLanguageSelect(select, value) {
+    const language = typeof value === "string" ? value.trim() : "";
+    select.value = LANGUAGE_OPTIONS.includes(language) ? language : "";
   }
   function setError(message) {
     errorMessage.textContent = message;

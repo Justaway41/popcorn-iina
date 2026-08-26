@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 
 import {
-    buildNextEpisodeDetail,
     buildRowMeta,
     buildStreamSummary,
     createStreamCache,
@@ -231,21 +230,10 @@ test("skeleton stands in for the bands the view resolves into", () => {
     expect(getSkeletonCells("grid")).toEqual(Array(6).fill("sk-tile"));
     // every list view arrives as summary, then an open tier heading, then rows
     expect(getSkeletonCells("rows").slice(0, 3)).toEqual(["sk-summary", "sk-tier", "sk-row"]);
-    // the next-episode card is reserved only when one was asked for
-    expect(getSkeletonCells("rows", true)[0]).toBe("sk-lead");
-    expect(getSkeletonCells("rows", false)).not.toContain("sk-lead");
-    expect(getSkeletonCells("rows", true).length).toBe(getSkeletonCells("rows").length + 1);
     // the episode list leads with the season chip strip and uses its own shorter row
     expect(getSkeletonCells("episodes")[0]).toBe("sk-chips");
     expect(getSkeletonCells("episodes").slice(1)).toEqual(Array(8).fill("sk-erow"));
     // stream bands must never leak into the episode shape - their heights differ
     expect(getSkeletonCells("episodes")).not.toContain("sk-summary");
     expect(getSkeletonCells("episodes")).not.toContain("sk-row");
-});
-
-test("states everything on the standalone next-episode row", () => {
-    expect(buildNextEpisodeDetail({
-        resolution: "2160p", source: "WEB-DL", size: "12 GB",
-        cached: true, audioLanguages: ["English"]
-    })).toBe("2160p · WEB-DL · English · 12 GB · Ready");
 });

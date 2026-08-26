@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
     isCurrentRequest,
+    isPrefetchFresh,
     shouldSendWatchedStop,
     shouldOfferNextEpisode,
     shouldSaveProgress
@@ -28,4 +29,11 @@ test("sends one watched stop when playback crosses 90 percent", () => {
     expect(shouldSendWatchedStop(89.9, false)).toBe(false);
     expect(shouldSendWatchedStop(90, false)).toBe(true);
     expect(shouldSendWatchedStop(91, true)).toBe(false);
+});
+
+test("treats a prefetch older than its budget as stale", () => {
+    expect(isPrefetchFresh(0, 9 * 60_000, 10 * 60_000)).toBe(true);
+    expect(isPrefetchFresh(0, 10 * 60_000, 10 * 60_000)).toBe(false);
+    expect(isPrefetchFresh(0, 20 * 60_000, 10 * 60_000)).toBe(false);
+    expect(isPrefetchFresh(Number.NaN, 0, 10 * 60_000)).toBe(false);
 });

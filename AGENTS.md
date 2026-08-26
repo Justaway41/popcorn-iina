@@ -21,7 +21,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.4.0`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.4.1`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -39,7 +39,9 @@ Supported behavior:
   history pulled back from both;
 - a Continue Watching strip of what is unfinished, one card per title, each naming the next
   episode that has actually aired;
-- skip intro, end-credit next-episode control, and closest-quality next stream;
+- skip intro and the end-credit next-episode control;
+- a preferred audio and subtitle language (set in preferences) guiding the next-episode
+  stream choice;
 - IINA sidebar, overlay, menu shortcut (`Shift+P`), window title, and display-sleep prevention.
 
 Out of scope:
@@ -121,8 +123,10 @@ Stream loading is latency-shaped around its slowest optional part:
   patches the badge only if the summary node is still connected (a replaced view ends the update,
   so no revision bookkeeping is needed).
 - **Per-addon timeout.** `loadAddonStreams`/`loadEnabledAddonStreams` accept a `timeoutMs`; each
-  addon call races its own clock (`STREAM_ADDON_TIMEOUT_MS`, 8s) so one hung host cannot hold the
-  list hostage. A timed-out addon counts as failed like any other rejection.
+  addon call races its own clock (`STREAM_ADDON_TIMEOUT_MS`, 15s - aggregating addons collect
+  sources from many providers and routinely need double-digit seconds) so one hung host cannot
+  hold the list hostage. A timed-out addon counts as failed like any other rejection, and zero
+  successful addons produces an error that distinguishes "nothing enabled" from "none answered".
 - **Short-TTL session cache.** Successful per-title results are cached for 60s
   (`STREAM_CACHE_TTL_MS`) keyed on `type:videoId`, capped at 20 entries with oldest-first
   eviction (`createStreamCache`). Total failures stay uncached so Retry retries, and
@@ -135,7 +139,7 @@ no dot at all.
 
 ### Playback and next episode
 
-`src/ui/app.ts` posts a `PlayItem` message. `src/plugin/main.ts` validates the URL, replaces playback through mpv, applies the media title, restores progress, records local history, and scrobbles when Trakt is connected. mpv events drive progress, watched thresholds, intro/credit controls, EOF handling, and next-episode presentation. The prefetched next stream uses the closest resolution to the current stream, with higher quality winning ties.
+`src/ui/app.ts` posts a `PlayItem` message. `src/plugin/main.ts` validates the URL, replaces playback through mpv, applies the media title, restores progress, records local history, and scrobbles when Trakt is connected. mpv events drive progress, watched thresholds, intro/credit controls, EOF handling, and next-episode presentation. The prefetched next stream is chosen by `pickNextEpisodeStream`: cached-first (a stream that can start now outranks a better one that cannot), then the user's preferred audio and subtitle languages (`preferredAudio`/`preferredSubtitle` preferences, unknown language states neutral, never negative), then closest resolution to the current stream with higher quality winning ties. The prefetch is only played within `PREFETCH_FRESH_MS` (30 min) of its fetch, because debrid links expire - an older prefetch is dropped and the sidebar's fresh stream list for the next episode takes over instead.
 
 ### Skip segments and next episode
 
@@ -349,11 +353,18 @@ As of 2026-08-12:
   when emptied (title falls back to Browse/Trending).
 - `2.4.0` shapes stream loading for latency: the OpenSubtitles lookup no longer gates the list
   (the summary badge patches in when the answer lands, touching only that text node); every
-  addon manifest and stream call races an 8s per-addon timeout so one hung host cannot hold the
+  addon manifest and stream call races a per-addon timeout so one hung host cannot hold the
   list hostage; successful per-title results cache for 60s keyed on `type:videoId` (20 entries,
   oldest-first eviction, cleared whenever the addon set changes, total failures stay uncached);
   and manifests prefetch in the background as soon as configuration arrives, so opening a title
   never waits on a manifest round trip first.
+- `2.4.1` tunes the next-episode path: the per-addon timeout is 15s because aggregating addons
+  need double-digit seconds, and zero successful addons now distinguishes "nothing enabled" from
+  "none answered"; the recommendation card is gone (the overlay's Next Episode button is the way
+  forward, and the sidebar still opens the next episode's fresh list at EOF); the prefetch is
+  chosen by `pickNextEpisodeStream` (cached-first, then `preferredAudio`/`preferredSubtitle`,
+  then closest resolution) and played within 30 min of fetch, with an older prefetch dropping
+  to the sidebar list instead of failing in mpv.
 - Simkl was chosen over routing through a self-hosted CrossWatch instance after Trakt limited free
   accounts to one connected community app. The CrossWatch design is kept at
   `docs/superpowers/specs/2026-08-12-crosswatch-scrobble-design.md` and its implementation on the

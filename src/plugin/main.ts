@@ -12,13 +12,13 @@ import { loadEnabledAddonStreams, parseAddonManifest, parseAddons } from "../sha
 import { parseWatchHistory, recordPlayback, removeHistoryEntry } from "../shared/history";
 import {
     buildStremioStreamUrl,
-    findClosestQualityStream,
     findNextEpisode,
     isImdbId,
     parseEpisodeOrder,
     parseMediaTypePreference,
     parsePlayableStreams,
     parseSkipSegments,
+    pickNextEpisodeStream,
     type Episode
 } from "../shared/stremio";
 import { mergeWatchHistory, type TraktScrobbleAction } from "../shared/trakt";
@@ -30,6 +30,7 @@ import {
 } from "./constants";
 import {
     isCurrentRequest,
+    isPrefetchFresh,
     shouldOfferNextEpisode,
     shouldSaveProgress,
     shouldSendWatchedStop
@@ -48,6 +49,7 @@ import {
     type IntroInterval,
     type OverlayAction
 } from "./intro";
+import { parseLanguagePreference } from "./preferences";
 import { formatError, isHttpUrl, logDebug, sanitizeMediaTitle } from "./utils";
 
 const { core, event, global, http, mpv, overlay, preferences, sidebar, utils } = iina;
@@ -80,6 +82,9 @@ let overlayVisible = false;
 let overlayLabel = "";
 let overlayHandlerRegistered = false;
 let prefetchedNextEpisode: PlayItemPayload | null = null;
+let prefetchedNextEpisodeAt = 0;
+/** Debrid links can expire within the hour; past this the sidebar picks a fresh one instead. */
+const PREFETCH_FRESH_MS = 30 * 60_000;
 const kitsuMalIds = new Map<string, string>();
 const addonManifests = new Map<string, AddonManifest>();
 
@@ -287,6 +292,7 @@ function clearIntro(): void {
     recapInterval = null;
     creditsInterval = null;
     prefetchedNextEpisode = null;
+    prefetchedNextEpisodeAt = 0;
     overlayAction = null;
     // Force the hide through rather than trusting the cached flag: the overlay belongs to the
     // window, and a file change must never leave a stale control from the previous one.
@@ -360,7 +366,9 @@ function handleOverlayAction(data: unknown): void {
     }
     if (requested === "next" && prefetchedNextEpisode) {
         const next = prefetchedNextEpisode;
+        const fresh = isPrefetchFresh(prefetchedNextEpisodeAt, Date.now(), PREFETCH_FRESH_MS);
         prefetchedNextEpisode = null;
+        prefetchedNextEpisodeAt = 0;
         // Move the sidebar with the player. Only the end of a file did this, so skipping ahead
         // from the overlay left the stream list on the episode that just finished, and the next
         // stream picked there would have been for the wrong episode.
@@ -372,6 +380,13 @@ function handleOverlayAction(data: unknown): void {
                 episodes: context.episodes,
                 resolution: context.resolution
             });
+        }
+        if (!fresh) {
+            // The link was generated when this episode started and may be long expired; playing
+            // it blind fails in mpv. The sidebar is already opening the next episode's fresh
+            // stream list, so hand the choice back to the user instead.
+            core.osd("Stream link expired - pick a stream for the next episode.");
+            return;
         }
         playItem(next);
     }
@@ -569,7 +584,13 @@ async function prefetchNextEpisode(revision: number): Promise<void> {
             ))
         );
         if (!isCurrentRequest(revision, playbackRevision)) return;
-        const stream = findClosestQualityStream(result.streams, context.resolution || "");
+        // The overlay button plays this without asking, so honor the user's standing audio and
+        // subtitle choices, and prefer streams that can actually start now.
+        const stream = pickNextEpisodeStream(result.streams, {
+            previousResolution: context.resolution || "",
+            preferredAudio: parseLanguagePreference(preferences.get("preferredAudio")),
+            preferredSubtitle: parseLanguagePreference(preferences.get("preferredSubtitle"))
+        });
         if (!stream) return;
         prefetchedNextEpisode = {
             url: stream.url,
@@ -582,6 +603,7 @@ async function prefetchNextEpisode(revision: number): Promise<void> {
                 resolution: stream.resolution
             }
         };
+        prefetchedNextEpisodeAt = Date.now();
         updateIntroOverlay();
     } catch (error) {
         logDebug("Popcorn: Next episode prefetch failed:", formatError(error));
