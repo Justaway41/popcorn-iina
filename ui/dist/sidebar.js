@@ -62,39 +62,47 @@
       catalogs: Array.isArray(manifest?.catalogs) ? manifest.catalogs.flatMap(parseCatalog) : []
     };
   }
-  async function loadAddonStreams(addons, load, timeoutMs) {
-    const results = await Promise.allSettled(addons.map((addon) => withinTimeout(load(addon), timeoutMs)));
-    const seen = new Set;
-    const streams = [];
+  async function loadAddonStreams(addons, load, options = {}) {
+    const { timeoutMs, onProgress } = options;
+    const answers = addons.map(() => null);
     let failedAddons = 0;
     let successfulAddons = 0;
-    results.forEach((result, index) => {
-      if (result.status === "rejected") {
-        failedAddons += 1;
-        return;
-      }
-      successfulAddons += 1;
-      result.value.forEach((stream) => {
-        if (seen.has(stream.url))
-          return;
-        seen.add(stream.url);
-        streams.push({ ...stream, addonName: addons[index].name });
+    let pending = addons.length;
+    const collect = () => {
+      const seen = new Set;
+      const streams = [];
+      answers.forEach((answer, index) => {
+        answer?.forEach((stream) => {
+          if (seen.has(stream.url))
+            return;
+          seen.add(stream.url);
+          streams.push({ ...stream, addonName: addons[index].name });
+        });
       });
-    });
-    return { streams, failedAddons, successfulAddons };
-  }
-  async function loadEnabledAddonStreams(addons, loadManifest, loadStreams, timeoutMs) {
-    const enabled = addons.filter((addon) => addon.enabled);
-    const manifests = await Promise.allSettled(enabled.map(async (addon) => ({
-      addon,
-      manifest: await withinTimeout(loadManifest(addon), timeoutMs)
-    })));
-    const streamAddons = manifests.flatMap((result2) => result2.status === "fulfilled" && result2.value.manifest.resources.includes("stream") ? [result2.value.addon] : []);
-    const result = await loadAddonStreams(streamAddons, loadStreams, timeoutMs);
-    return {
-      ...result,
-      failedAddons: result.failedAddons + manifests.filter((item) => item.status === "rejected").length
+      return { streams, failedAddons, successfulAddons };
     };
+    await Promise.all(addons.map(async (addon, index) => {
+      try {
+        const answer = await withinTimeout(load(addon), timeoutMs);
+        if (answer !== null) {
+          answers[index] = answer;
+          successfulAddons += 1;
+        }
+      } catch {
+        failedAddons += 1;
+      }
+      pending -= 1;
+      if (pending > 0)
+        onProgress?.(collect());
+    }));
+    return collect();
+  }
+  async function loadEnabledAddonStreams(addons, loadManifest, loadStreams, options = {}) {
+    const manifestTimeoutMs = options.manifestTimeoutMs ?? options.timeoutMs;
+    return loadAddonStreams(addons.filter((addon) => addon.enabled), async (addon) => {
+      const manifest = await withinTimeout(loadManifest(addon), manifestTimeoutMs);
+      return manifest.resources.includes("stream") ? await loadStreams(addon) : null;
+    }, options);
   }
   function withinTimeout(promise, timeoutMs) {
     if (!timeoutMs || timeoutMs <= 0)
@@ -265,9 +273,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.4.1",
+    version: "2.4.2",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 14,
+    ghVersion: 15,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -680,7 +688,9 @@
   var pendingConfigurationResolvers = [];
   var activeRequest = null;
   var addonManifests = new Map;
-  var STREAM_ADDON_TIMEOUT_MS = 15000;
+  var streamSizeOrder = "largest";
+  var STREAM_ADDON_TIMEOUT_MS = 45000;
+  var STREAM_MANIFEST_TIMEOUT_MS = 1e4;
   var STREAM_CACHE_TTL_MS = 60000;
   var STREAM_CACHE_CAPACITY = 20;
   function createStreamCache(ttlMs, capacity, now) {
@@ -1006,7 +1016,16 @@
       const cacheKey = `${media.type}:${videoId}`;
       const cached = streamCache.get(cacheKey);
       const subtitlesPending = isCompatibleSubtitleId(videoId) ? fetchJson(buildOpenSubtitlesUrl(media.type, videoId), request.signal).then(parseEnglishSubtitleAvailability).catch(() => null) : null;
-      const result = cached ?? await loadEnabledAddonStreams(addons, (addon) => loadAddonManifest(addon, request.signal), async (addon) => parsePlayableStreams(await fetchJson(buildStremioStreamUrl(addon.manifestUrl, media.type, videoId), request.signal)), STREAM_ADDON_TIMEOUT_MS).then((loaded) => {
+      streamSizeOrder = "largest";
+      const result = cached ?? await loadEnabledAddonStreams(addons, (addon) => loadAddonManifest(addon, request.signal), async (addon) => parsePlayableStreams(await fetchJson(buildStremioStreamUrl(addon.manifestUrl, media.type, videoId), request.signal)), {
+        timeoutMs: STREAM_ADDON_TIMEOUT_MS,
+        manifestTimeoutMs: STREAM_MANIFEST_TIMEOUT_MS,
+        onProgress: (partial) => {
+          if (request.signal.aborted || partial.streams.length === 0)
+            return;
+          renderStreams(media, episode, episodes, partial.streams, partial.failedAddons, subtitlesPending);
+        }
+      }).then((loaded) => {
         if (loaded.successfulAddons > 0)
           streamCache.set(cacheKey, loaded);
         return loaded;
@@ -1425,7 +1444,6 @@
     };
     const varying = getVaryingStreamFields(streams);
     const seriesPrefix = episode ? buildSeriesPrefixPattern(media, episode) : null;
-    let sizeOrder = "largest";
     let englishSubtitles = null;
     const summary = document.createElement("div");
     summary.className = "stream-summary";
@@ -1438,17 +1456,21 @@
     summary.append(summaryText, sortButton);
     const list = document.createElement("div");
     const renderList = () => {
-      sortButton.textContent = getSizeSortControl(sizeOrder).label;
+      sortButton.textContent = getSizeSortControl(streamSizeOrder).label;
       summaryText.textContent = buildStreamSummary(streams, varying, englishSubtitles);
-      list.replaceChildren(...buildStreamTiers(streams, sizeOrder, varying, seriesPrefix, playStream));
+      list.replaceChildren(...buildStreamTiers(streams, streamSizeOrder, varying, seriesPrefix, playStream));
     };
     sortButton.addEventListener("click", () => {
-      sizeOrder = getSizeSortControl(sizeOrder).next;
+      streamSizeOrder = getSizeSortControl(streamSizeOrder).next;
       renderList();
     });
     renderList();
     content.append(summary, list);
+    const scroller = document.scrollingElement;
+    const scrollTop = ui.content.classList.contains("hidden") ? 0 : scroller?.scrollTop ?? 0;
     showContent(content);
+    if (scroller && scrollTop > 0)
+      scroller.scrollTop = scrollTop;
     if (subtitlesPending) {
       subtitlesPending.then((value) => {
         if (value === null || !summaryText.isConnected)

@@ -97,54 +97,86 @@ export function parseAddonManifest(value: unknown): AddonManifest {
     };
 }
 
-export async function loadAddonStreams(
-    addons: StremioAddon[],
-    load: (addon: StremioAddon) => Promise<PlayableStream[]>,
-    timeoutMs?: number
-): Promise<AddonStreamLoadResult> {
-    const results = await Promise.allSettled(addons.map((addon) => withinTimeout(load(addon), timeoutMs)));
-    const seen = new Set<string>();
-    const streams: AddonStream[] = [];
-    let failedAddons = 0;
-    let successfulAddons = 0;
-
-    results.forEach((result, index) => {
-        if (result.status === "rejected") {
-            failedAddons += 1;
-            return;
-        }
-        successfulAddons += 1;
-        result.value.forEach((stream) => {
-            if (seen.has(stream.url)) return;
-            seen.add(stream.url);
-            streams.push({ ...stream, addonName: addons[index].name });
-        });
-    });
-
-    return { streams, failedAddons, successfulAddons };
+export interface AddonStreamLoadOptions {
+    /** How long one addon's stream call may run before the host counts as hung. */
+    timeoutMs?: number;
+    /** A manifest is small and cacheable, so it answers on a tighter clock than a stream call. */
+    manifestTimeoutMs?: number;
+    /**
+     * Called with the merged result so far every time an addon settles, so the list can paint
+     * before the slowest addon answers. The last addon does not tick; the return value covers it.
+     */
+    onProgress?: (result: AddonStreamLoadResult) => void;
 }
 
+/**
+ * Loads every addon in parallel and reports results as they land. A `null` answer means the addon
+ * had nothing to contribute and is not a failure, which is how an addon without stream support
+ * stays out of both counts.
+ */
+export async function loadAddonStreams(
+    addons: StremioAddon[],
+    load: (addon: StremioAddon) => Promise<PlayableStream[] | null>,
+    options: AddonStreamLoadOptions = {}
+): Promise<AddonStreamLoadResult> {
+    const { timeoutMs, onProgress } = options;
+    const answers: Array<PlayableStream[] | null> = addons.map(() => null);
+    let failedAddons = 0;
+    let successfulAddons = 0;
+    let pending = addons.length;
+
+    // Rebuilt in addon order on every tick rather than appended to: an addon that answers late
+    // still belongs in its own place, or rows the user is already reading would reshuffle
+    // underneath them as the slower addons arrive.
+    const collect = (): AddonStreamLoadResult => {
+        const seen = new Set<string>();
+        const streams: AddonStream[] = [];
+        answers.forEach((answer, index) => {
+            answer?.forEach((stream) => {
+                if (seen.has(stream.url)) return;
+                seen.add(stream.url);
+                streams.push({ ...stream, addonName: addons[index].name });
+            });
+        });
+        return { streams, failedAddons, successfulAddons };
+    };
+
+    await Promise.all(addons.map(async (addon, index) => {
+        try {
+            const answer = await withinTimeout(load(addon), timeoutMs);
+            if (answer !== null) {
+                answers[index] = answer;
+                successfulAddons += 1;
+            }
+        } catch {
+            failedAddons += 1;
+        }
+        pending -= 1;
+        if (pending > 0) onProgress?.(collect());
+    }));
+
+    return collect();
+}
+
+/**
+ * Each addon runs its manifest and stream calls as one chain, so the slowest manifest cannot
+ * delay a faster addon's stream request the way a shared manifest phase did.
+ */
 export async function loadEnabledAddonStreams(
     addons: StremioAddon[],
     loadManifest: (addon: StremioAddon) => Promise<AddonManifest>,
     loadStreams: (addon: StremioAddon) => Promise<PlayableStream[]>,
-    timeoutMs?: number
+    options: AddonStreamLoadOptions = {}
 ): Promise<AddonStreamLoadResult> {
-    const enabled = addons.filter((addon) => addon.enabled);
-    const manifests = await Promise.allSettled(enabled.map(async (addon) => ({
-        addon,
-        manifest: await withinTimeout(loadManifest(addon), timeoutMs)
-    })));
-    const streamAddons = manifests.flatMap((result) => (
-        result.status === "fulfilled" && result.value.manifest.resources.includes("stream")
-            ? [result.value.addon]
-            : []
-    ));
-    const result = await loadAddonStreams(streamAddons, loadStreams, timeoutMs);
-    return {
-        ...result,
-        failedAddons: result.failedAddons + manifests.filter((item) => item.status === "rejected").length
-    };
+    const manifestTimeoutMs = options.manifestTimeoutMs ?? options.timeoutMs;
+    return loadAddonStreams(
+        addons.filter((addon) => addon.enabled),
+        async (addon) => {
+            const manifest = await withinTimeout(loadManifest(addon), manifestTimeoutMs);
+            return manifest.resources.includes("stream") ? await loadStreams(addon) : null;
+        },
+        options
+    );
 }
 
 /**

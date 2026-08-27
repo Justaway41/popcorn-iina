@@ -21,7 +21,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.4.1`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.4.2`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -122,11 +122,25 @@ Stream loading is latency-shaped around its slowest optional part:
   `renderStreams` paints immediately with an unknown-subtitle summary; when the answer lands it
   patches the badge only if the summary node is still connected (a replaced view ends the update,
   so no revision bookkeeping is needed).
-- **Per-addon timeout.** `loadAddonStreams`/`loadEnabledAddonStreams` accept a `timeoutMs`; each
-  addon call races its own clock (`STREAM_ADDON_TIMEOUT_MS`, 15s - aggregating addons collect
-  sources from many providers and routinely need double-digit seconds) so one hung host cannot
-  hold the list hostage. A timed-out addon counts as failed like any other rejection, and zero
-  successful addons produces an error that distinguishes "nothing enabled" from "none answered".
+- **Progressive results.** `loadAddonStreams` takes an `AddonStreamLoadOptions.onProgress` and
+  calls it with the merged result each time an addon settles, so whatever has answered paints
+  while the rest are still in flight. It rebuilds the list in addon order on every tick instead
+  of appending, or a late addon would reshuffle rows the user is already reading. `loadStreams`
+  skips an empty tick, so a first addon that fails cannot flash the empty state over a list that
+  is still arriving. Because a repaint replaces the content node, `streamSizeOrder` lives at
+  module scope (reset when a stream list opens) and `renderStreams` restores scroll position, so
+  a newly arrived addon neither undoes the user's sort nor throws them back to the top.
+- **Per-addon pipeline and timeouts.** `loadEnabledAddonStreams` runs each addon's manifest and
+  stream call as one chain rather than as two global phases, so the slowest manifest cannot delay
+  a faster addon's stream request. A `null` answer from the loader means "nothing to contribute,
+  not a failure", which is how an addon without stream support stays out of both counts. Each
+  addon races `STREAM_ADDON_TIMEOUT_MS` (45s) with its manifest capped at
+  `STREAM_MANIFEST_TIMEOUT_MS` (10s). The stream budget is deliberately generous: results paint as
+  they land, so it marks a host as *hung*, not merely slow. It was 15s, which cut off aggregating
+  addons mid-answer on a single episode and turned "slow" into "no streams at all" behind a Retry
+  that repeated the same failure. A timed-out addon counts as failed like any other rejection, and
+  zero successful addons produces an error that distinguishes "nothing enabled" from "none
+  answered".
 - **Short-TTL session cache.** Successful per-title results are cached for 60s
   (`STREAM_CACHE_TTL_MS`) keyed on `type:videoId`, capped at 20 entries with oldest-first
   eviction (`createStreamCache`). Total failures stay uncached so Retry retries, and
@@ -318,7 +332,7 @@ git var GIT_COMMITTER_IDENT
 
 ## Current Working State
 
-As of 2026-08-12:
+As of 2026-08-27:
 
 - `2.0.0` is released: the sidebar declutter (resolution tiers, season chip strip, `quality` split
   into `resolution` + `source`) and the uninstall-crash fix.
@@ -358,9 +372,15 @@ As of 2026-08-12:
   oldest-first eviction, cleared whenever the addon set changes, total failures stay uncached);
   and manifests prefetch in the background as soon as configuration arrives, so opening a title
   never waits on a manifest round trip first.
-- `2.4.1` tunes the next-episode path: the per-addon timeout is 15s because aggregating addons
-  need double-digit seconds, and zero successful addons now distinguishes "nothing enabled" from
-  "none answered"; the recommendation card is gone (the overlay's Next Episode button is the way
+- `2.4.2` makes the stream list paint progressively. This is the fix for "No stream addon
+  answered in time" appearing instead of any streams at all. The 2.4.0 timeout was wired as a
+  deadline on the whole result - nothing rendered until every addon had answered or been cut off,
+  a late answer was discarded rather than shown, and the manifest phase spent the same clock
+  before a stream request could even start, so a slow aggregator became a permanent failure
+  behind a Retry that repeated it. See the Streams section for the shape it has now. Verified in
+  IINA against a real episode.
+- `2.4.1` tunes the next-episode path: zero successful addons now distinguishes "nothing enabled"
+  from "none answered" (its 15s per-addon timeout is superseded by the entry above); the recommendation card is gone (the overlay's Next Episode button is the way
   forward, and the sidebar still opens the next episode's fresh list at EOF); the prefetch is
   chosen by `pickNextEpisodeStream` (cached-first, then `preferredAudio`/`preferredSubtitle`,
   then closest resolution) and played within 30 min of fetch, with an older prefetch dropping

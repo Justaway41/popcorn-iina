@@ -67,12 +67,22 @@ let retryAction: (() => Promise<void>) | null = null;
 let pendingConfigurationResolvers: Array<() => void> = [];
 let activeRequest: AbortController | null = null;
 const addonManifests = new Map<string, AddonManifest>();
+/**
+ * Lives outside the render so a repaint carrying a late addon keeps the sort the user chose.
+ * Opening a stream list resets it.
+ */
+let streamSizeOrder: SizeOrder = "largest";
 
 /**
- * One slow or hung addon must not hold the stream list hostage, but aggregating addons collect
- * sources from many providers and routinely need double-digit seconds, so the budget is generous.
+ * Results paint as each addon answers, so this is only the point where a host counts as hung
+ * rather than slow. It has to clear the worst honest case by a wide margin: an aggregating addon
+ * fanning out to many providers for a single episode routinely runs past half a minute, and a
+ * budget that cuts those off turned "slow" into "no streams at all" with a Retry that just
+ * repeated the same failure.
  */
-const STREAM_ADDON_TIMEOUT_MS = 15_000;
+const STREAM_ADDON_TIMEOUT_MS = 45_000;
+/** A manifest is one small document and is prefetched, so it gets a much tighter clock. */
+const STREAM_MANIFEST_TIMEOUT_MS = 10_000;
 /** Availability changes, so a revisit reuses stream results only this long. */
 const STREAM_CACHE_TTL_MS = 60_000;
 const STREAM_CACHE_CAPACITY = 20;
@@ -478,6 +488,7 @@ async function loadStreams(
                 .then(parseEnglishSubtitleAvailability)
                 .catch(() => null)
             : null;
+        streamSizeOrder = "largest";
         const result: AddonStreamLoadResult = cached ?? await loadEnabledAddonStreams(
             addons,
             (addon) => loadAddonManifest(addon, request.signal),
@@ -485,7 +496,24 @@ async function loadStreams(
                 buildStremioStreamUrl(addon.manifestUrl, media.type, videoId),
                 request.signal
             )),
-            STREAM_ADDON_TIMEOUT_MS
+            {
+                timeoutMs: STREAM_ADDON_TIMEOUT_MS,
+                manifestTimeoutMs: STREAM_MANIFEST_TIMEOUT_MS,
+                // Whatever has answered goes on screen now; the rest fills in behind it. An empty
+                // tick is skipped so a first addon that fails cannot flash "no streams" over a
+                // list that is still arriving.
+                onProgress: (partial) => {
+                    if (request.signal.aborted || partial.streams.length === 0) return;
+                    renderStreams(
+                        media,
+                        episode,
+                        episodes,
+                        partial.streams,
+                        partial.failedAddons,
+                        subtitlesPending
+                    );
+                }
+            }
         ).then((loaded) => {
             // A total failure stays uncached so Retry actually retries.
             if (loaded.successfulAddons > 0) streamCache.set(cacheKey, loaded);
@@ -1034,7 +1062,6 @@ function renderStreams(
     const varying = getVaryingStreamFields(streams);
     const seriesPrefix = episode ? buildSeriesPrefixPattern(media, episode) : null;
 
-    let sizeOrder: SizeOrder = "largest";
     let englishSubtitles: boolean | null = null;
     const summary = document.createElement("div");
     summary.className = "stream-summary";
@@ -1048,23 +1075,28 @@ function renderStreams(
 
     const list = document.createElement("div");
     const renderList = () => {
-        sortButton.textContent = getSizeSortControl(sizeOrder).label;
+        sortButton.textContent = getSizeSortControl(streamSizeOrder).label;
         summaryText.textContent = buildStreamSummary(streams, varying, englishSubtitles);
         list.replaceChildren(...buildStreamTiers(
             streams,
-            sizeOrder,
+            streamSizeOrder,
             varying,
             seriesPrefix,
             playStream
         ));
     };
     sortButton.addEventListener("click", () => {
-        sizeOrder = getSizeSortControl(sizeOrder).next;
+        streamSizeOrder = getSizeSortControl(streamSizeOrder).next;
         renderList();
     });
     renderList();
     content.append(summary, list);
+    // A repaint carrying a newly arrived addon lands under someone who may already be reading,
+    // so it must not throw them back to the top of the list.
+    const scroller = document.scrollingElement;
+    const scrollTop = ui.content.classList.contains("hidden") ? 0 : scroller?.scrollTop ?? 0;
     showContent(content);
+    if (scroller && scrollTop > 0) scroller.scrollTop = scrollTop;
     // The badge lands whenever the subtitle answer does. Only the summary line changes, so the
     // rows the user is already reading stay untouched; a replaced view disconnects this node,
     // which is what ends the update - no revision bookkeeping needed.
