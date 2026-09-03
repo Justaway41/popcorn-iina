@@ -1218,7 +1218,8 @@
       retryAt: getNonNegativeNumber(item?.retryAt),
       lastActivityAt: getString4(item?.lastActivityAt),
       lastSyncAt: getString4(item?.lastSyncAt),
-      lastUploadKey: getString4(item?.lastUploadKey)
+      lastUploadKey: getString4(item?.lastUploadKey),
+      lastResumeKey: getString4(item?.lastResumeKey)
     };
   }
   function isSimklConnected(state) {
@@ -1594,9 +1595,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.1",
+    version: "2.6.2",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 18,
+    ghVersion: 19,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1952,7 +1953,7 @@
       return;
     simklRevision += 1;
     simklPin.hidden = true;
-    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "" });
+    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "", lastResumeKey: "" });
     clearStoredSimklWatched();
   }
   async function connectSimkl() {
@@ -1965,7 +1966,7 @@
     const revision = ++simklRevision;
     simklConnect.disabled = true;
     try {
-      saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "" });
+      saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "", lastResumeKey: "" });
       await clearStoredSimklWatched();
       if (revision !== simklRevision)
         return;
@@ -2001,7 +2002,7 @@
     simklRevision += 1;
     simklPin.hidden = true;
     setSimklError("");
-    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "" });
+    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "", lastResumeKey: "" });
     clearStoredSimklWatched();
   }
   function saveTraktCredentials() {

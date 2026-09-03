@@ -310,6 +310,9 @@
     const id = historyContextId(context);
     return entries.find((entry) => entry.id === id) || null;
   }
+  function getResumePercent(progress, watched) {
+    return !watched && progress !== null && progress >= 5 && progress < 90 ? progress : null;
+  }
   function parseEntry(value) {
     const item = getRecord2(value);
     const media = parseMedia(item?.media);
@@ -1171,9 +1174,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.1",
+    version: "2.6.2",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 18,
+    ghVersion: 19,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1873,7 +1876,8 @@
       retryAt: getNonNegativeNumber(item?.retryAt),
       lastActivityAt: getString4(item?.lastActivityAt),
       lastSyncAt: getString4(item?.lastSyncAt),
-      lastUploadKey: getString4(item?.lastUploadKey)
+      lastUploadKey: getString4(item?.lastUploadKey),
+      lastResumeKey: getString4(item?.lastResumeKey)
     };
   }
   function isSimklConnected(state) {
@@ -1960,6 +1964,33 @@
   }
   function uploadKey(episodes) {
     return episodes.map((episode) => `${episode.malId ?? episode.imdbId ?? ""}:${episode.season}:${episode.episode}`).sort().join(",");
+  }
+  function resumeKey(points) {
+    return points.map((point) => {
+      const episode = point.context.episode;
+      const id = point.cour?.malId || point.context.media.imdbId;
+      const at = episode ? `${episode.season}:${episode.episode}` : "";
+      return `${id}:${at}:${Math.round(point.progress)}`;
+    }).sort().join(",");
+  }
+  async function uploadSimklResume(transport, state, points, now = Date.now()) {
+    if (!isSimklConnected(state) || state.retryAt > now || points.length === 0)
+      return state;
+    const key = resumeKey(points);
+    if (key === state.lastResumeKey)
+      return state;
+    try {
+      for (const point of points) {
+        await request2(transport, state, "POST", "/scrobble/pause", buildSimklScrobblePayload(point.context, point.progress, point.cour), now);
+      }
+      return { ...state, lastResumeKey: key, lastError: "", retryAt: 0 };
+    } catch (error) {
+      return {
+        ...state,
+        lastError: error instanceof Error ? error.message : "Simkl request failed.",
+        retryAt: error instanceof SimklError ? error.retryAt : 0
+      };
+    }
   }
   async function syncSimklHistory(transport, state, local, now = Date.now()) {
     if (!isSimklConnected(state) || state.retryAt > now) {
@@ -2387,6 +2418,18 @@
             return;
           try {
             saveIfCurrent(state, await uploadSimklHistory(transport, state, episodes));
+          } catch (error) {
+            onError(error);
+          }
+        });
+      },
+      uploadResume(points) {
+        return enqueue(async () => {
+          const state = read();
+          if (!state.accessToken)
+            return;
+          try {
+            saveIfCurrent(state, await uploadSimklResume(transport, state, points));
           } catch (error) {
             onError(error);
           }
@@ -2979,8 +3022,6 @@
   }
   async function uploadLocalHistory(state, history) {
     const pending = pendingSimklUploads(state);
-    if (pending.length === 0)
-      return;
     const episodes = [];
     for (const show of pending) {
       const media = history.find((entry) => entry.media.imdbId === show.id)?.media;
@@ -2992,7 +3033,24 @@
       });
       episodes.push(...await anime.uploadEpisodes(media, coordinates));
     }
-    await simkl.upload(episodes);
+    if (episodes.length > 0)
+      await simkl.upload(episodes);
+    await uploadLocalResume(history);
+  }
+  async function uploadLocalResume(history) {
+    const points = [];
+    for (const entry of history) {
+      const progress = getResumePercent(entry.progress, entry.watched);
+      if (progress === null || !isImdbId(entry.media.imdbId))
+        continue;
+      const cour = entry.episode ? (await anime.uploadEpisodes(entry.media, [entry.episode])).flatMap((episode) => episode.malId ? [{ malId: episode.malId, episode: episode.episode }] : [])[0] ?? null : null;
+      points.push({
+        context: { media: entry.media, episode: entry.episode, episodes: [] },
+        progress,
+        cour
+      });
+    }
+    await simkl.uploadResume(points);
   }
   function syncRemoteHistory() {
     const now = Date.now();

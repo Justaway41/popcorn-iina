@@ -5,7 +5,9 @@ import {
     simklScrobble,
     syncSimklHistory,
     uploadSimklHistory,
+    uploadSimklResume,
     type AnimeCourEpisode,
+    type SimklResumePoint,
     type SimklUploadEpisode,
     type SimklScrobbleAction,
     type SimklState
@@ -21,6 +23,8 @@ export interface IinaSimklClient {
     ): Promise<void>;
     /** Sends locally watched episodes Simkl has never been told about. */
     upload(episodes: SimklUploadEpisode[]): Promise<void>;
+    /** Sends where playback was left for anything still unfinished. */
+    uploadResume(points: SimklResumePoint[]): Promise<void>;
     sync(history: WatchHistoryEntry[]): Promise<{
         history: WatchHistoryEntry[];
         watchedPatches: WatchedShowPatch[];
@@ -71,6 +75,17 @@ export function createIinaSimklClient(
                 if (!state.accessToken) return;
                 try {
                     saveIfCurrent(state, await uploadSimklHistory(transport, state, episodes));
+                } catch (error) {
+                    onError(error);
+                }
+            });
+        },
+        uploadResume(points) {
+            return enqueue(async () => {
+                const state = read();
+                if (!state.accessToken) return;
+                try {
+                    saveIfCurrent(state, await uploadSimklResume(transport, state, points));
                 } catch (error) {
                     onError(error);
                 }

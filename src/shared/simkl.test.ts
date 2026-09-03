@@ -15,7 +15,8 @@ import {
     requestSimklPin,
     simklScrobble,
     syncSimklHistory,
-    uploadSimklHistory
+    uploadSimklHistory,
+    uploadSimklResume
 } from "./simkl";
 
 const movie = {
@@ -83,7 +84,7 @@ function ok(data: unknown): TraktResponse {
 
 test("parses stored state defensively", () => {
     const empty = {
-        clientId: "", accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: ""
+        clientId: "", accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "", lastResumeKey: ""
     };
     expect(parseSimklState(null)).toEqual(empty);
     expect(parseSimklState("nonsense")).toEqual(empty);
@@ -95,7 +96,7 @@ test("parses stored state defensively", () => {
         retryAt: 42,
         lastActivityAt: "2026-08-13T10:00:00Z",
         lastSyncAt: "2026-08-13T10:05:00Z",
-        lastUploadKey: "tt9:1:1"
+        lastUploadKey: "tt9:1:1", lastResumeKey: "tt9:1:2:40"
     })).toEqual({
         clientId: "abc",
         accessToken: "tok",
@@ -103,7 +104,7 @@ test("parses stored state defensively", () => {
         retryAt: 42,
         lastActivityAt: "2026-08-13T10:00:00Z",
         lastSyncAt: "2026-08-13T10:05:00Z",
-        lastUploadKey: "tt9:1:1"
+        lastUploadKey: "tt9:1:1", lastResumeKey: "tt9:1:2:40"
     });
 });
 
@@ -658,4 +659,45 @@ test("uploads a set once and records it", async () => {
     await uploadSimklHistory(transport, connected, []);
     await uploadSimklHistory(transport, { ...connected, accessToken: "" }, episodes);
     expect(calls).toHaveLength(2);
+});
+
+test("sends each resume position once, addressed the way its show is", async () => {
+    const { calls, transport } = recorder([ok(null)]);
+    const show = { ...movie, id: "tt14986406", imdbId: "tt14986406", type: "series" as const, name: "Bleach" };
+    const episode = {
+        id: "tt14986406:3:6",
+        name: "The Holy Newborn",
+        season: 3,
+        episode: 6,
+        aired: "",
+        description: "",
+        thumbnail: ""
+    };
+    const points = [
+        // Anime goes by cour, so Cinemeta's S3E6 is episode 6 of MAL 56784.
+        {
+            context: { media: show, episode, episodes: [] },
+            progress: 6.3,
+            cour: { malId: "56784", episode: 6 }
+        },
+        { context: { media: movie, episodes: [] }, progress: 44, cour: null }
+    ];
+
+    const state = await uploadSimklResume(transport, connected, points);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].url).toBe("https://api.simkl.com/scrobble/pause");
+    expect(calls[0].body).toEqual({
+        progress: 6.3,
+        anime: { ids: { mal: "56784" } },
+        episode: { season: 1, number: 6 }
+    });
+    expect(calls[1].body).toEqual({ movie: { ids: { imdb: movie.imdbId } }, progress: 44 });
+
+    // The same positions again are not worth the requests.
+    expect(await uploadSimklResume(transport, state, points)).toBe(state);
+    expect(calls).toHaveLength(2);
+
+    // Moving on in the episode is new information.
+    await uploadSimklResume(transport, state, [{ ...points[0], progress: 30 }, points[1]]);
+    expect(calls).toHaveLength(4);
 });

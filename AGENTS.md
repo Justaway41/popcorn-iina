@@ -31,7 +31,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.1`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.2`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -287,6 +287,13 @@ show for months tells another device nothing about it - a live account had Bleac
 3 locally and Simkl held only season 1. `lastUploadKey` stops the same set being resent every
 five minutes. A show whose chain has not been looked up yet is left for a later sync rather than
 sent under its IMDb id, which is the mistake this module exists to avoid.
+
+`uploadLocalResume` does the same for positions rather than marks, posting `/scrobble/pause`
+for every unfinished title. Watched marks and resume positions are separate channels on Simkl -
+`/sync/history` carries one and `/sync/playback` the other - so backfilling only the first left
+another device knowing an episode was reached but not where in it. `lastResumeKey` stops it being
+replayed. `mergeWatchHistory` already keeps only the newest unfinished episode per title across
+both devices, so the positions sent back are either new to Simkl or a repeat of what it reported.
 
 Chain lookups share one budget across placement and uploads within a sync, reset at the start of
 `placeWatchedCours`. Without it a first run walks the whole history at once and AniList answers

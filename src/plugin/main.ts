@@ -14,6 +14,7 @@ import {
     addSimklWatchedEpisodes,
     applySimklWatchedPatches,
     mergeSimklCours,
+    getResumePercent,
     pendingSimklUploads,
     type EpisodeWatchState,
     type WatchHistoryEntry,
@@ -56,7 +57,7 @@ import { keepAwakeTick, startKeepAwake, stopKeepAwake } from "./sleep";
 import { createAnimeChainClient } from "./anime";
 import { createJsonClient, safeJson } from "./http";
 import { createIinaSimklClient } from "./simkl";
-import type { AnimeCourEpisode, SimklUploadEpisode } from "../shared/simkl";
+import type { AnimeCourEpisode, SimklResumePoint, SimklUploadEpisode } from "../shared/simkl";
 import { createIinaTraktClient } from "./trakt";
 import {
     findChapterCredits,
@@ -780,7 +781,6 @@ async function uploadLocalHistory(
     history: WatchHistoryEntry[]
 ): Promise<void> {
     const pending = pendingSimklUploads(state);
-    if (pending.length === 0) return;
     const episodes: SimklUploadEpisode[] = [];
     for (const show of pending) {
         const media = history.find((entry) => entry.media.imdbId === show.id)?.media;
@@ -793,7 +793,33 @@ async function uploadLocalHistory(
         });
         episodes.push(...await anime.uploadEpisodes(media, coordinates));
     }
-    await simkl.upload(episodes);
+    if (episodes.length > 0) await simkl.upload(episodes);
+    await uploadLocalResume(history);
+}
+
+/**
+ * Where playback was left, for anything still unfinished. `mergeWatchHistory` already keeps
+ * only the newest unfinished episode per title across both devices, so sending those back is
+ * either new information for Simkl or a repeat of what it just reported.
+ */
+async function uploadLocalResume(history: WatchHistoryEntry[]): Promise<void> {
+    const points: SimklResumePoint[] = [];
+    for (const entry of history) {
+        const progress = getResumePercent(entry.progress, entry.watched);
+        if (progress === null || !isImdbId(entry.media.imdbId)) continue;
+        const cour = entry.episode
+            ? (await anime.uploadEpisodes(entry.media, [entry.episode]))
+                .flatMap((episode) => episode.malId
+                    ? [{ malId: episode.malId, episode: episode.episode }]
+                    : [])[0] ?? null
+            : null;
+        points.push({
+            context: { media: entry.media, episode: entry.episode, episodes: [] },
+            progress,
+            cour
+        });
+    }
+    await simkl.uploadResume(points);
 }
 
 function syncRemoteHistory(): void {

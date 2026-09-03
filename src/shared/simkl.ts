@@ -38,6 +38,8 @@ export interface SimklState {
      * once; this stops it being sent again every five minutes.
      */
     lastUploadKey: string;
+    /** What the last resume-position upload covered, so it is not replayed every sync. */
+    lastResumeKey: string;
 }
 
 export interface SimklPin {
@@ -84,7 +86,8 @@ export function parseSimklState(value: unknown): SimklState {
         retryAt: getNonNegativeNumber(item?.retryAt),
         lastActivityAt: getString(item?.lastActivityAt),
         lastSyncAt: getString(item?.lastSyncAt),
-        lastUploadKey: getString(item?.lastUploadKey)
+        lastUploadKey: getString(item?.lastUploadKey),
+        lastResumeKey: getString(item?.lastResumeKey)
     };
 }
 
@@ -293,6 +296,61 @@ export function uploadKey(episodes: SimklUploadEpisode[]): string {
         .map((episode) => `${episode.malId ?? episode.imdbId ?? ""}:${episode.season}:${episode.episode}`)
         .sort()
         .join(",");
+}
+
+/** Where playback was left, in whichever numbering addresses its show. */
+export interface SimklResumePoint {
+    context: PlaybackContext;
+    progress: number;
+    cour: AnimeCourEpisode | null;
+}
+
+export function resumeKey(points: SimklResumePoint[]): string {
+    return points
+        .map((point) => {
+            const episode = point.context.episode;
+            const id = point.cour?.malId || point.context.media.imdbId;
+            const at = episode ? `${episode.season}:${episode.episode}` : "";
+            return `${id}:${at}:${Math.round(point.progress)}`;
+        })
+        .sort()
+        .join(",");
+}
+
+/**
+ * Sends where playback was left for anything still unfinished. Scrobbling covers this while
+ * Popcorn is running, but a position reached before Simkl was connected - or one whose scrobble
+ * was refused because the episode was addressed by IMDb id - never reached it, so another
+ * device resumes from nothing.
+ */
+export async function uploadSimklResume(
+    transport: HttpTransport,
+    state: SimklState,
+    points: SimklResumePoint[],
+    now = Date.now()
+): Promise<SimklState> {
+    if (!isSimklConnected(state) || state.retryAt > now || points.length === 0) return state;
+    const key = resumeKey(points);
+    if (key === state.lastResumeKey) return state;
+    try {
+        for (const point of points) {
+            await request(
+                transport,
+                state,
+                "POST",
+                "/scrobble/pause",
+                buildSimklScrobblePayload(point.context, point.progress, point.cour),
+                now
+            );
+        }
+        return { ...state, lastResumeKey: key, lastError: "", retryAt: 0 };
+    } catch (error) {
+        return {
+            ...state,
+            lastError: error instanceof Error ? error.message : "Simkl request failed.",
+            retryAt: error instanceof SimklError ? error.retryAt : 0
+        };
+    }
 }
 
 export async function syncSimklHistory(
