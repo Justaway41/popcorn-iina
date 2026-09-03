@@ -251,6 +251,9 @@ export async function syncSimklHistory(
         const items = await request(transport, state, "GET", `/sync/all-items/?${query}`, null, now);
         const playback = await request(transport, state, "GET", `/sync/playback${cursor}`, null, now);
 
+        const watchedCours = parseSimklWatchedCours(items, playback);
+        await markCourOwnership(transport, state, watchedCours, now);
+
         return {
             state: {
                 ...state,
@@ -261,7 +264,7 @@ export async function syncSimklHistory(
             },
             history: mergeWatchHistory(local, parseSimklHistory(items, playback)),
             watchedPatches: parseSimklWatchedPatches(items),
-            watchedCours: parseSimklWatchedCours(items)
+            watchedCours
         };
     } catch (error) {
         if (error instanceof SimklError && error.status === 401) {
@@ -300,17 +303,106 @@ export function parseSimklWatchedPatches(items: unknown): WatchedShowPatch[] {
  * storing them against that id would mark episodes watched on an entirely different show.
  * Placing them needs the sequel chain, which only the plugin can resolve.
  */
-export function parseSimklWatchedCours(items: unknown): WatchedCour[] {
+/**
+ * Whether each cour's IMDb id leads back to that cour. Simkl files a later cour under the
+ * series it continues, so the id alone cannot say which show an episode belongs to; asking
+ * what the id resolves to is what separates "this is the show's first cour, its numbering is
+ * the show's own" from "this id names a different show". A lookup that fails leaves the cour
+ * trusted, which is how it behaved before this check existed.
+ */
+async function markCourOwnership(
+    transport: HttpTransport,
+    state: SimklState,
+    cours: WatchedCour[],
+    now: number
+): Promise<void> {
+    const byImdb = new Map<string, WatchedCour[]>();
+    for (const cour of cours) {
+        if (!isImdbId(cour.imdbId)) continue;
+        const group = byImdb.get(cour.imdbId) ?? [];
+        group.push(cour);
+        byImdb.set(cour.imdbId, group);
+    }
+    for (const [imdbId, group] of byImdb) {
+        try {
+            const found = await request(
+                transport,
+                state,
+                "GET",
+                `/search/id?imdb=${encodeURIComponent(imdbId)}&type=anime`,
+                null,
+                now
+            );
+            const first = Array.isArray(found) ? getRecord(found[0]) : null;
+            const simklId = String(getRecord(first?.ids)?.simkl ?? "");
+            if (!simklId) continue;
+            for (const cour of group) {
+                if (cour.simklId) cour.ownsImdb = cour.simklId === simklId;
+            }
+        } catch {
+            // Leave the group trusted rather than dropping state over a transport failure.
+        }
+    }
+}
+
+export function parseSimklWatchedCours(items: unknown, playback: unknown): WatchedCour[] {
     const list = getRecord(items)?.anime;
-    if (!Array.isArray(list)) return [];
-    return list.flatMap((value) => {
+    const paused = parsePausedCours(playback);
+    const cours = new Map<string, WatchedCour>();
+    for (const value of Array.isArray(list) ? list : []) {
         const item = getRecord(value);
-        const malId = getString(getRecord(getRecord(item?.show)?.ids)?.mal);
+        const show = getRecord(item?.show);
+        const malId = getString(getRecord(show?.ids)?.mal);
         const seasons = item?.seasons;
-        if (!malId || !Array.isArray(seasons)) return [];
+        if (!malId || !Array.isArray(seasons)) continue;
         const episodes = [...new Set(seasons.flatMap(courEpisodeNumbers))];
-        return episodes.length === 0 ? [] : [{ malId, episodes }];
-    });
+        if (episodes.length === 0) continue;
+        cours.set(malId, {
+            malId,
+            imdbId: getString(getRecord(show?.ids)?.imdb),
+            name: getString(show?.title),
+            year: String(show?.year ?? ""),
+            ownsImdb: true,
+            simklId: String(getRecord(show?.ids)?.simkl ?? ""),
+            episodes,
+            lastWatchedAt: getString(item?.last_watched_at)
+        });
+    }
+    for (const [malId, session] of paused) {
+        const existing = cours.get(malId);
+        if (existing) {
+            existing.paused = session.paused;
+            continue;
+        }
+        cours.set(malId, session);
+    }
+    return [...cours.values()];
+}
+
+/** Paused anime sessions, which name the title `anime` and count within the cour. */
+function parsePausedCours(playback: unknown): Map<string, WatchedCour> {
+    const sessions = new Map<string, WatchedCour>();
+    for (const value of Array.isArray(playback) ? playback : []) {
+        const item = getRecord(value);
+        const show = getRecord(item?.anime);
+        const episode = getRecord(item?.episode);
+        const malId = getString(getRecord(show?.ids)?.mal);
+        const number = episodeNumber(getFiniteNumber(episode?.number) ?? -1);
+        const progress = clampProgress(item?.progress);
+        if (!malId || number === null || number === 0 || progress === null) continue;
+        sessions.set(malId, {
+            malId,
+            imdbId: getString(getRecord(show?.ids)?.imdb),
+            name: getString(show?.title),
+            year: String(show?.year ?? ""),
+            ownsImdb: true,
+            simklId: String(getRecord(show?.ids)?.simkl ?? ""),
+            episodes: [],
+            lastWatchedAt: "",
+            paused: { episode: number, at: getString(item?.paused_at), progress }
+        });
+    }
+    return sessions;
 }
 
 function courEpisodeNumbers(value: unknown): number[] {
@@ -365,7 +457,6 @@ export function parseSimklHistory(items: unknown, playback: unknown): WatchHisto
     const lists = getRecord(items);
     const entries = [
         ...listEntries(lists?.shows),
-        ...listEntries(lists?.anime),
         ...listEntries(lists?.movies),
         ...(Array.isArray(playback) ? playback.flatMap(parsePlayback) : [])
     ];
@@ -431,8 +522,9 @@ function parsePlayback(value: unknown): WatchHistoryEntry[] {
         }];
     }
 
-    // Playback rows name the title `anime` for anime and `show` for everything else.
-    const show = getRecord(item.show) ?? getRecord(item.anime);
+    // Anime is left to `parseSimklWatchedCours`: a playback row names the title `anime`, and
+    // its IMDb id can be the series the cour continues rather than the one Popcorn shows.
+    const show = getRecord(item.show);
     const episode = getRecord(item.episode);
     const imdbId = getString(getRecord(show?.ids)?.imdb);
     const name = getString(show?.title);

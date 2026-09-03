@@ -775,7 +775,7 @@ function syncRemoteHistory(): void {
         .then((synced) => simkl.sync(synced))
         .then(async (synced) => {
             const latestHistory = parseWatchHistory(preferences.get("watchHistory"));
-            const history = mergeWatchHistory(
+            const merged = mergeWatchHistory(
                 latestHistory,
                 synced.history
             );
@@ -784,15 +784,18 @@ function syncRemoteHistory(): void {
             // keeps progress recorded while the lookups ran.
             const stored = mergeSimklCours(
                 applySimklWatchedPatches(
-                    parseEpisodeWatchState(preferences.get("episodeWatchState"), history),
+                    parseEpisodeWatchState(preferences.get("episodeWatchState"), merged),
                     synced.watchedPatches
                 ),
                 synced.watchedCours
             );
             // Every cour held so far, not only this pull's: an incremental pull carries just
-            // the cours that changed, and a show's other cours must keep their marks.
-            const courPatches = await anime.resolveWatchedCours(stored.simklCours, history);
-            const watchedState = addSimklWatchedEpisodes(stored, courPatches);
+            // the cours that changed, and a show's other cours must keep their marks. Anime
+            // reaches the history only through here, since the IMDb id Simkl files a later cour
+            // under names the series it continues rather than the one Popcorn shows.
+            const placed = await anime.placeWatchedCours(stored.simklCours, merged);
+            const watchedState = addSimklWatchedEpisodes(stored, placed.patches);
+            const history = mergeWatchHistory(merged, placed.entries);
             watchHistory = history;
             episodeWatchState = watchedState;
             preferences.set("watchHistory", history);

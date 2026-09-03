@@ -214,10 +214,38 @@
       return [];
     return value.flatMap((item) => {
       const record = getRecord2(item);
-      const malId = typeof record?.malId === "string" ? record.malId : "";
-      const episodes = Array.isArray(record?.episodes) ? record.episodes.filter((number) => typeof number === "number" && Number.isInteger(number) && number > 0) : [];
-      return malId && episodes.length > 0 ? [{ malId, episodes: [...new Set(episodes)] }] : [];
+      const malId = readString(record?.malId);
+      if (!malId)
+        return [];
+      const episodes = Array.isArray(record?.episodes) ? [...new Set(record.episodes.filter(isCourEpisode))] : [];
+      const paused = getRecord2(record?.paused);
+      const pausedEpisode = paused ? paused.episode : null;
+      const progress = typeof paused?.progress === "number" ? paused.progress : null;
+      const cour = {
+        malId,
+        imdbId: readString(record?.imdbId),
+        name: readString(record?.name),
+        year: readString(record?.year),
+        ownsImdb: record?.ownsImdb !== false,
+        simklId: readString(record?.simklId),
+        episodes,
+        lastWatchedAt: readString(record?.lastWatchedAt)
+      };
+      if (isCourEpisode(pausedEpisode) && progress !== null && Number.isFinite(progress)) {
+        cour.paused = {
+          episode: pausedEpisode,
+          at: readString(paused?.at),
+          progress: Math.max(0, Math.min(100, progress))
+        };
+      }
+      return episodes.length > 0 || cour.paused ? [cour] : [];
     });
+  }
+  function isCourEpisode(value) {
+    return typeof value === "number" && Number.isInteger(value) && value > 0;
+  }
+  function readString(value) {
+    return typeof value === "string" ? value : "";
   }
   function isEpisodeWatched(state, media, episode, legacyHistory = []) {
     const titleId = mediaTitleId(media);

@@ -248,10 +248,38 @@
       return [];
     return value.flatMap((item) => {
       const record = getRecord2(item);
-      const malId = typeof record?.malId === "string" ? record.malId : "";
-      const episodes = Array.isArray(record?.episodes) ? record.episodes.filter((number) => typeof number === "number" && Number.isInteger(number) && number > 0) : [];
-      return malId && episodes.length > 0 ? [{ malId, episodes: [...new Set(episodes)] }] : [];
+      const malId = readString(record?.malId);
+      if (!malId)
+        return [];
+      const episodes = Array.isArray(record?.episodes) ? [...new Set(record.episodes.filter(isCourEpisode))] : [];
+      const paused = getRecord2(record?.paused);
+      const pausedEpisode = paused ? paused.episode : null;
+      const progress = typeof paused?.progress === "number" ? paused.progress : null;
+      const cour = {
+        malId,
+        imdbId: readString(record?.imdbId),
+        name: readString(record?.name),
+        year: readString(record?.year),
+        ownsImdb: record?.ownsImdb !== false,
+        simklId: readString(record?.simklId),
+        episodes,
+        lastWatchedAt: readString(record?.lastWatchedAt)
+      };
+      if (isCourEpisode(pausedEpisode) && progress !== null && Number.isFinite(progress)) {
+        cour.paused = {
+          episode: pausedEpisode,
+          at: readString(paused?.at),
+          progress: Math.max(0, Math.min(100, progress))
+        };
+      }
+      return episodes.length > 0 || cour.paused ? [cour] : [];
     });
+  }
+  function isCourEpisode(value) {
+    return typeof value === "number" && Number.isInteger(value) && value > 0;
+  }
+  function readString(value) {
+    return typeof value === "string" ? value : "";
   }
   function isEpisodeWatched(state, media, episode, legacyHistory = []) {
     const titleId = mediaTitleId(media);
@@ -1260,6 +1288,8 @@
       ].join("&");
       const items = await request2(transport, state, "GET", `/sync/all-items/?${query}`, null, now);
       const playback = await request2(transport, state, "GET", `/sync/playback${cursor}`, null, now);
+      const watchedCours = parseSimklWatchedCours(items, playback);
+      await markCourOwnership(transport, state, watchedCours, now);
       return {
         state: {
           ...state,
@@ -1270,7 +1300,7 @@
         },
         history: mergeWatchHistory(local, parseSimklHistory(items, playback)),
         watchedPatches: parseSimklWatchedPatches(items),
-        watchedCours: parseSimklWatchedCours(items)
+        watchedCours
       };
     } catch (error) {
       if (error instanceof SimklError && error.status === 401) {
@@ -1301,19 +1331,88 @@
   function parseSimklWatchedPatches(items) {
     return watchedShowPatches(getRecord4(items)?.shows);
   }
-  function parseSimklWatchedCours(items) {
+  async function markCourOwnership(transport, state, cours, now) {
+    const byImdb = new Map;
+    for (const cour of cours) {
+      if (!isImdbId(cour.imdbId))
+        continue;
+      const group = byImdb.get(cour.imdbId) ?? [];
+      group.push(cour);
+      byImdb.set(cour.imdbId, group);
+    }
+    for (const [imdbId, group] of byImdb) {
+      try {
+        const found = await request2(transport, state, "GET", `/search/id?imdb=${encodeURIComponent(imdbId)}&type=anime`, null, now);
+        const first = Array.isArray(found) ? getRecord4(found[0]) : null;
+        const simklId = String(getRecord4(first?.ids)?.simkl ?? "");
+        if (!simklId)
+          continue;
+        for (const cour of group) {
+          if (cour.simklId)
+            cour.ownsImdb = cour.simklId === simklId;
+        }
+      } catch {}
+    }
+  }
+  function parseSimklWatchedCours(items, playback) {
     const list = getRecord4(items)?.anime;
-    if (!Array.isArray(list))
-      return [];
-    return list.flatMap((value) => {
+    const paused = parsePausedCours(playback);
+    const cours = new Map;
+    for (const value of Array.isArray(list) ? list : []) {
       const item = getRecord4(value);
-      const malId = getString4(getRecord4(getRecord4(item?.show)?.ids)?.mal);
+      const show = getRecord4(item?.show);
+      const malId = getString4(getRecord4(show?.ids)?.mal);
       const seasons = item?.seasons;
       if (!malId || !Array.isArray(seasons))
-        return [];
+        continue;
       const episodes = [...new Set(seasons.flatMap(courEpisodeNumbers))];
-      return episodes.length === 0 ? [] : [{ malId, episodes }];
-    });
+      if (episodes.length === 0)
+        continue;
+      cours.set(malId, {
+        malId,
+        imdbId: getString4(getRecord4(show?.ids)?.imdb),
+        name: getString4(show?.title),
+        year: String(show?.year ?? ""),
+        ownsImdb: true,
+        simklId: String(getRecord4(show?.ids)?.simkl ?? ""),
+        episodes,
+        lastWatchedAt: getString4(item?.last_watched_at)
+      });
+    }
+    for (const [malId, session] of paused) {
+      const existing = cours.get(malId);
+      if (existing) {
+        existing.paused = session.paused;
+        continue;
+      }
+      cours.set(malId, session);
+    }
+    return [...cours.values()];
+  }
+  function parsePausedCours(playback) {
+    const sessions = new Map;
+    for (const value of Array.isArray(playback) ? playback : []) {
+      const item = getRecord4(value);
+      const show = getRecord4(item?.anime);
+      const episode = getRecord4(item?.episode);
+      const malId = getString4(getRecord4(show?.ids)?.mal);
+      const number = episodeNumber(getFiniteNumber(episode?.number) ?? -1);
+      const progress = clampProgress(item?.progress);
+      if (!malId || number === null || number === 0 || progress === null)
+        continue;
+      sessions.set(malId, {
+        malId,
+        imdbId: getString4(getRecord4(show?.ids)?.imdb),
+        name: getString4(show?.title),
+        year: String(show?.year ?? ""),
+        ownsImdb: true,
+        simklId: String(getRecord4(show?.ids)?.simkl ?? ""),
+        episodes: [],
+        lastWatchedAt: "",
+        paused: { episode: number, at: getString4(item?.paused_at), progress }
+      });
+    }
+    return sessions;
   }
   function courEpisodeNumbers(value) {
     const season = getRecord4(value);
@@ -1364,7 +1463,6 @@
     const lists = getRecord4(items);
     const entries = [
       ...listEntries(lists?.shows),
-      ...listEntries(lists?.anime),
       ...listEntries(lists?.movies),
       ...Array.isArray(playback) ? playback.flatMap(parsePlayback) : []
     ];
@@ -1426,7 +1524,7 @@
         progress
       }];
     }
-    const show = getRecord4(item.show) ?? getRecord4(item.anime);
+    const show = getRecord4(item.show);
     const episode = getRecord4(item.episode);
     const imdbId = getString4(getRecord4(show?.ids)?.imdb);
     const name = getString4(show?.title);

@@ -231,12 +231,31 @@ test("normalizes compact episode watch state", () => {
     });
     expect(parseEpisodeWatchState({
         simklCours: [
-            { malId: "56784", episodes: [6, 6, 0, -2, 1.5] },
+            { malId: "56784", imdbId: "tt0434665", name: "Bleach", year: "2022", ownsImdb: false, simklId: "2268810", episodes: [6, 6, 0, -2, 1.5], lastWatchedAt: "z" },
             { malId: "", episodes: [1] },
             { malId: "41467", episodes: [] },
+            { malId: "16498", episodes: [], paused: { episode: 22, at: "y", progress: 46.14 } },
+            { malId: "918", episodes: [], paused: { episode: 0, at: "x", progress: 5 } },
             null
         ]
-    })).toEqual({ local: [], simkl: [], simklCours: [{ malId: "56784", episodes: [6] }] });
+    })).toEqual({
+        local: [],
+        simkl: [],
+        simklCours: [
+            { malId: "56784", imdbId: "tt0434665", name: "Bleach", year: "2022", ownsImdb: false, simklId: "2268810", episodes: [6], lastWatchedAt: "z" },
+            {
+                malId: "16498",
+                imdbId: "",
+                name: "",
+                year: "",
+                ownsImdb: true,
+                simklId: "",
+                episodes: [],
+                lastWatchedAt: "",
+                paused: { episode: 22, at: "y", progress: 46.14 }
+            }
+        ]
+    });
     expect(parseEpisodeWatchState("not json")).toEqual({ local: [], simkl: [], simklCours: [] });
 });
 
@@ -288,13 +307,20 @@ test("adds Simkl episodes without dropping the cours a pull left out", () => {
         simklCours: []
     });
 
-    const held = mergeSimklCours(state, [
-        { malId: "41467", episodes: [1] },
-        { malId: "56784", episodes: [6] }
-    ]);
-    expect(mergeSimklCours(held, [{ malId: "56784", episodes: [6, 7] }]).simklCours).toEqual([
-        { malId: "41467", episodes: [1] },
-        { malId: "56784", episodes: [6, 7] }
+    const cour = (malId: string, episodes: number[]) => ({
+        malId,
+        imdbId: "tt14986406",
+        name: "Bleach",
+        year: "2022",
+        ownsImdb: true,
+        simklId: "",
+        episodes,
+        lastWatchedAt: "z"
+    });
+    const held = mergeSimklCours(state, [cour("41467", [1]), cour("56784", [6])]);
+    expect(mergeSimklCours(held, [cour("56784", [6, 7])]).simklCours).toEqual([
+        cour("41467", [1]),
+        cour("56784", [6, 7])
     ]);
     expect(clearSimklWatched(held).simklCours).toEqual([]);
 });

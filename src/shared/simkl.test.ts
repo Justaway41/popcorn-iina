@@ -414,8 +414,36 @@ test("reads anime watched episodes as cour numbers keyed by MAL id", () => {
             show: { ids: { imdb: "tt5753856" } },
             seasons: [{ number: 1, episodes: [{ number: 1, watched_at: "a" }] }]
         }]
-    })).toEqual([{ malId: "41467", episodes: [1, 2] }]);
-    expect(parseSimklWatchedCours({})).toEqual([]);
+    }, null)).toEqual([{
+        malId: "41467",
+        imdbId: "tt14986406",
+        name: "Bleach",
+        year: "",
+        ownsImdb: true,
+        simklId: "",
+        episodes: [1, 2],
+        lastWatchedAt: ""
+    }]);
+    expect(parseSimklWatchedCours({}, null)).toEqual([]);
+
+    // A paused anime session is a cour too, and attaches to the cour it belongs to.
+    expect(parseSimklWatchedCours(null, [{
+        progress: 46.14,
+        paused_at: "2026-08-28T16:16:32Z",
+        type: "episode",
+        episode: { season: 1, number: 22, title: "The Defeated" },
+        anime: { title: "Attack on Titan", year: 2013, ids: { imdb: "tt2560140", mal: "16498" } }
+    }])).toEqual([{
+        malId: "16498",
+        imdbId: "tt2560140",
+        name: "Attack on Titan",
+        year: "2013",
+        ownsImdb: true,
+        simklId: "",
+        episodes: [],
+        lastWatchedAt: "",
+        paused: { episode: 22, at: "2026-08-28T16:16:32Z", progress: 46.14 }
+    }]);
 });
 
 test("does not turn missing or malformed episode lists into clearing patches", () => {
@@ -431,21 +459,6 @@ test("does not turn missing or malformed episode lists into clearing patches", (
         ],
         anime: [{ show: { ids: { imdb: "tt2098220" } }, seasons: [{ number: 1 }] }]
     })).toEqual([]);
-});
-
-test("treats bare anime episode numbers as season one", () => {
-    const history = parseSimklHistory({
-        anime: [{
-            last_watched_at: "2026-08-12T09:00:00Z",
-            last_watched: "E148",
-            show: { title: "Hunter x Hunter", year: 2011, ids: { imdb: "tt2098220" } }
-        }]
-    }, []);
-
-    expect(history).toHaveLength(1);
-    expect(history[0].id).toBe("tt2098220:1:148");
-    expect(history[0].episode?.season).toBe(1);
-    expect(history[0].episode?.episode).toBe(148);
 });
 
 test("turns paused playback sessions into unwatched progress entries", () => {
@@ -474,20 +487,23 @@ test("turns paused playback sessions into unwatched progress entries", () => {
     expect(history[1].episode?.name).toBe("The Travellers");
 });
 
-test("reads anime playback sessions, which name the title and episode differently", () => {
-    // Live shape: the title arrives under `anime` and the episode under `number`.
-    const history = parseSimklHistory(null, [{
-        id: 29485829,
+test("leaves anime out of the IMDb-keyed history entirely", () => {
+    // Simkl files a later cour under the series it continues, so an entry built from that id
+    // would point at a different show. Anime reaches the history through placed cours instead.
+    const history = parseSimklHistory({
+        anime: [{
+            last_watched_at: "2026-08-30T08:45:48Z",
+            last_watched: "E13",
+            show: { title: "Bleach", ids: { imdb: "tt14986406", mal: "41467" } }
+        }]
+    }, [{
         progress: 46.14,
         paused_at: "2026-08-28T16:16:32Z",
         type: "episode",
-        episode: { season: 1, number: 22, title: "The Defeated", tvdb_season: 1, tvdb_number: 22 },
-        anime: { title: "Attack on Titan", year: 2013, ids: { imdb: "tt2560140" } }
+        episode: { season: 1, number: 22 },
+        anime: { title: "Attack on Titan", ids: { imdb: "tt2560140", mal: "16498" } }
     }]);
-
-    expect(history.map((entry) => [entry.id, entry.watched, entry.progress])).toEqual([
-        ["tt2560140:1:22", false, 46.14]
-    ]);
+    expect(history).toEqual([]);
 });
 
 test("drops remote items that carry no usable imdb id or position", () => {

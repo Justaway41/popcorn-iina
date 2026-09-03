@@ -1,7 +1,7 @@
 import type { WatchedCour, WatchedShowPatch, WatchHistoryEntry } from "../shared/history";
 import type { PlaybackContext } from "../shared/messages";
 import type { AnimeCourEpisode } from "../shared/simkl";
-import type { Episode } from "../shared/stremio";
+import type { Episode, Media } from "../shared/stremio";
 import { buildCinemetaSeriesUrl, isImdbId, parseMediaMetadata } from "../shared/stremio";
 import { createJsonClient, safeJson } from "./http";
 import {
@@ -23,8 +23,90 @@ const ANILIST_SEQUEL_QUERY = "query ($id: Int) { Media(id: $id) { relations { ed
     "node { id idMal format episodes startDate { year month } } } } } }";
 /** Longer runs exist, but past this a chain is more likely a loop in the relation data. */
 const MAX_SEQUEL_HOPS = 12;
+/** New titles looked up per sync, so a first run cannot burst through AniList's rate limit. */
+const MAX_CHAIN_LOOKUPS_PER_PASS = 6;
 
 type SeasonCounts = Array<{ season: number; count: number }>;
+type Coordinate = { season: number; episode: number };
+
+export interface PlacedCours {
+    patches: WatchedShowPatch[];
+    entries: WatchHistoryEntry[];
+}
+
+interface SeriesDetails {
+    media: Media;
+    episodes: Episode[];
+    seasons: SeasonCounts;
+}
+
+interface ShowCandidate {
+    imdbId: string;
+    name: string;
+    preview: Media;
+}
+
+interface ShowPlacement {
+    details: SeriesDetails;
+    episodes: Set<string>;
+    watched?: { at: Coordinate; playedAt: string };
+    paused?: { at: Coordinate; playedAt: string; progress: number };
+}
+
+function showCandidate(media: Media): ShowCandidate {
+    return { imdbId: media.imdbId, name: media.name, preview: media };
+}
+
+function courCandidate(cour: WatchedCour): ShowCandidate {
+    return {
+        imdbId: cour.imdbId,
+        name: cour.name,
+        preview: {
+            id: cour.imdbId,
+            imdbId: cour.imdbId,
+            type: "series",
+            name: cour.name,
+            releaseInfo: cour.year,
+            poster: ""
+        }
+    };
+}
+
+function isLater(candidate: Coordinate, current: Coordinate | undefined): boolean {
+    if (!current) return true;
+    return candidate.season !== current.season
+        ? candidate.season > current.season
+        : candidate.episode > current.episode;
+}
+
+function buildEntry(
+    details: SeriesDetails,
+    at: Coordinate,
+    playedAt: string,
+    watched: boolean,
+    progress: number
+): WatchHistoryEntry {
+    const id = `${details.media.imdbId}:${at.season}:${at.episode}`;
+    const known = details.episodes.find(
+        (episode) => episode.season === at.season && episode.episode === at.episode
+    );
+    return {
+        id,
+        media: details.media,
+        episode: known ?? {
+            id,
+            name: `Episode ${at.season}x${at.episode}`,
+            season: at.season,
+            episode: at.episode,
+            aired: "",
+            description: "",
+            thumbnail: ""
+        },
+        lastPlayedAt: playedAt,
+        watched,
+        progress
+    };
+}
 
 export interface AnimeChainClient {
     /**
@@ -33,21 +115,22 @@ export interface AnimeChainClient {
      */
     resolveEpisode(context: PlaybackContext, episode: Episode): Promise<AnimeCourEpisode | null>;
     /**
-     * Watched episodes Simkl reported per anime cour, placed back onto the seasons the sidebar
-     * draws. Only shows already in the local history are considered: a cour carries no id that
-     * leads to the series Popcorn shows, so its chain is the only way to recognise it.
+     * Everything Simkl reported per anime cour, placed back onto the seasons the sidebar draws:
+     * the watched marks, and the Continue Watching entry for the furthest episode of each show.
+     * A cour carries no id that leads to the series Popcorn shows, so the chain is the only way
+     * to recognise it and anything it cannot place is left out rather than guessed at.
      */
-    resolveWatchedCours(
+    placeWatchedCours(
         cours: WatchedCour[],
         history: WatchHistoryEntry[]
-    ): Promise<WatchedShowPatch[]>;
+    ): Promise<PlacedCours>;
 }
 
 export function createAnimeChainClient(http: IINA.API.HTTP): AnimeChainClient {
     const json = createJsonClient(http);
     const chains = new Map<string, AnimeEntry[] | null>();
     const kitsuMalIds = new Map<string, string>();
-    const seasonCounts = new Map<string, SeasonCounts | null>();
+    const series = new Map<string, SeriesDetails | null>();
 
     /**
      * The franchise's cours in airing order, found from the title. One request finds the first
@@ -98,21 +181,74 @@ export function createAnimeChainClient(http: IINA.API.HTTP): AnimeChainClient {
         return malId;
     }
 
-    /** How many episodes Cinemeta gives each season, which is what the chain is laid against. */
-    async function loadSeasonCounts(imdbId: string, preview: {
-        id: string; imdbId: string; type: "series"; name: string; releaseInfo: string; poster: string;
-    }): Promise<SeasonCounts | null> {
-        const cached = seasonCounts.get(imdbId);
+    /**
+     * Cinemeta's own view of the series: the seasons the chain is laid against, plus the media
+     * and episode records a Continue Watching card is built from.
+     */
+    async function loadSeries(candidate: ShowCandidate): Promise<SeriesDetails | null> {
+        const cached = series.get(candidate.imdbId);
         if (cached !== undefined) return cached;
-        const details = parseMediaMetadata(
-            await json.getJson(buildCinemetaSeriesUrl(imdbId)),
+        const parsed = parseMediaMetadata(
+            await json.getJson(buildCinemetaSeriesUrl(candidate.imdbId)),
             { manifestUrl: "" },
-            preview
+            candidate.preview
         );
-        const counts = seasonEpisodeCounts(details.episodes);
-        const value = counts.length > 0 ? counts : null;
-        seasonCounts.set(imdbId, value);
-        return value;
+        const seasons = seasonEpisodeCounts(parsed.episodes);
+        const details = seasons.length > 0
+            ? { media: parsed.media, episodes: parsed.episodes, seasons }
+            : null;
+        series.set(candidate.imdbId, details);
+        return details;
+    }
+
+    /**
+     * Which show each cour belongs to. A cour carries no id that leads there on its own: the
+     * IMDb id Simkl files a later cour under names the series it continues, so a show already
+     * in the local history always wins over it. Candidates are ordered so that nearly every
+     * chain lookup is one that matches - the shows a cour names first, then the rest of the
+     * history, then the cour's own id for a show never played on this device.
+     */
+    async function indexCandidates(
+        cours: WatchedCour[],
+        history: WatchHistoryEntry[]
+    ): Promise<Map<string, ShowCandidate>> {
+        const named = new Set(cours.map((cour) => cour.imdbId).filter((id) => id));
+        const known = history.flatMap((entry) =>
+            entry.media.type === "series" ? [showCandidate(entry.media)] : []);
+        const candidates = [
+            ...known.filter((candidate) => named.has(candidate.imdbId)),
+            ...known.filter((candidate) => !named.has(candidate.imdbId)),
+            ...cours.flatMap((cour) => cour.imdbId ? [courCandidate(cour)] : [])
+        ];
+
+        const wanted = new Set(cours.map((cour) => cour.malId));
+        const owners = new Map<string, ShowCandidate>();
+        const seen = new Set<string>();
+        let lookups = 0;
+        for (const candidate of candidates) {
+            if (wanted.size === 0) break;
+            if (!isImdbId(candidate.imdbId) || seen.has(candidate.imdbId)) continue;
+            seen.add(candidate.imdbId);
+            // AniList allows 90 requests a minute and a chain costs one per cour, so a history
+            // full of titles it has never heard of is walked over several syncs rather than in
+            // one burst. Titles already looked up cost nothing and do not count.
+            if (!chains.has(candidate.name)) {
+                if (lookups >= MAX_CHAIN_LOOKUPS_PER_PASS) continue;
+                lookups += 1;
+            }
+            try {
+                const chain = await loadChain(candidate.name);
+                if (!chain) continue;
+                for (const cour of chain) {
+                    if (!wanted.has(cour.malId) || owners.has(cour.malId)) continue;
+                    owners.set(cour.malId, candidate);
+                    wanted.delete(cour.malId);
+                }
+            } catch (error) {
+                logDebug("Popcorn: Anime chain lookup failed:", formatError(error));
+            }
+        }
+        return owners;
     }
 
     return {
@@ -132,46 +268,74 @@ export function createAnimeChainClient(http: IINA.API.HTTP): AnimeChainClient {
             );
         },
 
-        async resolveWatchedCours(cours, history) {
-            const byMal = new Map(cours.map((cour) => [cour.malId, cour.episodes]));
-            if (byMal.size === 0) return [];
-            const patches: WatchedShowPatch[] = [];
-            const seen = new Set<string>();
-            for (const entry of history) {
-                // History runs newest first, so the shows being watched are reached before the
-                // chain lookups have to walk the rest of it.
-                if (byMal.size === 0) break;
-                const media = entry.media;
-                if (media.type !== "series" || !isImdbId(media.imdbId)) continue;
-                if (seen.has(media.imdbId)) continue;
-                seen.add(media.imdbId);
+        async placeWatchedCours(cours, history) {
+            const placed: PlacedCours = { patches: [], entries: [] };
+            if (cours.length === 0) return placed;
+            const owners = await indexCandidates(cours, history);
+            const shows = new Map<string, ShowPlacement>();
+            for (const cour of cours) {
                 try {
-                    const chain = await loadChain(media.name);
-                    // Nothing watched on Simkl belongs to this show, so it costs no more lookups.
-                    if (!chain || !chain.some((cour) => byMal.has(cour.malId))) continue;
-                    const seasons = await loadSeasonCounts(media.imdbId, {
-                        id: media.id,
-                        imdbId: media.imdbId,
-                        type: "series",
-                        name: media.name,
-                        releaseInfo: media.releaseInfo,
-                        poster: media.poster
-                    });
-                    if (!seasons) continue;
-                    const episodes = new Set<string>();
-                    for (const cour of chain) {
-                        for (const number of byMal.get(cour.malId) ?? []) {
-                            const placed = mapCourEpisode(seasons, chain, cour.malId, number);
-                            if (placed) episodes.add(`${placed.season}:${placed.episode}`);
-                        }
-                        byMal.delete(cour.malId);
+                    const owner = owners.get(cour.malId);
+                    let candidate = owner ?? null;
+                    let details = owner ? await loadSeries(owner) : null;
+                    let chain = owner && details ? await loadChain(owner.name) : null;
+                    // A cour AniList cannot chain, or whose show Cinemeta has never seen because
+                    // the season was given its own IMDb entry, still has one honest reading:
+                    // when the id leads back to this cour, the cour is the show's first and its
+                    // numbering is the show's season one. Anything else is left out rather than
+                    // placed on a show it does not belong to.
+                    if (!details && cour.ownsImdb && isImdbId(cour.imdbId)) {
+                        candidate = courCandidate(cour);
+                        details = await loadSeries(candidate) ??
+                            { media: candidate.preview, episodes: [], seasons: [] };
+                        chain = null;
                     }
-                    if (episodes.size > 0) patches.push({ id: media.imdbId, episodes: [...episodes] });
+                    if (!candidate || !details) continue;
+                    const show = shows.get(candidate.imdbId) ?? { details, episodes: new Set<string>() };
+                    shows.set(candidate.imdbId, show);
+                    const place = (number: number): Coordinate | null => {
+                        const at = chain
+                            ? mapCourEpisode(details.seasons, chain, cour.malId, number)
+                            : null;
+                        if (at || chain) return at;
+                        const first = details.seasons[0];
+                        // With no seasons to check against, the cour's own numbering is all
+                        // there is; with seasons, a number past the first is a later one the
+                        // chain would have had to place.
+                        if (!first) return { season: 1, episode: number };
+                        return number <= first.count ? { season: first.season, episode: number } : null;
+                    };
+                    for (const number of cour.episodes) {
+                        const at = place(number);
+                        if (!at) continue;
+                        show.episodes.add(`${at.season}:${at.episode}`);
+                        if (isLater(at, show.watched?.at)) {
+                            show.watched = { at, playedAt: cour.lastWatchedAt };
+                        }
+                    }
+                    const session = cour.paused;
+                    const pausedAt = session ? place(session.episode) : null;
+                    if (session && pausedAt && isLater(pausedAt, show.paused?.at)) {
+                        show.paused = { at: pausedAt, playedAt: session.at, progress: session.progress };
+                    }
                 } catch (error) {
                     logDebug("Popcorn: Anime cour placement failed:", formatError(error));
                 }
             }
-            return patches;
+            for (const [imdbId, show] of shows) {
+                if (show.episodes.size > 0) {
+                    placed.patches.push({ id: imdbId, episodes: [...show.episodes] });
+                }
+                if (show.watched) {
+                    placed.entries.push(buildEntry(show.details, show.watched.at, show.watched.playedAt, true, 100));
+                }
+                if (show.paused) {
+                    placed.entries.push(
+                        buildEntry(show.details, show.paused.at, show.paused.playedAt, false, show.paused.progress)
+                    );
+                }
+            }
+            return placed;
         }
     };
 }

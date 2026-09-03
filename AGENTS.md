@@ -272,11 +272,23 @@ exact inverses over one shared walk of the chain; keep them that way. Verified l
 2026: `anime: {ids: {mal: 56784}}` with episode 6 resolves to Bleach cour three's "The Holy
 Newborn", which is Cinemeta's S3E6, while the same episode addressed by IMDb id 404s.
 
-Cour state is stored raw in `episodeWatchState.simklCours` and placed by the plugin, never by the
-preferences window, which has no way to look up a chain. Placement merges rather than replaces:
-one Popcorn show spans several Simkl cours and an incremental pull carries only the ones that
-changed. A show's own entry does return its full episode list even under `date_from`, so
-`shows[]` patches still replace.
+Anime never becomes an IMDb-keyed history entry or watched patch. Everything anime - the episode
+marks and the Continue Watching card - comes from cour state stored raw in
+`episodeWatchState.simklCours` and placed by `placeWatchedCours`, never by the preferences window,
+which has no way to look up a chain. Placement merges rather than replaces: one Popcorn show spans
+several Simkl cours and an incremental pull carries only the ones that changed. A show's own entry
+does return its full episode list even under `date_from`, so `shows[]` patches still replace.
+
+Placement tries the sequel chain of a show already in the local history first, then the chain of
+the cour's own IMDb id. When neither can place it, one fallback remains: `ownsImdb` records
+whether `/search/id?imdb=` resolves back to that cour's own Simkl id, and only then is the cour
+read as season one of that IMDb id. This is what keeps shows AniList cannot chain (Slime resolves
+to a single-entry chain) and shows Cinemeta has never seen (Re:Zero's newest season has its own
+IMDb id with no Cinemeta record) working, while refusing to place a cour whose id names a
+different show - a live account had Slime's fourth-cour episodes 18-20 landing on season 1.
+A cour that no route can place is left out rather than guessed at. New chain lookups are capped
+per sync by `MAX_CHAIN_LOOKUPS_PER_PASS`, since AniList allows 90 requests a minute and a first
+run would otherwise walk the whole history at once.
 
 Simkl history sync keeps `/sync/activities` as its incremental gate and requests
 `/sync/all-items/?extended=full_anime_seasons&episode_watched_at=yes&include_all_episodes=yes`,
