@@ -76,31 +76,182 @@ export function parseKitsuMalId(value: unknown): string {
     return "";
 }
 
-/**
- * The MyAnimeList id ani.zip maps an IMDb id onto. AniSkip is keyed by MAL id alone, so an anime
- * opened through Cinemeta - which knows only IMDb ids - had no way to reach it and never got
- * intro or outro timings. A non-anime IMDb id simply maps to nothing.
- */
-export function parseAniZipMalId(value: unknown): string {
-    const id = record(record(value)?.mappings)?.mal_id;
-    return typeof id === "number" && Number.isInteger(id) && id > 0 ? String(id) : "";
+/** One cour of an anime as AniList lists it: the unit AniSkip keys its timings by. */
+export interface AnimeEntry {
+    anilistId: number;
+    malId: string;
+    /** Null while airing; the entry then covers whatever remains of its season. */
+    episodes: number | null;
 }
 
+/** Formats that are a run of episodes. Films, OVAs, and specials are not cours of the show. */
+const ANIME_SERIES_FORMATS = new Set(["TV", "TV_SHORT", "ONA"]);
+
+/**
+ * A Cinemeta season this close in length to a cour is that cour: the difference is a recap or
+ * special one side counts and the other does not, and letting it shift every later season by
+ * that much would put each of them one or two episodes off.
+ */
+const SEASON_SNAP_TOLERANCE = 2;
+
+/**
+ * How far a submission's runtime may sit from the file's before it is for a different cut.
+ * AniSkip filters on `episodeLength` itself, within about fifteen seconds, which discarded every
+ * submission for a rip trimmed differently from the submitter's: a 1443s file against a 1475s
+ * submission answered 404 and the episode looked unknown. Asking for every submission and
+ * choosing the nearest keeps those; past a minute the rip is a different edit.
+ */
+export const ANISKIP_LENGTH_TOLERANCE_SEC = 60;
+
+function normalizeTitle(value: string): string {
+    return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function parseAnimeEntry(node: Record<string, unknown> | null): AnimeEntry | null {
+    if (!node || !ANIME_SERIES_FORMATS.has(stringValue(node.format))) return null;
+    const anilistId = node.id;
+    const malId = node.idMal;
+    if (typeof anilistId !== "number" || !Number.isInteger(anilistId) || anilistId <= 0) return null;
+    if (typeof malId !== "number" || !Number.isInteger(malId) || malId <= 0) return null;
+    const episodes = numberValue(node.episodes);
+    return { anilistId, malId: String(malId), episodes: episodes !== null && episodes > 0 ? episodes : null };
+}
+
+/** Month index of an entry's start, so cours sort by when they aired; unknown sorts last. */
+function startOrder(node: Record<string, unknown> | null): number {
+    const date = record(node?.startDate);
+    return (numberValue(date?.year) ?? 9999) * 12 + (numberValue(date?.month) ?? 0);
+}
+
+/**
+ * The first cour of the franchise a title names, from an AniList search. The search is fuzzy
+ * and answers anything, so a result counts only when one of its titles is the name asked for:
+ * exactly, or as the other's leading words, the way `Attack on Titan` leads `Attack on Titan:
+ * Junior High`. Exact beats leading and the earliest wins within each, which is what makes the
+ * root the first season rather than whichever sequel the search ranked higher. No match at all
+ * is how live action is told apart from anime.
+ */
+export function parseAniListRoot(value: unknown, name: string): AnimeEntry | null {
+    const wanted = normalizeTitle(name);
+    const media = record(record(record(value)?.data)?.Page)?.media;
+    if (!wanted || !Array.isArray(media)) return null;
+    let best: { entry: AnimeEntry; exact: boolean; order: number } | null = null;
+    for (const item of media) {
+        const node = record(item);
+        const entry = parseAnimeEntry(node);
+        if (!node || !entry) continue;
+        const title = record(node.title);
+        const synonyms = Array.isArray(node.synonyms) ? node.synonyms : [];
+        const names = [title?.english, title?.romaji, ...synonyms]
+            .map((candidate) => normalizeTitle(stringValue(candidate)))
+            .filter(Boolean);
+        const exact = names.includes(wanted);
+        const leading = exact ||
+            names.some((candidate) => wanted.startsWith(`${candidate} `) || candidate.startsWith(`${wanted} `));
+        if (!leading) continue;
+        const order = startOrder(node);
+        if (!best || (exact && !best.exact) || (exact === best.exact && order < best.order)) {
+            best = { entry, exact, order };
+        }
+    }
+    return best?.entry ?? null;
+}
+
+/** The cour that continues the one queried, from its AniList relations; null at the end of the run. */
+export function parseAniListSequel(value: unknown): AnimeEntry | null {
+    const edges = record(record(record(record(value)?.data)?.Media)?.relations)?.edges;
+    if (!Array.isArray(edges)) return null;
+    let best: { entry: AnimeEntry; order: number } | null = null;
+    for (const item of edges) {
+        const edge = record(item);
+        if (edge?.relationType !== "SEQUEL") continue;
+        const node = record(edge.node);
+        const entry = parseAnimeEntry(node);
+        if (!entry) continue;
+        const order = startOrder(node);
+        if (!best || order < best.order) best = { entry, order };
+    }
+    return best?.entry ?? null;
+}
+
+/** Episodes per season of a Cinemeta episode list, specials (season 0) left out. */
+export function seasonEpisodeCounts(
+    episodes: Array<{ season: number; episode: number }>
+): Array<{ season: number; count: number }> {
+    const counts = new Map<number, number>();
+    for (const episode of episodes) {
+        if (episode.season > 0) counts.set(episode.season, (counts.get(episode.season) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+        .map(([season, count]) => ({ season, count }))
+        .sort((a, b) => a.season - b.season);
+}
+
+/**
+ * Where a Cinemeta season and episode fall in the sequel chain. Cinemeta numbers a show in
+ * seasons; MyAnimeList numbers it in cours, and AniSkip is keyed by cour, so asking it for
+ * "season 2, episode 5" with the first cour's id answers with the first season's timings. The
+ * two schemes rarely agree - Attack on Titan season 3 is two MAL entries - so the chain is
+ * consumed in order, each season taking as many cour episodes as it has, and the episode is
+ * renumbered within the cour it lands in.
+ */
+export function mapAnimeEpisode(
+    seasons: Array<{ season: number; count: number }>,
+    chain: AnimeEntry[],
+    season: number,
+    episode: number
+): { malId: string; episode: number } | null {
+    let index = 0;
+    let used = 0;
+    for (const current of seasons) {
+        let filled = 0;
+        while (filled < current.count && index < chain.length) {
+            const entry = chain[index];
+            const total = entry.episodes ?? Number.POSITIVE_INFINITY;
+            const snap = used === 0 && filled === 0 && Number.isFinite(total) &&
+                Math.abs(total - current.count) <= SEASON_SNAP_TOLERANCE;
+            const take = snap ? current.count : Math.min(total - used, current.count - filled);
+            if (current.season === season && episode > filled && episode <= filled + take) {
+                return { malId: entry.malId, episode: used + episode - filled };
+            }
+            filled += take;
+            used += take;
+            if (snap || used >= total) {
+                index += 1;
+                used = 0;
+            }
+        }
+        if (current.season === season) return null;
+    }
+    return null;
+}
+
+/**
+ * The interval of one type from an AniSkip answer that holds every submission for the episode.
+ * With a duration, the submission nearest the file's runtime wins, and one further away than
+ * `ANISKIP_LENGTH_TOLERANCE_SEC` is for a different cut and is left alone.
+ */
 export function parseAniSkipInterval(
     value: unknown,
-    skipType: "op" | "ed" = "op"
+    skipType: "op" | "ed" = "op",
+    duration = 0
 ): IntroInterval | null {
     const response = record(value);
     if (response?.found !== true || !Array.isArray(response.results)) return null;
+    let best: { interval: IntroInterval; distance: number } | null = null;
     for (const result of response.results) {
         const item = record(result);
         if (item?.skipType !== skipType) continue;
         const interval = record(item.interval);
         const start = numberValue(interval?.startTime);
         const end = numberValue(interval?.endTime);
-        if (start !== null && end !== null && start >= 0 && start < end) return { start, end };
+        if (start === null || end === null || start < 0 || start >= end) continue;
+        const length = numberValue(item.episodeLength);
+        const distance = duration > 0 && length !== null ? Math.abs(length - duration) : 0;
+        if (distance > ANISKIP_LENGTH_TOLERANCE_SEC) continue;
+        if (!best || distance < best.distance) best = { interval: { start, end }, distance };
     }
-    return null;
+    return best?.interval ?? null;
 }
 
 /**

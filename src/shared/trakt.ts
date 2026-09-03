@@ -380,8 +380,16 @@ export function mergeWatchHistory(
         const existing = entries.get(key);
         entries.set(key, existing ? mergeEntry(existing, entry) : entry);
     }
+    const unfinishedTitles = new Set<string>();
     return [...entries.values()]
         .sort((a, b) => timestamp(b.lastPlayedAt) - timestamp(a.lastPlayedAt))
+        .filter((entry) => {
+            if (entry.watched) return true;
+            const id = historyTitleId(entry);
+            if (unfinishedTitles.has(id)) return false;
+            unfinishedTitles.add(id);
+            return true;
+        })
         .slice(0, MAX_HISTORY_ITEMS);
 }
 

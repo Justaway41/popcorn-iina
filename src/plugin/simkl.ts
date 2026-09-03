@@ -1,4 +1,4 @@
-import type { WatchHistoryEntry } from "../shared/history";
+import type { WatchedShowPatch, WatchHistoryEntry } from "../shared/history";
 import type { PlaybackContext } from "../shared/messages";
 import {
     parseSimklState,
@@ -15,7 +15,10 @@ export interface IinaSimklClient {
         context: PlaybackContext,
         progress: number
     ): Promise<void>;
-    sync(history: WatchHistoryEntry[]): Promise<WatchHistoryEntry[]>;
+    sync(history: WatchHistoryEntry[]): Promise<{
+        history: WatchHistoryEntry[];
+        watchedPatches: WatchedShowPatch[];
+    }>;
 }
 
 export function createIinaSimklClient(
@@ -28,9 +31,10 @@ export function createIinaSimklClient(
     // Only write back if the connection did not change underneath us, so a request in
     // flight cannot resurrect a token cleared in preferences.
     const saveIfCurrent = (input: SimklState, output: SimklState) => {
-        if (!sameConnection(read(), input)) return;
+        if (!sameConnection(read(), input)) return false;
         preferences.set("simkl", output);
         preferences.sync();
+        return true;
     };
     let pending = Promise.resolve();
     const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
@@ -57,14 +61,16 @@ export function createIinaSimklClient(
         sync(history) {
             return enqueue(async () => {
                 const state = read();
-                if (!state.accessToken) return history;
+                if (!state.accessToken) return { history, watchedPatches: [] };
                 try {
                     const result = await syncSimklHistory(transport, state, history);
-                    saveIfCurrent(state, result.state);
-                    return result.history;
+                    if (!saveIfCurrent(state, result.state)) {
+                        return { history, watchedPatches: [] };
+                    }
+                    return { history: result.history, watchedPatches: result.watchedPatches };
                 } catch (error) {
                     onError(error);
-                    return history;
+                    return { history, watchedPatches: [] };
                 }
             });
         }

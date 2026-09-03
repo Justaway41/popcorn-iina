@@ -10,6 +10,18 @@ export interface WatchHistoryEntry {
     progress: number | null;
 }
 
+export interface WatchedShow {
+    id: string;
+    episodes: string[];
+}
+
+export interface EpisodeWatchState {
+    local: WatchedShow[];
+    simkl: WatchedShow[];
+}
+
+export type WatchedShowPatch = WatchedShow;
+
 const MAX_HISTORY_ITEMS = 100;
 
 export function parseWatchHistory(value: unknown): WatchHistoryEntry[] {
@@ -20,6 +32,75 @@ export function parseWatchHistory(value: unknown): WatchHistoryEntry[] {
     } catch {
         return [];
     }
+}
+
+export function parseEpisodeWatchState(
+    value: unknown,
+    legacyHistory: WatchHistoryEntry[] = []
+): EpisodeWatchState {
+    let stored: unknown = value;
+    try {
+        stored = typeof value === "string" ? JSON.parse(value) as unknown : value;
+    } catch {
+        stored = null;
+    }
+    const item = getRecord(stored);
+    const state = {
+        local: parseWatchedShows(item?.local),
+        simkl: parseWatchedShows(item?.simkl)
+    };
+    for (const entry of legacyHistory) {
+        if (!entry.watched || !entry.episode) continue;
+        addWatchedEpisode(state.local, historyTitleId(entry), episodeCoordinate(entry.episode));
+    }
+    return state;
+}
+
+export function episodeCoordinate(episode: Episode): string {
+    return `${episode.season}:${episode.episode}`;
+}
+
+export function markEpisodeWatched(
+    state: EpisodeWatchState,
+    context: PlaybackContext
+): EpisodeWatchState {
+    if (!context.episode) return state;
+    const next = parseEpisodeWatchState(state);
+    addWatchedEpisode(next.local, mediaTitleId(context.media), episodeCoordinate(context.episode));
+    return next;
+}
+
+export function applySimklWatchedPatches(
+    state: EpisodeWatchState,
+    patches: WatchedShowPatch[]
+): EpisodeWatchState {
+    const next = parseEpisodeWatchState(state);
+    for (const patch of parseWatchedShows(patches)) {
+        next.simkl = next.simkl.filter((show) => show.id !== patch.id);
+        if (patch.episodes.length > 0) next.simkl.push(patch);
+    }
+    return next;
+}
+
+export function clearSimklWatched(state: EpisodeWatchState): EpisodeWatchState {
+    return { ...parseEpisodeWatchState(state), simkl: [] };
+}
+
+export function isEpisodeWatched(
+    state: EpisodeWatchState,
+    media: Media,
+    episode: Episode,
+    legacyHistory: WatchHistoryEntry[] = []
+): boolean {
+    const titleId = mediaTitleId(media);
+    const coordinate = episodeCoordinate(episode);
+    if ([...state.local, ...state.simkl].some((show) =>
+        show.id === titleId && show.episodes.includes(coordinate))) return true;
+    return legacyHistory.some((entry) =>
+        entry.watched
+        && entry.episode != null
+        && historyTitleId(entry) === titleId
+        && episodeCoordinate(entry.episode) === coordinate);
 }
 
 export function recordPlayback(
@@ -40,7 +121,11 @@ export function recordPlayback(
         watched: Boolean(existing?.watched || progress >= 90),
         progress
     };
-    return [entry, ...entries.filter((item) => item.id !== id)].slice(0, MAX_HISTORY_ITEMS);
+    const titleId = mediaTitleId(context.media);
+    return [entry, ...entries.filter((item) =>
+        item.id !== id
+        && (entry.watched || item.watched || historyTitleId(item) !== titleId)
+    )].slice(0, MAX_HISTORY_ITEMS);
 }
 
 /**
@@ -72,7 +157,7 @@ export function latestPerTitle(entries: WatchHistoryEntry[]): WatchHistoryEntry[
 }
 
 export function historyTitleId(entry: WatchHistoryEntry): string {
-    return entry.media.imdbId || entry.media.providerId || entry.media.id;
+    return mediaTitleId(entry.media);
 }
 
 export function getHistoryEntry(
@@ -115,6 +200,52 @@ function normalizeProgress(value: unknown, watched: boolean): number | null {
         return watched ? 100 : null;
     }
     return Math.max(0, Math.min(100, value));
+}
+
+function parseWatchedShows(value: unknown): WatchedShow[] {
+    if (!Array.isArray(value)) return [];
+    const shows: WatchedShow[] = [];
+    for (const valueShow of value) {
+        const item = getRecord(valueShow);
+        const id = getString(item?.id).trim();
+        if (!id || !Array.isArray(item?.episodes)) continue;
+        const existing = shows.find((show) => show.id === id);
+        const show = existing || { id, episodes: [] };
+        if (!existing) shows.push(show);
+        for (const coordinate of item.episodes) {
+            if (typeof coordinate !== "string" || !isEpisodeCoordinate(coordinate)) continue;
+            if (!show.episodes.includes(coordinate)) show.episodes.push(coordinate);
+        }
+        show.episodes.sort(compareEpisodeCoordinates);
+    }
+    return shows;
+}
+
+function addWatchedEpisode(shows: WatchedShow[], id: string, coordinate: string): void {
+    if (!id || !isEpisodeCoordinate(coordinate)) return;
+    let show = shows.find((item) => item.id === id);
+    if (!show) {
+        show = { id, episodes: [] };
+        shows.push(show);
+    }
+    if (!show.episodes.includes(coordinate)) show.episodes.push(coordinate);
+    show.episodes.sort(compareEpisodeCoordinates);
+}
+
+function isEpisodeCoordinate(value: string): boolean {
+    const match = /^(\d+):(\d+)$/.exec(value);
+    if (!match) return false;
+    return match.slice(1).every((part) => Number.isSafeInteger(Number(part)));
+}
+
+function compareEpisodeCoordinates(first: string, second: string): number {
+    const [firstSeason, firstEpisode] = first.split(":").map(Number);
+    const [secondSeason, secondEpisode] = second.split(":").map(Number);
+    return firstSeason - secondSeason || firstEpisode - secondEpisode;
+}
+
+function mediaTitleId(media: Media): string {
+    return media.imdbId || media.providerId || media.id;
 }
 
 function parseMedia(value: unknown): Media | null {

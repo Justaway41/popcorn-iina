@@ -3,9 +3,14 @@ import { expect, test } from "bun:test";
 import type { PlaybackContext } from "./messages";
 
 import {
+    applySimklWatchedPatches,
+    clearSimklWatched,
     getHistoryEntry,
     getResumePercent,
+    isEpisodeWatched,
     latestPerTitle,
+    markEpisodeWatched,
+    parseEpisodeWatchState,
     parseWatchHistory,
     recordPlayback,
     removeHistoryEntry
@@ -87,6 +92,24 @@ test("uses episode id and metadata for series history", () => {
     };
     const result = recordPlayback([], { media, episode, episodes: [episode] }, 5, "now");
     expect(result[0]).toMatchObject({ id: episode.id, media, episode, watched: false });
+});
+
+test("starting a newer local episode retires the older unfinished episode", () => {
+    const first = episode(1, 1);
+    const second = episode(1, 2);
+    const older = recordPlayback([], { media: show, episode: first, episodes: [first, second] }, 40, "old");
+    const watched = recordPlayback(older, { media: show, episode: first, episodes: [first, second] }, 90, "done");
+    const withOldPause = [
+        ...watched,
+        { ...watched[0], id: "tt9:1:0", episode: episode(1, 0), watched: false, progress: 40 }
+    ];
+
+    expect(recordPlayback(
+        withOldPause,
+        { media: show, episode: second, episodes: [first, second] },
+        10,
+        "new"
+    ).map(({ id }) => id)).toEqual([second.id, first.id]);
 });
 
 test("stores exact progress and keeps watched state sticky", () => {
@@ -193,4 +216,61 @@ test("removing an episode removes the whole show", () => {
     expect(removeHistoryEntry(seriesEntries, "tt9:1:3").map((entry) => entry.id)).toEqual(["tt1"]);
     // removing the collapsed card must not leave the earlier episodes behind
     expect(removeHistoryEntry(seriesEntries, "tt9:1:1").map((entry) => entry.id)).toEqual(["tt1"]);
+});
+
+test("normalizes compact episode watch state", () => {
+    expect(parseEpisodeWatchState({
+        local: [{ id: "tt9", episodes: ["2:3", "2:3", "bad", "-1:2"] }],
+        simkl: [{ id: "tt9", episodes: ["1:2"] }, null]
+    })).toEqual({
+        local: [{ id: "tt9", episodes: ["2:3"] }],
+        simkl: [{ id: "tt9", episodes: ["1:2"] }]
+    });
+    expect(parseEpisodeWatchState("not json")).toEqual({ local: [], simkl: [] });
+});
+
+test("marks local episodes once and migrates watched legacy entries", () => {
+    const context: PlaybackContext = { media: show, episode: episode(2, 3), episodes: [] };
+    const migrated = parseEpisodeWatchState({}, seriesEntries);
+    const marked = markEpisodeWatched(migrated, context);
+    expect(markEpisodeWatched(marked, context).local).toEqual([
+        { id: "tt9", episodes: ["1:1", "1:2", "1:3", "2:3"] }
+    ]);
+});
+
+test("replaces only the changed Simkl show and clears only Simkl state", () => {
+    const state = parseEpisodeWatchState({
+        local: [{ id: "tt9", episodes: ["1:1"] }],
+        simkl: [
+            { id: "tt9", episodes: ["1:1"] },
+            { id: "tt8", episodes: ["2:2"] }
+        ]
+    });
+    const patched = applySimklWatchedPatches(state, [{ id: "tt9", episodes: ["1:2"] }]);
+    expect(patched).toEqual({
+        local: [{ id: "tt9", episodes: ["1:1"] }],
+        simkl: [
+            { id: "tt8", episodes: ["2:2"] },
+            { id: "tt9", episodes: ["1:2"] }
+        ]
+    });
+    expect(applySimklWatchedPatches(patched, [{ id: "tt9", episodes: [] }])).toEqual({
+        local: [{ id: "tt9", episodes: ["1:1"] }],
+        simkl: [{ id: "tt8", episodes: ["2:2"] }]
+    });
+    expect(clearSimklWatched(patched)).toEqual({
+        local: [{ id: "tt9", episodes: ["1:1"] }],
+        simkl: []
+    });
+});
+
+test("checks exact local, Simkl, and legacy episode marks", () => {
+    const state = parseEpisodeWatchState({
+        local: [{ id: "tt9", episodes: ["1:1"] }],
+        simkl: [{ id: "tt9", episodes: ["1:3"] }]
+    });
+    expect(isEpisodeWatched(state, show, episode(1, 1))).toBe(true);
+    expect(isEpisodeWatched(state, show, episode(1, 2), seriesEntries)).toBe(true);
+    expect(isEpisodeWatched(state, show, episode(1, 3))).toBe(true);
+    expect(isEpisodeWatched(state, show, episode(1, 4))).toBe(false);
 });

@@ -1,10 +1,17 @@
 import type { ConfigurationPayload, HistoryPayload, NowPlaying, ShowNextEpisodePayload } from "../shared/messages";
 import type { AddonStreamLoadResult, AddonManifest, AddonStream, StremioAddon } from "../shared/addons";
-import type { WatchHistoryEntry } from "../shared/history";
+import type { EpisodeWatchState, WatchHistoryEntry } from "../shared/history";
 import type { Episode, EpisodeOrder, Media, MediaType, SizeOrder } from "../shared/stremio";
 
 import { loadEnabledAddonStreams, parseAddonManifest, parseAddons } from "../shared/addons";
-import { getResumePercent, historyTitleId, latestPerTitle, parseWatchHistory } from "../shared/history";
+import {
+    getResumePercent,
+    historyTitleId,
+    isEpisodeWatched,
+    latestPerTitle,
+    parseEpisodeWatchState,
+    parseWatchHistory
+} from "../shared/history";
 import { MESSAGE_NAMES } from "../shared/messages";
 import { filterStreamsToShow } from "../shared/stream-choice";
 import { CLIENT_VERSION } from "../shared/version";
@@ -36,7 +43,7 @@ import {
 type View =
     | { kind: "home"; query: string }
     | { kind: "history" }
-    | { kind: "episodes"; media: Media }
+    | { kind: "episodes"; media: Media; episodes: Episode[]; selectedSeason?: number }
     | { kind: "streams"; media: Media; episode?: Episode; episodes: Episode[] };
 
 interface Elements {
@@ -62,6 +69,7 @@ let episodeOrder: EpisodeOrder = "oldest";
 let addons: StremioAddon[] = [];
 let nowPlaying: NowPlaying = { videoId: "", url: "", releaseName: "" };
 let watchHistory: WatchHistoryEntry[] = [];
+let episodeWatchState: EpisodeWatchState = parseEpisodeWatchState(null);
 const seriesEpisodes = new Map<string, Promise<{ media: Media; episodes: Episode[] } | null>>();
 let homeQuery = "";
 let view: View = { kind: "home", query: "" };
@@ -187,8 +195,16 @@ export function initApp(): void {
         resolvers.forEach((resolve) => resolve());
     });
     iina.onMessage(MESSAGE_NAMES.HistoryUpdated, (data) => {
-        watchHistory = parseWatchHistory((data as HistoryPayload)?.history);
+        const payload = data as HistoryPayload;
+        watchHistory = parseWatchHistory(payload?.history);
+        episodeWatchState = parseEpisodeWatchState(payload?.episodeWatchState, watchHistory);
         if (view.kind === "history") renderHistory();
+        else if (view.kind === "episodes") {
+            const current = view;
+            const scrollTop = ui.content.scrollTop;
+            renderEpisodes(current.media, current.episodes, undefined, current.selectedSeason);
+            ui.content.scrollTop = scrollTop;
+        }
     });
     iina.onMessage(MESSAGE_NAMES.NowPlaying, (data) => {
         nowPlaying = parseNowPlaying(data);
@@ -271,6 +287,7 @@ function applyConfiguration(data: unknown): void {
     }
     episodeOrder = parseEpisodeOrder(payload?.episodeOrder);
     watchHistory = parseWatchHistory(payload?.history);
+    episodeWatchState = parseEpisodeWatchState(payload?.episodeWatchState, watchHistory);
     nowPlaying = parseNowPlaying(payload?.nowPlaying);
     updateTypeButtons();
 }
@@ -489,7 +506,6 @@ async function loadMediaDetails(
 async function loadEpisodes(media: Media, season?: number): Promise<void> {
     const request = replaceRequest(activeRequest);
     activeRequest = request;
-    view = { kind: "episodes", media };
     ui.back.classList.remove("hidden");
     ui.title.textContent = media.name;
     setLoading("episodes");
@@ -964,6 +980,18 @@ export function getDefaultSeason(
     return (next || ordered[0])?.season ?? 0;
 }
 
+export function getActiveSeason(
+    episodes: Episode[],
+    selectedSeason: number | undefined,
+    watched: (episode: Episode) => boolean,
+    available: (episode: Episode) => boolean = isEpisodeAvailable
+): number {
+    const seasons = new Set(episodes.map((episode) => episode.season));
+    if (selectedSeason !== undefined && seasons.has(selectedSeason)) return selectedSeason;
+    const next = getDefaultSeason(episodes, watched, available);
+    return seasons.has(next) ? next : [...seasons].sort((a, b) => a - b)[0] ?? 0;
+}
+
 function renderEpisodes(
     media: Media,
     episodes: Episode[],
@@ -971,6 +999,7 @@ function renderEpisodes(
     selectedSeason?: number
 ): void {
     if (episodes.length === 0) {
+        view = { kind: "episodes", media, episodes };
         renderEmpty("No episodes found.");
         return;
     }
@@ -979,10 +1008,15 @@ function renderEpisodes(
         seasons.set(episode.season, [...(seasons.get(episode.season) || []), episode]);
     });
     const numbers = [...seasons.keys()].sort((a, b) => a - b);
-    const nextSeason = getDefaultSeason(episodes, (episode) => isWatched(episode.id));
-    const active = selectedSeason !== undefined && seasons.has(selectedSeason)
-        ? selectedSeason
-        : seasons.has(nextSeason) ? nextSeason : numbers[0];
+    const watched = (episode: Episode) => isEpisodeWatched(
+        episodeWatchState,
+        media,
+        episode,
+        watchHistory
+    );
+    const nextSeason = getDefaultSeason(episodes, watched);
+    const active = getActiveSeason(episodes, selectedSeason, watched);
+    view = { kind: "episodes", media, episodes, selectedSeason: active };
 
     const fragment = document.createDocumentFragment();
     const nav = document.createElement("div");
@@ -1035,7 +1069,12 @@ function renderEpisodes(
 
 function episodeRow(media: Media, episode: Episode, episodes: Episode[]): HTMLButtonElement {
     const available = isEpisodeAvailable(episode);
-    const watched = available && isWatched(episode.id);
+    const watched = available && isEpisodeWatched(
+        episodeWatchState,
+        media,
+        episode,
+        watchHistory
+    );
     const progress = available && !watched ? getEntryProgress(episode.id) : null;
     const resume = getProgressDisplay(progress, watched);
 

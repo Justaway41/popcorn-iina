@@ -160,6 +160,34 @@ test("merges by newest timestamp while keeping watched and rich metadata", () =>
     });
 });
 
+test("keeps only the newest unfinished episode per title", () => {
+    const show = { ...movie, id: "tt456", imdbId: "tt456", type: "series" as const, name: "Show" };
+    const entry = (number: number, lastPlayedAt: string, watched: boolean) => ({
+        id: `tt456:1:${number}`,
+        media: show,
+        episode: {
+            id: `tt456:1:${number}`,
+            name: `Episode ${number}`,
+            season: 1,
+            episode: number,
+            aired: "",
+            description: "",
+            thumbnail: ""
+        },
+        lastPlayedAt,
+        watched,
+        progress: watched ? 100 : 40
+    });
+    const olderPaused = entry(2, "2026-07-25T10:00:00.000Z", false);
+    const watchedEpisode = entry(1, "2026-07-24T10:00:00.000Z", true);
+    const newerPaused = entry(3, "2026-07-27T10:00:00.000Z", false);
+
+    expect(mergeWatchHistory([olderPaused, watchedEpisode], [newerPaused]).map(({ id }) => id))
+        .toEqual([newerPaused.id, watchedEpisode.id]);
+    expect(mergeWatchHistory([newerPaused], [olderPaused, watchedEpisode]).map(({ id }) => id))
+        .toEqual([newerPaused.id, watchedEpisode.id]);
+});
+
 test("keeps distinct provider-only titles separate when merging", () => {
     const first = {
         id: "kitsu:1",

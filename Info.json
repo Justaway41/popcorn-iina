@@ -22,6 +22,7 @@
     "preferredAudio": "",
     "preferredSubtitle": "",
     "watchHistory": [],
+    "episodeWatchState": { "local": [], "simkl": [] },
     "trakt": {},
     "skipSegments": true,
     "simkl": {}

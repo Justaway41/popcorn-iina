@@ -4,6 +4,7 @@ import {
     buildRowMeta,
     buildStreamSummary,
     createStreamCache,
+    getActiveSeason,
     getAudioBadge,
     getDefaultTier,
     getTierRowCap,
@@ -21,8 +22,60 @@ import {
     mergeSettledCatalogResults,
     replaceRequest
 } from "./app";
+import { isEpisodeWatched, parseEpisodeWatchState } from "../shared/history";
+import type { Episode, Media } from "../shared/stremio";
 
 const appSource = await Bun.file(new URL("./app.ts", import.meta.url)).text();
+
+const show: Media = {
+    id: "tt9",
+    imdbId: "tt9",
+    type: "series",
+    name: "Show",
+    releaseInfo: "",
+    poster: ""
+};
+
+const episode = (season: number, number: number): Episode => ({
+    id: `tt9:${season}:${number}`,
+    name: `Episode ${number}`,
+    season,
+    episode: number,
+    aired: "2020-01-01",
+    description: "",
+    thumbnail: ""
+});
+
+test("uses exact local, Simkl, and legacy episode marks without inferring gaps", () => {
+    const episodes = [episode(1, 1), episode(1, 2), episode(1, 3), episode(1, 4)];
+    const state = parseEpisodeWatchState({
+        local: [{ id: "tt9", episodes: ["1:1"] }],
+        simkl: [{ id: "tt9", episodes: ["1:3"] }]
+    });
+    const legacy = [{
+        id: episodes[3].id,
+        media: show,
+        episode: episodes[3],
+        lastPlayedAt: "2026-09-03T00:00:00.000Z",
+        watched: true,
+        progress: 100
+    }];
+
+    expect(episodes.map((item) => isEpisodeWatched(state, show, item, legacy)))
+        .toEqual([true, false, true, true]);
+});
+
+test("keeps an explicitly selected valid season during episode refresh", () => {
+    const episodes = [episode(1, 1), episode(2, 1), episode(3, 1)];
+    const watched = (item: Episode) => item.season === 1;
+
+    expect(getActiveSeason(episodes, 1, watched)).toBe(1);
+    expect(getActiveSeason(episodes, 9, watched)).toBe(2);
+    expect(getActiveSeason(episodes, undefined, watched)).toBe(2);
+    expect(appSource).toContain('else if (view.kind === "episodes")');
+    expect(appSource).toContain("current.selectedSeason");
+    expect(appSource).toContain("ui.content.scrollTop = scrollTop");
+});
 
 test("labels both serial episode orders", () => {
     expect(getEpisodeOrderLabel("oldest")).toBe("Oldest First");

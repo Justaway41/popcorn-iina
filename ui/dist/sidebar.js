@@ -166,6 +166,47 @@
       return [];
     }
   }
+  function parseEpisodeWatchState(value, legacyHistory = []) {
+    let stored = value;
+    try {
+      stored = typeof value === "string" ? JSON.parse(value) : value;
+    } catch {
+      stored = null;
+    }
+    const item = getRecord2(stored);
+    const state = {
+      local: parseWatchedShows(item?.local),
+      simkl: parseWatchedShows(item?.simkl)
+    };
+    for (const entry of legacyHistory) {
+      if (!entry.watched || !entry.episode)
+        continue;
+      addWatchedEpisode(state.local, historyTitleId(entry), episodeCoordinate(entry.episode));
+    }
+    return state;
+  }
+  function episodeCoordinate(episode) {
+    return `${episode.season}:${episode.episode}`;
+  }
+  function applySimklWatchedPatches(state, patches) {
+    const next = parseEpisodeWatchState(state);
+    for (const patch of parseWatchedShows(patches)) {
+      next.simkl = next.simkl.filter((show) => show.id !== patch.id);
+      if (patch.episodes.length > 0)
+        next.simkl.push(patch);
+    }
+    return next;
+  }
+  function clearSimklWatched(state) {
+    return { ...parseEpisodeWatchState(state), simkl: [] };
+  }
+  function isEpisodeWatched(state, media, episode, legacyHistory = []) {
+    const titleId = mediaTitleId(media);
+    const coordinate = episodeCoordinate(episode);
+    if ([...state.local, ...state.simkl].some((show) => show.id === titleId && show.episodes.includes(coordinate)))
+      return true;
+    return legacyHistory.some((entry) => entry.watched && entry.episode != null && historyTitleId(entry) === titleId && episodeCoordinate(entry.episode) === coordinate);
+  }
   function latestPerTitle(entries) {
     const seen = new Set;
     return entries.filter((entry) => {
@@ -177,7 +218,7 @@
     });
   }
   function historyTitleId(entry) {
-    return entry.media.imdbId || entry.media.providerId || entry.media.id;
+    return mediaTitleId(entry.media);
   }
   function getResumePercent(progress, watched) {
     return !watched && progress !== null && progress >= 5 && progress < 90 ? progress : null;
@@ -208,6 +249,55 @@
       return watched ? 100 : null;
     }
     return Math.max(0, Math.min(100, value));
+  }
+  function parseWatchedShows(value) {
+    if (!Array.isArray(value))
+      return [];
+    const shows = [];
+    for (const valueShow of value) {
+      const item = getRecord2(valueShow);
+      const id = getString2(item?.id).trim();
+      if (!id || !Array.isArray(item?.episodes))
+        continue;
+      const existing = shows.find((show2) => show2.id === id);
+      const show = existing || { id, episodes: [] };
+      if (!existing)
+        shows.push(show);
+      for (const coordinate of item.episodes) {
+        if (typeof coordinate !== "string" || !isEpisodeCoordinate(coordinate))
+          continue;
+        if (!show.episodes.includes(coordinate))
+          show.episodes.push(coordinate);
+      }
+      show.episodes.sort(compareEpisodeCoordinates);
+    }
+    return shows;
+  }
+  function addWatchedEpisode(shows, id, coordinate) {
+    if (!id || !isEpisodeCoordinate(coordinate))
+      return;
+    let show = shows.find((item) => item.id === id);
+    if (!show) {
+      show = { id, episodes: [] };
+      shows.push(show);
+    }
+    if (!show.episodes.includes(coordinate))
+      show.episodes.push(coordinate);
+    show.episodes.sort(compareEpisodeCoordinates);
+  }
+  function isEpisodeCoordinate(value) {
+    const match = /^(\d+):(\d+)$/.exec(value);
+    if (!match)
+      return false;
+    return match.slice(1).every((part) => Number.isSafeInteger(Number(part)));
+  }
+  function compareEpisodeCoordinates(first, second) {
+    const [firstSeason, firstEpisode] = first.split(":").map(Number);
+    const [secondSeason, secondEpisode] = second.split(":").map(Number);
+    return firstSeason - secondSeason || firstEpisode - secondEpisode;
+  }
+  function mediaTitleId(media) {
+    return media.imdbId || media.providerId || media.id;
   }
   function parseMedia(value) {
     const item = getRecord2(value);
@@ -691,6 +781,7 @@
       preferredAudio: "",
       preferredSubtitle: "",
       watchHistory: [],
+      episodeWatchState: { local: [], simkl: [] },
       trakt: {},
       skipSegments: true,
       simkl: {}
@@ -719,6 +810,7 @@
   var addons = [];
   var nowPlaying = { videoId: "", url: "", releaseName: "" };
   var watchHistory = [];
+  var episodeWatchState = parseEpisodeWatchState(null);
   var seriesEpisodes = new Map;
   var homeQuery = "";
   var view = { kind: "home", query: "" };
@@ -799,9 +891,17 @@
       resolvers.forEach((resolve) => resolve());
     });
     iina.onMessage(MESSAGE_NAMES.HistoryUpdated, (data) => {
-      watchHistory = parseWatchHistory(data?.history);
+      const payload = data;
+      watchHistory = parseWatchHistory(payload?.history);
+      episodeWatchState = parseEpisodeWatchState(payload?.episodeWatchState, watchHistory);
       if (view.kind === "history")
         renderHistory();
+      else if (view.kind === "episodes") {
+        const current = view;
+        const scrollTop = ui.content.scrollTop;
+        renderEpisodes(current.media, current.episodes, undefined, current.selectedSeason);
+        ui.content.scrollTop = scrollTop;
+      }
     });
     iina.onMessage(MESSAGE_NAMES.NowPlaying, (data) => {
       nowPlaying = parseNowPlaying(data);
@@ -870,6 +970,7 @@
     }
     episodeOrder = parseEpisodeOrder(payload?.episodeOrder);
     watchHistory = parseWatchHistory(payload?.history);
+    episodeWatchState = parseEpisodeWatchState(payload?.episodeWatchState, watchHistory);
     nowPlaying = parseNowPlaying(payload?.nowPlaying);
     updateTypeButtons();
   }
@@ -1039,7 +1140,6 @@
   async function loadEpisodes(media, season) {
     const request = replaceRequest(activeRequest);
     activeRequest = request;
-    view = { kind: "episodes", media };
     ui.back.classList.remove("hidden");
     ui.title.textContent = media.name;
     setLoading("episodes");
@@ -1380,8 +1480,16 @@
     const next = ordered.find((episode) => available(episode) && !watched(episode));
     return (next || ordered[0])?.season ?? 0;
   }
+  function getActiveSeason(episodes, selectedSeason, watched, available = isEpisodeAvailable) {
+    const seasons = new Set(episodes.map((episode) => episode.season));
+    if (selectedSeason !== undefined && seasons.has(selectedSeason))
+      return selectedSeason;
+    const next = getDefaultSeason(episodes, watched, available);
+    return seasons.has(next) ? next : [...seasons].sort((a, b) => a - b)[0] ?? 0;
+  }
   function renderEpisodes(media, episodes, focusOrder, selectedSeason) {
     if (episodes.length === 0) {
+      view = { kind: "episodes", media, episodes };
       renderEmpty("No episodes found.");
       return;
     }
@@ -1390,8 +1498,10 @@
       seasons.set(episode.season, [...seasons.get(episode.season) || [], episode]);
     });
     const numbers = [...seasons.keys()].sort((a, b) => a - b);
-    const nextSeason = getDefaultSeason(episodes, (episode) => isWatched(episode.id));
-    const active = selectedSeason !== undefined && seasons.has(selectedSeason) ? selectedSeason : seasons.has(nextSeason) ? nextSeason : numbers[0];
+    const watched = (episode) => isEpisodeWatched(episodeWatchState, media, episode, watchHistory);
+    const nextSeason = getDefaultSeason(episodes, watched);
+    const active = getActiveSeason(episodes, selectedSeason, watched);
+    view = { kind: "episodes", media, episodes, selectedSeason: active };
     const fragment = document.createDocumentFragment();
     const nav = document.createElement("div");
     nav.className = "season-nav";
@@ -1443,7 +1553,7 @@
   }
   function episodeRow(media, episode, episodes) {
     const available = isEpisodeAvailable(episode);
-    const watched = available && isWatched(episode.id);
+    const watched = available && isEpisodeWatched(episodeWatchState, media, episode, watchHistory);
     const progress = available && !watched ? getEntryProgress(episode.id) : null;
     const resume = getProgressDisplay(progress, watched);
     const button = document.createElement("button");

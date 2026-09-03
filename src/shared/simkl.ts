@@ -1,4 +1,4 @@
-import type { WatchHistoryEntry } from "./history";
+import type { WatchedShowPatch, WatchHistoryEntry } from "./history";
 import type { PlaybackContext } from "./messages";
 import { isImdbId } from "./stremio";
 import {
@@ -39,6 +39,12 @@ export interface SimklPin {
     verificationUrl: string;
     expiresAt: number;
     intervalMs: number;
+}
+
+export interface SimklHistorySyncResult {
+    state: SimklState;
+    history: WatchHistoryEntry[];
+    watchedPatches: WatchedShowPatch[];
 }
 
 export class SimklError extends Error {
@@ -181,8 +187,10 @@ export async function syncSimklHistory(
     state: SimklState,
     local: WatchHistoryEntry[],
     now = Date.now()
-): Promise<{ state: SimklState; history: WatchHistoryEntry[] }> {
-    if (!isSimklConnected(state) || state.retryAt > now) return { state, history: local };
+): Promise<SimklHistorySyncResult> {
+    if (!isSimklConnected(state) || state.retryAt > now) {
+        return { state, history: local, watchedPatches: [] };
+    }
     try {
         const activities = getRecord(
             await request(transport, state, "GET", "/sync/activities", null, now)
@@ -192,7 +200,8 @@ export async function syncSimklHistory(
         if (activityAt && activityAt === state.lastActivityAt) {
             return {
                 state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
-                history: local
+                history: local,
+                watchedPatches: []
             };
         }
 
@@ -200,7 +209,15 @@ export async function syncSimklHistory(
         const cursor = state.lastActivityAt
             ? `?date_from=${encodeURIComponent(state.lastActivityAt)}`
             : "";
-        const items = await request(transport, state, "GET", `/sync/all-items/${cursor}`, null, now);
+        const query = [
+            "extended=full_anime_seasons",
+            "episode_watched_at=yes",
+            "include_all_episodes=yes",
+            ...(state.lastActivityAt
+                ? [`date_from=${encodeURIComponent(state.lastActivityAt)}`]
+                : [])
+        ].join("&");
+        const items = await request(transport, state, "GET", `/sync/all-items/?${query}`, null, now);
         const playback = await request(transport, state, "GET", `/sync/playback${cursor}`, null, now);
 
         return {
@@ -211,7 +228,8 @@ export async function syncSimklHistory(
                 lastError: "",
                 retryAt: 0
             },
-            history: mergeWatchHistory(local, parseSimklHistory(items, playback))
+            history: mergeWatchHistory(local, parseSimklHistory(items, playback)),
+            watchedPatches: parseSimklWatchedPatches(items)
         };
     } catch (error) {
         if (error instanceof SimklError && error.status === 401) {
@@ -222,7 +240,8 @@ export async function syncSimklHistory(
                     lastError: "Simkl connection was rejected. Reconnect required.",
                     retryAt: 0
                 },
-                history: local
+                history: local,
+                watchedPatches: []
             };
         }
         return {
@@ -231,9 +250,55 @@ export async function syncSimklHistory(
                 lastError: error instanceof Error ? error.message : "Simkl request failed.",
                 retryAt: error instanceof SimklError ? error.retryAt : 0
             },
-            history: local
+            history: local,
+            watchedPatches: []
         };
     }
+}
+
+export function parseSimklWatchedPatches(items: unknown): WatchedShowPatch[] {
+    const lists = getRecord(items);
+    return [
+        ...watchedShowPatches(lists?.shows),
+        ...watchedShowPatches(lists?.anime)
+    ];
+}
+
+function watchedShowPatches(value: unknown): WatchedShowPatch[] {
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((value) => {
+        const item = getRecord(value);
+        const imdbId = getString(getRecord(getRecord(item?.show)?.ids)?.imdb);
+        const list = item?.seasons;
+        if (!isImdbId(imdbId) || !Array.isArray(list)) return [];
+        if (list.length === 0) return [{ id: imdbId, episodes: [] }];
+        const episodes = list.flatMap(parseWatchedSeason);
+        if (episodes.length === 0) return [];
+        return [{ id: imdbId, episodes: [...new Set(episodes)] }];
+    });
+}
+
+/**
+ * Anime entries also carry a `tvdb` mapping, but it addresses the whole franchise
+ * (Bleach cour one is TVDB season 17) while Popcorn keys episodes by the Cinemeta
+ * coordinates the sidebar renders. Simkl's own `seasons[].number` plus
+ * `episodes[].number` is what matches those, for both shows and anime.
+ */
+function parseWatchedSeason(value: unknown): string[] {
+    const season = getRecord(value);
+    const seasonNumber = episodeNumber(season?.number);
+    if (!Array.isArray(season?.episodes) || seasonNumber === null) return [];
+    return season.episodes.flatMap((value) => {
+        const episode = getRecord(value);
+        // Without `watched_at` the episode is only listed, not watched.
+        if (!episode || !getString(episode.watched_at)) return [];
+        const number = episodeNumber(episode.number);
+        return number === null ? [] : [`${seasonNumber}:${number}`];
+    });
+}
+
+function episodeNumber(value: unknown): number | null {
+    return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
 export function parseSimklHistory(items: unknown, playback: unknown): WatchHistoryEntry[] {
@@ -251,11 +316,7 @@ function listEntries(value: unknown): WatchHistoryEntry[] {
     return Array.isArray(value) ? value.flatMap(parseListItem) : [];
 }
 
-/**
- * One entry per title, from the last episode watched. Simkl can return every watched
- * episode with `extended=full`, but the local history is capped at 100 recent items,
- * so pulling megabytes of back catalogue would only be discarded.
- */
+/** One recent-history entry per title; exact episode marks are stored separately. */
 function parseListItem(value: unknown): WatchHistoryEntry[] {
     const item = getRecord(value);
     const playedAt = getString(item?.last_watched_at);
@@ -310,12 +371,13 @@ function parsePlayback(value: unknown): WatchHistoryEntry[] {
         }];
     }
 
-    const show = getRecord(item.show);
+    // Playback rows name the title `anime` for anime and `show` for everything else.
+    const show = getRecord(item.show) ?? getRecord(item.anime);
     const episode = getRecord(item.episode);
     const imdbId = getString(getRecord(show?.ids)?.imdb);
     const name = getString(show?.title);
     const season = getFiniteNumber(episode?.season);
-    const number = getFiniteNumber(episode?.episode);
+    const number = getFiniteNumber(episode?.number) ?? getFiniteNumber(episode?.episode);
     if (!isImdbId(imdbId) || !name || season === null || number === null) return [];
     return [seriesEntry(
         imdbId,

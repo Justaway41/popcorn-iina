@@ -1,5 +1,5 @@
 import type { Episode, EpisodeOrder, Media, MediaType } from "./stremio";
-import type { WatchHistoryEntry } from "./history";
+import type { EpisodeWatchState, WatchHistoryEntry } from "./history";
 import type { StremioAddon } from "./addons";
 
 export const MESSAGE_NAMES = {
@@ -50,6 +50,7 @@ export interface ConfigurationPayload {
     mediaType: MediaType;
     episodeOrder: EpisodeOrder;
     history: WatchHistoryEntry[];
+    episodeWatchState: EpisodeWatchState;
     nowPlaying: NowPlaying;
 }
 
@@ -63,6 +64,7 @@ export interface SetEpisodeOrderPayload {
 
 export interface HistoryPayload {
     history: WatchHistoryEntry[];
+    episodeWatchState: EpisodeWatchState;
 }
 
 export interface RemoveHistoryEntryPayload {

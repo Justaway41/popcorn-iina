@@ -200,6 +200,47 @@
       return [];
     }
   }
+  function parseEpisodeWatchState(value, legacyHistory = []) {
+    let stored = value;
+    try {
+      stored = typeof value === "string" ? JSON.parse(value) : value;
+    } catch {
+      stored = null;
+    }
+    const item = getRecord2(stored);
+    const state = {
+      local: parseWatchedShows(item?.local),
+      simkl: parseWatchedShows(item?.simkl)
+    };
+    for (const entry of legacyHistory) {
+      if (!entry.watched || !entry.episode)
+        continue;
+      addWatchedEpisode(state.local, historyTitleId(entry), episodeCoordinate(entry.episode));
+    }
+    return state;
+  }
+  function episodeCoordinate(episode) {
+    return `${episode.season}:${episode.episode}`;
+  }
+  function applySimklWatchedPatches(state, patches) {
+    const next = parseEpisodeWatchState(state);
+    for (const patch of parseWatchedShows(patches)) {
+      next.simkl = next.simkl.filter((show) => show.id !== patch.id);
+      if (patch.episodes.length > 0)
+        next.simkl.push(patch);
+    }
+    return next;
+  }
+  function clearSimklWatched(state) {
+    return { ...parseEpisodeWatchState(state), simkl: [] };
+  }
+  function isEpisodeWatched(state, media, episode, legacyHistory = []) {
+    const titleId = mediaTitleId(media);
+    const coordinate = episodeCoordinate(episode);
+    if ([...state.local, ...state.simkl].some((show) => show.id === titleId && show.episodes.includes(coordinate)))
+      return true;
+    return legacyHistory.some((entry) => entry.watched && entry.episode != null && historyTitleId(entry) === titleId && episodeCoordinate(entry.episode) === coordinate);
+  }
   function latestPerTitle(entries) {
     const seen = new Set;
     return entries.filter((entry) => {
@@ -211,7 +252,7 @@
     });
   }
   function historyTitleId(entry) {
-    return entry.media.imdbId || entry.media.providerId || entry.media.id;
+    return mediaTitleId(entry.media);
   }
   function getResumePercent(progress, watched) {
     return !watched && progress !== null && progress >= 5 && progress < 90 ? progress : null;
@@ -242,6 +283,55 @@
       return watched ? 100 : null;
     }
     return Math.max(0, Math.min(100, value));
+  }
+  function parseWatchedShows(value) {
+    if (!Array.isArray(value))
+      return [];
+    const shows = [];
+    for (const valueShow of value) {
+      const item = getRecord2(valueShow);
+      const id = getString2(item?.id).trim();
+      if (!id || !Array.isArray(item?.episodes))
+        continue;
+      const existing = shows.find((show2) => show2.id === id);
+      const show = existing || { id, episodes: [] };
+      if (!existing)
+        shows.push(show);
+      for (const coordinate of item.episodes) {
+        if (typeof coordinate !== "string" || !isEpisodeCoordinate(coordinate))
+          continue;
+        if (!show.episodes.includes(coordinate))
+          show.episodes.push(coordinate);
+      }
+      show.episodes.sort(compareEpisodeCoordinates);
+    }
+    return shows;
+  }
+  function addWatchedEpisode(shows, id, coordinate) {
+    if (!id || !isEpisodeCoordinate(coordinate))
+      return;
+    let show = shows.find((item) => item.id === id);
+    if (!show) {
+      show = { id, episodes: [] };
+      shows.push(show);
+    }
+    if (!show.episodes.includes(coordinate))
+      show.episodes.push(coordinate);
+    show.episodes.sort(compareEpisodeCoordinates);
+  }
+  function isEpisodeCoordinate(value) {
+    const match = /^(\d+):(\d+)$/.exec(value);
+    if (!match)
+      return false;
+    return match.slice(1).every((part) => Number.isSafeInteger(Number(part)));
+  }
+  function compareEpisodeCoordinates(first, second) {
+    const [firstSeason, firstEpisode] = first.split(":").map(Number);
+    const [secondSeason, secondEpisode] = second.split(":").map(Number);
+    return firstSeason - secondSeason || firstEpisode - secondEpisode;
+  }
+  function mediaTitleId(media) {
+    return media.imdbId || media.providerId || media.id;
   }
   function parseMedia(value) {
     const item = getRecord2(value);
@@ -867,7 +957,16 @@
       const existing = entries.get(key);
       entries.set(key, existing ? mergeEntry(existing, entry) : entry);
     }
-    return [...entries.values()].sort((a, b) => timestamp(b.lastPlayedAt) - timestamp(a.lastPlayedAt)).slice(0, MAX_HISTORY_ITEMS2);
+    const unfinishedTitles = new Set;
+    return [...entries.values()].sort((a, b) => timestamp(b.lastPlayedAt) - timestamp(a.lastPlayedAt)).filter((entry) => {
+      if (entry.watched)
+        return true;
+      const id = historyTitleId(entry);
+      if (unfinishedTitles.has(id))
+        return false;
+      unfinishedTitles.add(id);
+      return true;
+    }).slice(0, MAX_HISTORY_ITEMS2);
   }
   function parseRemote(value, watched) {
     const item = getRecord4(value);
@@ -1119,19 +1218,27 @@
     throw new Error("Simkl pin expired before it was approved.");
   }
   async function syncSimklHistory(transport, state, local, now = Date.now()) {
-    if (!isSimklConnected(state) || state.retryAt > now)
-      return { state, history: local };
+    if (!isSimklConnected(state) || state.retryAt > now) {
+      return { state, history: local, watchedPatches: [] };
+    }
     try {
       const activities = getRecord4(await request2(transport, state, "GET", "/sync/activities", null, now));
       const activityAt = getString4(activities?.all);
       if (activityAt && activityAt === state.lastActivityAt) {
         return {
           state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
-          history: local
+          history: local,
+          watchedPatches: []
         };
       }
       const cursor = state.lastActivityAt ? `?date_from=${encodeURIComponent(state.lastActivityAt)}` : "";
-      const items = await request2(transport, state, "GET", `/sync/all-items/${cursor}`, null, now);
+      const query = [
+        "extended=full_anime_seasons",
+        "episode_watched_at=yes",
+        "include_all_episodes=yes",
+        ...state.lastActivityAt ? [`date_from=${encodeURIComponent(state.lastActivityAt)}`] : []
+      ].join("&");
+      const items = await request2(transport, state, "GET", `/sync/all-items/?${query}`, null, now);
       const playback = await request2(transport, state, "GET", `/sync/playback${cursor}`, null, now);
       return {
         state: {
@@ -1141,7 +1248,8 @@
           lastError: "",
           retryAt: 0
         },
-        history: mergeWatchHistory(local, parseSimklHistory(items, playback))
+        history: mergeWatchHistory(local, parseSimklHistory(items, playback)),
+        watchedPatches: parseSimklWatchedPatches(items)
       };
     } catch (error) {
       if (error instanceof SimklError && error.status === 401) {
@@ -1152,7 +1260,8 @@
             lastError: "Simkl connection was rejected. Reconnect required.",
             retryAt: 0
           },
-          history: local
+          history: local,
+          watchedPatches: []
         };
       }
       return {
@@ -1161,9 +1270,50 @@
           lastError: error instanceof Error ? error.message : "Simkl request failed.",
           retryAt: error instanceof SimklError ? error.retryAt : 0
         },
-        history: local
+        history: local,
+        watchedPatches: []
       };
     }
+  }
+  function parseSimklWatchedPatches(items) {
+    const lists = getRecord4(items);
+    return [
+      ...watchedShowPatches(lists?.shows),
+      ...watchedShowPatches(lists?.anime)
+    ];
+  }
+  function watchedShowPatches(value) {
+    if (!Array.isArray(value))
+      return [];
+    return value.flatMap((value2) => {
+      const item = getRecord4(value2);
+      const imdbId = getString4(getRecord4(getRecord4(item?.show)?.ids)?.imdb);
+      const list = item?.seasons;
+      if (!isImdbId(imdbId) || !Array.isArray(list))
+        return [];
+      if (list.length === 0)
+        return [{ id: imdbId, episodes: [] }];
+      const episodes = list.flatMap(parseWatchedSeason);
+      if (episodes.length === 0)
+        return [];
+      return [{ id: imdbId, episodes: [...new Set(episodes)] }];
+    });
+  }
+  function parseWatchedSeason(value) {
+    const season = getRecord4(value);
+    const seasonNumber = episodeNumber(season?.number);
+    if (!Array.isArray(season?.episodes) || seasonNumber === null)
+      return [];
+    return season.episodes.flatMap((value2) => {
+      const episode = getRecord4(value2);
+      if (!episode || !getString4(episode.watched_at))
+        return [];
+      const number = episodeNumber(episode.number);
+      return number === null ? [] : [`${seasonNumber}:${number}`];
+    });
+  }
+  function episodeNumber(value) {
+    return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
   }
   function parseSimklHistory(items, playback) {
     const lists = getRecord4(items);
@@ -1231,12 +1381,12 @@
         progress
       }];
     }
-    const show = getRecord4(item.show);
+    const show = getRecord4(item.show) ?? getRecord4(item.anime);
     const episode = getRecord4(item.episode);
     const imdbId = getString4(getRecord4(show?.ids)?.imdb);
     const name = getString4(show?.title);
     const season = getFiniteNumber(episode?.season);
-    const number = getFiniteNumber(episode?.episode);
+    const number = getFiniteNumber(episode?.number) ?? getFiniteNumber(episode?.episode);
     if (!isImdbId(imdbId) || !name || season === null || number === null)
       return [];
     return [seriesEntry(imdbId, name, show?.year, { season, episode: number }, getString4(episode?.title), playedAt, false, progress)];
@@ -1321,6 +1471,7 @@
       preferredAudio: "",
       preferredSubtitle: "",
       watchHistory: [],
+      episodeWatchState: { local: [], simkl: [] },
       trakt: {},
       skipSegments: true,
       simkl: {}
@@ -1347,6 +1498,7 @@
   var traktRevision = 0;
   var simkl = parseSimklState(null);
   var simklRevision = 0;
+  var simklWatchedReset = Promise.resolve();
   var manifests = new Map;
   document.documentElement.dataset.version = CLIENT_VERSION;
   var preferences = window.iina.preferences;
@@ -1657,6 +1809,7 @@
     simklRevision += 1;
     simklPin.hidden = true;
     saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
+    clearStoredSimklWatched();
   }
   async function connectSimkl() {
     setSimklError("");
@@ -1669,6 +1822,9 @@
     simklConnect.disabled = true;
     try {
       saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
+      await clearStoredSimklWatched();
+      if (revision !== simklRevision)
+        return;
       simklStatus.textContent = "Requesting a PIN…";
       const pin = await requestSimklPin(browserTransport, simkl);
       if (revision !== simklRevision)
@@ -1682,6 +1838,11 @@
         return;
       saveSimkl(connected);
       simklPin.hidden = true;
+      const local = parseWatchHistory(await getPreference("watchHistory"));
+      if (revision !== simklRevision)
+        return;
+      const result = await syncSimklHistory(browserTransport, connected, local);
+      await persistSimklSync(result, revision);
     } catch (error) {
       if (revision === simklRevision) {
         setSimklError(error instanceof Error ? error.message : "Could not connect Simkl.");
@@ -1697,6 +1858,7 @@
     simklPin.hidden = true;
     setSimklError("");
     saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
+    clearStoredSimklWatched();
   }
   function saveTraktCredentials() {
     const clientId = traktClientId.value.trim();
@@ -1796,12 +1958,7 @@
       if (revision !== simklRevision)
         return;
       const result = await syncSimklHistory(browserTransport, state, local);
-      const latest = parseWatchHistory(await getPreference("watchHistory"));
-      if (revision !== simklRevision)
-        return;
-      preferences.set("watchHistory", mergeWatchHistory(result.history, latest));
-      preferences.sync?.();
-      saveSimkl(result.state);
+      await persistSimklSync(result, revision);
     } catch (error) {
       if (revision === simklRevision) {
         setSimklError(error instanceof Error ? error.message : "Could not sync Simkl.");
@@ -1809,6 +1966,36 @@
     } finally {
       simklSync.disabled = false;
     }
+  }
+  async function persistSimklSync(result, revision) {
+    const [storedHistory, storedState] = await Promise.all([
+      getPreference("watchHistory"),
+      getPreference("episodeWatchState")
+    ]);
+    if (revision !== simklRevision)
+      return;
+    const latest = parseWatchHistory(storedHistory);
+    const history = mergeWatchHistory(latest, result.history);
+    const watchedState = applySimklWatchedPatches(parseEpisodeWatchState(storedState, history), result.watchedPatches);
+    simkl = result.state;
+    preferences.set("watchHistory", history);
+    preferences.set("episodeWatchState", watchedState);
+    preferences.set("simkl", simkl);
+    preferences.sync?.();
+    if (!simkl.lastError)
+      setSimklError("");
+    renderSimkl();
+  }
+  function clearStoredSimklWatched() {
+    simklWatchedReset = simklWatchedReset.then(async () => {
+      const [storedHistory, storedState] = await Promise.all([
+        getPreference("watchHistory"),
+        getPreference("episodeWatchState")
+      ]);
+      preferences.set("episodeWatchState", clearSimklWatched(parseEpisodeWatchState(storedState, parseWatchHistory(storedHistory))));
+      preferences.sync?.();
+    });
+    return simklWatchedReset;
   }
   async function syncTraktNow() {
     if (!trakt.tokens)

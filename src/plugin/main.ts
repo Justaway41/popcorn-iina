@@ -10,7 +10,16 @@ import type { AddonManifest, StremioAddon } from "../shared/addons";
 
 import { MESSAGE_NAMES } from "../shared/messages";
 import { loadEnabledAddonStreams, parseAddonManifest, parseAddons } from "../shared/addons";
-import { historyContextId, parseWatchHistory, recordPlayback, removeHistoryEntry } from "../shared/history";
+import {
+    applySimklWatchedPatches,
+    getHistoryEntry,
+    historyContextId,
+    markEpisodeWatched,
+    parseEpisodeWatchState,
+    parseWatchHistory,
+    recordPlayback,
+    removeHistoryEntry
+} from "../shared/history";
 import {
     buildStremioStreamUrl,
     findNextEpisode,
@@ -45,11 +54,15 @@ import {
     findChapterCredits,
     findChapterIntro,
     getOverlayAction,
+    mapAnimeEpisode,
+    parseAniListRoot,
+    parseAniListSequel,
     parseAniSkipInterval,
-    parseAniZipMalId,
     parseIntroDbSegment,
     parseKitsuMalId,
     sanitizeSegments,
+    seasonEpisodeCounts,
+    type AnimeEntry,
     type IntroInterval,
     type OverlayAction
 } from "./intro";
@@ -82,6 +95,10 @@ let activeStreamRelease = "";
 let lastHistorySyncAt = 0;
 let historySyncInFlight = false;
 let watchHistory = parseWatchHistory(preferences.get("watchHistory"));
+let episodeWatchState = parseEpisodeWatchState(
+    preferences.get("episodeWatchState"),
+    watchHistory
+);
 let introInterval: IntroInterval | null = null;
 let recapInterval: IntroInterval | null = null;
 let creditsInterval: IntroInterval | null = null;
@@ -95,6 +112,8 @@ let prefetchedNextEpisodeAt = 0;
 /** Debrid links can expire within the hour; past this the sidebar picks a fresh one instead. */
 const PREFETCH_FRESH_MS = 30 * 60_000;
 const kitsuMalIds = new Map<string, string>();
+/** Sequel chains by title; null records a title AniList does not know, which is live action. */
+const animeChains = new Map<string, AnimeEntry[] | null>();
 const addonManifests = new Map<string, AddonManifest>();
 
 function setPlayerUIHidden(hidden: boolean): void {
@@ -165,15 +184,24 @@ function updatePlaybackMonitoring(): void {
 function savePlaybackProgress(percent = mpv.getNumber("percent-pos")): void {
     const context = activePlaybackContext;
     if (!context || !Number.isFinite(percent)) return;
+    const storedHistory = parseWatchHistory(preferences.get("watchHistory"));
     watchHistory = recordPlayback(
-        parseWatchHistory(preferences.get("watchHistory")),
+        storedHistory,
         context,
         percent,
         new Date().toISOString()
     );
+    episodeWatchState = parseEpisodeWatchState(
+        preferences.get("episodeWatchState"),
+        storedHistory
+    );
+    if (context.episode && getHistoryEntry(watchHistory, context)?.watched) {
+        episodeWatchState = markEpisodeWatched(episodeWatchState, context);
+    }
     preferences.set("watchHistory", watchHistory);
+    preferences.set("episodeWatchState", episodeWatchState);
     preferences.sync();
-    sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history: watchHistory });
+    sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history: watchHistory, episodeWatchState });
     lastProgressSavedAt = Date.now();
 }
 
@@ -519,10 +547,9 @@ async function resolvePlaybackIntervals(revision: number): Promise<void> {
     if (!context || !episode) return;
     if (!parseSkipSegments(preferences.get("skipSegments"))) return;
 
-    const providerId = context.media.providerId || context.media.id || "";
-    // AniSkip is no longer gated on the item looking like anime: Cinemeta reports every series
-    // as `series`, so anime opened through it never reached AniSkip at all. The id lookup is
-    // itself the anime test, since a live-action IMDb id maps to no MAL id.
+    // AniSkip is not gated on the item looking like anime: Cinemeta reports every series as
+    // `series`, so anime opened through it never reached AniSkip at all. The title lookup is
+    // itself the anime test, since AniList knows no live-action title.
     //
     // The two run together rather than one after the other. Chained, a slow or unreachable anime
     // lookup withheld IntroDB's answer as well, and the Skip Intro it already had never appeared.
@@ -534,14 +561,7 @@ async function resolvePlaybackIntervals(revision: number): Promise<void> {
         applySegments(found, duration);
     };
     await Promise.all([
-        loadAniSkipSegments(
-            revision,
-            context.media.malId || "",
-            providerId,
-            context.media.imdbId,
-            episode,
-            duration
-        ).then(merge),
+        loadAniSkipSegments(revision, context, episode, duration).then(merge),
         loadIntroDbSegments(revision, context.media.imdbId, episode).then(merge)
     ]);
 }
@@ -577,30 +597,88 @@ function applySegments(found: SegmentSources, duration: number): void {
 
 async function loadAniSkipSegments(
     revision: number,
-    knownMalId: string,
-    providerId: string,
-    imdbId: string,
+    context: PlaybackContext,
     episode: Episode,
     duration: number
 ): Promise<{ intro: IntroInterval | null; credits: IntroInterval | null } | null> {
     try {
-        const malId = knownMalId ||
-            (providerId.startsWith("kitsu:") ? await loadKitsuMalId(providerId) : "") ||
-            await loadAniZipMalId(imdbId);
-        if (!malId || !Number.isFinite(duration) || duration <= 0 ||
-            !isCurrentRequest(revision, playbackRevision)) return null;
+        const target = await resolveAnimeEpisode(context, episode);
+        if (!target || !isCurrentRequest(revision, playbackRevision)) return null;
+        // Every submission is requested and the nearest runtime chosen here. AniSkip's own
+        // `episodeLength` filter is tight enough that a rip cut differently from the
+        // submitter's answered 404, and the episode looked as if it had no data at all.
         const response = await http.get(
-            `https://api.aniskip.com/v2/skip-times/${encodeURIComponent(malId)}/${episode.episode}` +
-                `?types=op&types=ed&episodeLength=${encodeURIComponent(String(duration))}`,
+            `https://api.aniskip.com/v2/skip-times/${encodeURIComponent(target.malId)}/${target.episode}` +
+                "?types=op&types=ed&episodeLength=0",
             { params: {}, headers: { Accept: "application/json" }, data: {} }
         );
         if (response.statusCode < 200 || response.statusCode >= 300) return null;
         const data = safeJson(response.data ?? response.text);
-        return { intro: parseAniSkipInterval(data), credits: parseAniSkipInterval(data, "ed") };
+        const runtime = Number.isFinite(duration) && duration > 0 ? duration : 0;
+        return {
+            intro: parseAniSkipInterval(data, "op", runtime),
+            credits: parseAniSkipInterval(data, "ed", runtime)
+        };
     } catch (error) {
         logDebug("Popcorn: Skip interval lookup failed:", formatError(error));
         return null;
     }
+}
+
+/**
+ * The cour and in-cour episode number AniSkip wants. A catalogue id that is already per cour
+ * (a Kitsu entry) numbers its episodes within the cour and is used as is; a Cinemeta series is
+ * numbered in seasons and has to be placed in the franchise's sequel chain first.
+ */
+async function resolveAnimeEpisode(
+    context: PlaybackContext,
+    episode: Episode
+): Promise<{ malId: string; episode: number } | null> {
+    const providerId = context.media.providerId || context.media.id || "";
+    const known = context.media.malId ||
+        (providerId.startsWith("kitsu:") ? await loadKitsuMalId(providerId) : "");
+    if (known) return { malId: known, episode: episode.episode };
+    const chain = await loadAnimeChain(context.media.name);
+    if (!chain) return null;
+    return mapAnimeEpisode(seasonEpisodeCounts(context.episodes), chain, episode.season, episode.episode);
+}
+
+const ANILIST_URL = "https://graphql.anilist.co";
+const ANILIST_ROOT_QUERY = "query ($search: String) { Page(perPage: 25) { media(search: $search, " +
+    "type: ANIME, sort: SEARCH_MATCH) { id idMal format episodes startDate { year month } " +
+    "synonyms title { romaji english } } } }";
+const ANILIST_SEQUEL_QUERY = "query ($id: Int) { Media(id: $id) { relations { edges { relationType " +
+    "node { id idMal format episodes startDate { year month } } } } } }";
+/** Longer runs exist, but past this a chain is more likely a loop in the relation data. */
+const MAX_SEQUEL_HOPS = 12;
+
+/**
+ * The franchise's cours in airing order, found from the title. One request finds the first
+ * cour and one more per sequel, so the chain is cached for the session; a title AniList does
+ * not know is cached as null so live action stops asking. A failed request is not cached: a
+ * rate limit must not read as "not anime" until restart.
+ */
+async function loadAnimeChain(name: string): Promise<AnimeEntry[] | null> {
+    if (animeChains.has(name)) return animeChains.get(name) ?? null;
+    const root = parseAniListRoot(
+        await postJson(ANILIST_URL, { query: ANILIST_ROOT_QUERY, variables: { search: name } }),
+        name
+    );
+    if (!root) {
+        animeChains.set(name, null);
+        return null;
+    }
+    const chain = [root];
+    for (let hop = 0; hop < MAX_SEQUEL_HOPS; hop += 1) {
+        const next = parseAniListSequel(await postJson(ANILIST_URL, {
+            query: ANILIST_SEQUEL_QUERY,
+            variables: { id: chain[chain.length - 1].anilistId }
+        }));
+        if (!next || chain.some((entry) => entry.anilistId === next.anilistId)) break;
+        chain.push(next);
+    }
+    animeChains.set(name, chain);
+    return chain;
 }
 
 /**
@@ -717,6 +795,20 @@ async function loadAddonManifest(addon: StremioAddon): Promise<AddonManifest> {
     return manifest;
 }
 
+async function postJson(url: string, body: unknown): Promise<unknown> {
+    const response = await http.post(url, {
+        params: {},
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        data: body
+    });
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw new Error(`Request failed with HTTP ${response.statusCode}.`);
+    }
+    const data = safeJson(response.data ?? response.text);
+    if (data === null) throw new Error("Response was not valid JSON.");
+    return data;
+}
+
 async function requestJson(url: string): Promise<unknown> {
     const response = await http.get(url, {
         params: {},
@@ -729,19 +821,6 @@ async function requestJson(url: string): Promise<unknown> {
     const data = safeJson(response.data ?? response.text);
     if (data === null) throw new Error("Response was not valid JSON.");
     return data;
-}
-
-/** Maps an IMDb id onto a MAL id so AniSkip can be reached for anime opened through Cinemeta. */
-async function loadAniZipMalId(imdbId: string): Promise<string> {
-    if (!isImdbId(imdbId)) return "";
-    try {
-        return parseAniZipMalId(await requestJson(
-            `https://api.ani.zip/mappings?imdb_id=${encodeURIComponent(imdbId)}`
-        ));
-    } catch (error) {
-        logDebug("Popcorn: Anime id lookup failed:", formatError(error));
-        return "";
-    }
 }
 
 async function loadKitsuMalId(providerId: string): Promise<string> {
@@ -784,14 +863,24 @@ function syncRemoteHistory(): void {
     void trakt.sync(watchHistory)
         .then((synced) => simkl.sync(synced))
         .then((synced) => {
+            const latestHistory = parseWatchHistory(preferences.get("watchHistory"));
             const history = mergeWatchHistory(
-                parseWatchHistory(preferences.get("watchHistory")),
-                synced
+                latestHistory,
+                synced.history
+            );
+            const watchedState = applySimklWatchedPatches(
+                parseEpisodeWatchState(preferences.get("episodeWatchState"), history),
+                synced.watchedPatches
             );
             watchHistory = history;
+            episodeWatchState = watchedState;
             preferences.set("watchHistory", history);
+            preferences.set("episodeWatchState", watchedState);
             preferences.sync();
-            sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history });
+            sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, {
+                history,
+                episodeWatchState: watchedState
+            });
         })
         .catch((error) => logDebug(`History sync failed: ${formatError(error)}`))
         .then(() => {
@@ -823,13 +912,23 @@ event.on("iina.window-loaded", () => {
         const id = (data as RemoveHistoryEntryPayload)?.id;
         if (typeof id !== "string" || !id) return;
         // Re-read rather than trusting the cached copy; a Trakt sync may have replaced it.
-        watchHistory = removeHistoryEntry(parseWatchHistory(preferences.get("watchHistory")), id);
+        const storedHistory = parseWatchHistory(preferences.get("watchHistory"));
+        episodeWatchState = parseEpisodeWatchState(
+            preferences.get("episodeWatchState"),
+            storedHistory
+        );
+        watchHistory = removeHistoryEntry(storedHistory, id);
         preferences.set("watchHistory", watchHistory);
+        preferences.set("episodeWatchState", episodeWatchState);
         preferences.sync();
-        sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history: watchHistory });
+        sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history: watchHistory, episodeWatchState });
     });
     sidebar.onMessage(MESSAGE_NAMES.RequestConfiguration, () => {
         watchHistory = parseWatchHistory(preferences.get("watchHistory"));
+        episodeWatchState = parseEpisodeWatchState(
+            preferences.get("episodeWatchState"),
+            watchHistory
+        );
         sidebar.postMessage(MESSAGE_NAMES.Configuration, {
             addons: parseAddons(
                 preferences.get("addons"),
@@ -838,6 +937,7 @@ event.on("iina.window-loaded", () => {
             mediaType: parseMediaTypePreference(preferences.get("mediaType")),
             episodeOrder: parseEpisodeOrder(preferences.get("episodeOrder")),
             history: watchHistory,
+            episodeWatchState,
             // Covers a sidebar that loads while something is already playing; changes after
             // that arrive through the NowPlaying message.
             nowPlaying: nowPlayingState()

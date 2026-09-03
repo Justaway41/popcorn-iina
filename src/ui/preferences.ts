@@ -12,13 +12,19 @@ import {
     parseAddonManifest,
     parseAddons
 } from "../shared/addons";
-import { parseWatchHistory } from "../shared/history";
+import {
+    applySimklWatchedPatches,
+    clearSimklWatched,
+    parseEpisodeWatchState,
+    parseWatchHistory
+} from "../shared/history";
 import {
     parseSimklExternalLinkRequest,
     parseSimklState,
     pollSimklPin,
     requestSimklPin,
     syncSimklHistory,
+    type SimklHistorySyncResult,
     type SimklState
 } from "../shared/simkl";
 import { parseSkipSegments } from "../shared/stremio";
@@ -49,6 +55,7 @@ let trakt = parseTraktState(null);
 let traktRevision = 0;
 let simkl = parseSimklState(null);
 let simklRevision = 0;
+let simklWatchedReset: Promise<void> = Promise.resolve();
 const manifests = new Map<string, AddonManifest>();
 
 document.documentElement.dataset.version = CLIENT_VERSION;
@@ -385,6 +392,7 @@ function saveSimklClientId(): void {
     simklRevision += 1;
     simklPin.hidden = true;
     saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
+    void clearStoredSimklWatched();
 }
 
 async function connectSimkl(): Promise<void> {
@@ -399,6 +407,8 @@ async function connectSimkl(): Promise<void> {
     simklConnect.disabled = true;
     try {
         saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
+        await clearStoredSimklWatched();
+        if (revision !== simklRevision) return;
         simklStatus.textContent = "Requesting a PIN…";
         const pin = await requestSimklPin(browserTransport, simkl);
         if (revision !== simklRevision) return;
@@ -417,6 +427,10 @@ async function connectSimkl(): Promise<void> {
         if (revision !== simklRevision) return;
         saveSimkl(connected);
         simklPin.hidden = true;
+        const local = parseWatchHistory(await getPreference("watchHistory"));
+        if (revision !== simklRevision) return;
+        const result = await syncSimklHistory(browserTransport, connected, local);
+        await persistSimklSync(result, revision);
     } catch (error) {
         if (revision === simklRevision) {
             setSimklError(error instanceof Error ? error.message : "Could not connect Simkl.");
@@ -433,6 +447,7 @@ function disconnectSimkl(): void {
     setSimklError("");
     // Drop the sync cursor too, so reconnecting a different account pulls its full history.
     saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
+    void clearStoredSimklWatched();
 }
 
 function saveTraktCredentials(): void {
@@ -536,11 +551,7 @@ async function syncSimklNow(): Promise<void> {
         const local = parseWatchHistory(await getPreference("watchHistory"));
         if (revision !== simklRevision) return;
         const result = await syncSimklHistory(browserTransport, state, local);
-        const latest = parseWatchHistory(await getPreference("watchHistory"));
-        if (revision !== simklRevision) return;
-        preferences.set("watchHistory", mergeWatchHistory(result.history, latest));
-        preferences.sync?.();
-        saveSimkl(result.state);
+        await persistSimklSync(result, revision);
     } catch (error) {
         if (revision === simklRevision) {
             setSimklError(error instanceof Error ? error.message : "Could not sync Simkl.");
@@ -548,6 +559,45 @@ async function syncSimklNow(): Promise<void> {
     } finally {
         simklSync.disabled = false;
     }
+}
+
+async function persistSimklSync(
+    result: SimklHistorySyncResult,
+    revision: number
+): Promise<void> {
+    const [storedHistory, storedState] = await Promise.all([
+        getPreference("watchHistory"),
+        getPreference("episodeWatchState")
+    ]);
+    if (revision !== simklRevision) return;
+    const latest = parseWatchHistory(storedHistory);
+    const history = mergeWatchHistory(latest, result.history);
+    const watchedState = applySimklWatchedPatches(
+        parseEpisodeWatchState(storedState, history),
+        result.watchedPatches
+    );
+    simkl = result.state;
+    preferences.set("watchHistory", history);
+    preferences.set("episodeWatchState", watchedState);
+    preferences.set("simkl", simkl);
+    preferences.sync?.();
+    if (!simkl.lastError) setSimklError("");
+    renderSimkl();
+}
+
+function clearStoredSimklWatched(): Promise<void> {
+    simklWatchedReset = simklWatchedReset.then(async () => {
+        const [storedHistory, storedState] = await Promise.all([
+            getPreference("watchHistory"),
+            getPreference("episodeWatchState")
+        ]);
+        preferences.set(
+            "episodeWatchState",
+            clearSimklWatched(parseEpisodeWatchState(storedState, parseWatchHistory(storedHistory)))
+        );
+        preferences.sync?.();
+    });
+    return simklWatchedReset;
 }
 
 async function syncTraktNow(): Promise<void> {

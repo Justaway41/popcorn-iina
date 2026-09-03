@@ -96,7 +96,7 @@ item or playback request is made.
 When data changed, `/sync/all-items/` requests detailed episode data with:
 
 ```text
-extended=full_anime_seasons&episode_watched_at=yes
+extended=full_anime_seasons&episode_watched_at=yes&include_all_episodes=yes
 ```
 
 `date_from` is included after the first successful synchronization. The detailed anime form is
@@ -108,9 +108,12 @@ For each returned show or anime item:
 
 - `last_watched` still produces at most one recent-history entry;
 - the explicit `seasons[].episodes[]` list produces one `WatchedShow` patch;
-- episode presence marks it watched; `watched_at` supplies chronology when present;
+- only episodes carrying the requested `watched_at` marker count as watched;
+- anime coordinates use `seasons[].number` and `episodes[].number`, the same as shows; each
+  episode's `tvdb` mapping addresses the whole franchise and does not match Cinemeta;
 - an explicitly empty `seasons` array clears Simkl watched state for that show;
-- a missing or malformed `seasons` field produces no patch, so bad data cannot erase good state.
+- a missing or malformed `seasons` field or a malformed non-empty list produces no patch, so bad
+  data cannot erase good state.
 
 On the first full synchronization, all returned patches establish the Simkl baseline. On later
 incremental synchronizations, a patch replaces only the matching show's `simkl` episodes. Other

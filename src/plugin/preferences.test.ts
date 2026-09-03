@@ -13,10 +13,19 @@ const preferenceWriters = await Promise.all([
 test("stores composite preferences as structured values for IINA's webview bridge", () => {
     expect(info.preferenceDefaults.addons).toEqual([]);
     expect(info.preferenceDefaults.watchHistory).toEqual([]);
+    expect(info.preferenceDefaults.episodeWatchState).toEqual({ local: [], simkl: [] });
     expect(info.preferenceDefaults.trakt).toEqual({});
     expect(preferenceWriters.join("\n")).not.toMatch(
         /preferences\.set\("(?:addons|watchHistory|trakt)", JSON\.stringify/
     );
+});
+
+test("persists exact episode watched state with playback and remote history", () => {
+    const mainSource = preferenceWriters[1];
+    expect(mainSource).toContain("markEpisodeWatched");
+    expect(mainSource).toContain("applySimklWatchedPatches");
+    expect(mainSource).toContain('preferences.set("episodeWatchState"');
+    expect(mainSource).toContain("episodeWatchState");
 });
 
 test("migrates JSON-string preferences to webview-safe structured values", () => {

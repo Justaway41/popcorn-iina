@@ -24,6 +24,7 @@
       preferredAudio: "",
       preferredSubtitle: "",
       watchHistory: [],
+      episodeWatchState: { local: [], simkl: [] },
       trakt: {},
       skipSegments: true,
       simkl: {}
@@ -269,6 +270,44 @@
       return [];
     }
   }
+  function parseEpisodeWatchState(value, legacyHistory = []) {
+    let stored = value;
+    try {
+      stored = typeof value === "string" ? JSON.parse(value) : value;
+    } catch {
+      stored = null;
+    }
+    const item = getRecord2(stored);
+    const state = {
+      local: parseWatchedShows(item?.local),
+      simkl: parseWatchedShows(item?.simkl)
+    };
+    for (const entry of legacyHistory) {
+      if (!entry.watched || !entry.episode)
+        continue;
+      addWatchedEpisode(state.local, historyTitleId(entry), episodeCoordinate(entry.episode));
+    }
+    return state;
+  }
+  function episodeCoordinate(episode) {
+    return `${episode.season}:${episode.episode}`;
+  }
+  function markEpisodeWatched(state, context) {
+    if (!context.episode)
+      return state;
+    const next = parseEpisodeWatchState(state);
+    addWatchedEpisode(next.local, mediaTitleId(context.media), episodeCoordinate(context.episode));
+    return next;
+  }
+  function applySimklWatchedPatches(state, patches) {
+    const next = parseEpisodeWatchState(state);
+    for (const patch of parseWatchedShows(patches)) {
+      next.simkl = next.simkl.filter((show) => show.id !== patch.id);
+      if (patch.episodes.length > 0)
+        next.simkl.push(patch);
+    }
+    return next;
+  }
   function recordPlayback(entries, context, percent, playedAt) {
     if (!Number.isFinite(percent) || percent < 5)
       return entries;
@@ -283,7 +322,8 @@
       watched: Boolean(existing?.watched || progress >= 90),
       progress
     };
-    return [entry, ...entries.filter((item) => item.id !== id)].slice(0, MAX_HISTORY_ITEMS);
+    const titleId = mediaTitleId(context.media);
+    return [entry, ...entries.filter((item) => item.id !== id && (entry.watched || item.watched || historyTitleId(item) !== titleId))].slice(0, MAX_HISTORY_ITEMS);
   }
   function removeHistoryEntry(entries, id) {
     const target = entries.find((entry) => entry.id === id);
@@ -292,7 +332,11 @@
     return entries.filter((entry) => historyTitleId(entry) !== historyTitleId(target));
   }
   function historyTitleId(entry) {
-    return entry.media.imdbId || entry.media.providerId || entry.media.id;
+    return mediaTitleId(entry.media);
+  }
+  function getHistoryEntry(entries, context) {
+    const id = historyContextId(context);
+    return entries.find((entry) => entry.id === id) || null;
   }
   function parseEntry(value) {
     const item = getRecord2(value);
@@ -320,6 +364,55 @@
       return watched ? 100 : null;
     }
     return Math.max(0, Math.min(100, value));
+  }
+  function parseWatchedShows(value) {
+    if (!Array.isArray(value))
+      return [];
+    const shows = [];
+    for (const valueShow of value) {
+      const item = getRecord2(valueShow);
+      const id = getString2(item?.id).trim();
+      if (!id || !Array.isArray(item?.episodes))
+        continue;
+      const existing = shows.find((show2) => show2.id === id);
+      const show = existing || { id, episodes: [] };
+      if (!existing)
+        shows.push(show);
+      for (const coordinate of item.episodes) {
+        if (typeof coordinate !== "string" || !isEpisodeCoordinate(coordinate))
+          continue;
+        if (!show.episodes.includes(coordinate))
+          show.episodes.push(coordinate);
+      }
+      show.episodes.sort(compareEpisodeCoordinates);
+    }
+    return shows;
+  }
+  function addWatchedEpisode(shows, id, coordinate) {
+    if (!id || !isEpisodeCoordinate(coordinate))
+      return;
+    let show = shows.find((item) => item.id === id);
+    if (!show) {
+      show = { id, episodes: [] };
+      shows.push(show);
+    }
+    if (!show.episodes.includes(coordinate))
+      show.episodes.push(coordinate);
+    show.episodes.sort(compareEpisodeCoordinates);
+  }
+  function isEpisodeCoordinate(value) {
+    const match = /^(\d+):(\d+)$/.exec(value);
+    if (!match)
+      return false;
+    return match.slice(1).every((part) => Number.isSafeInteger(Number(part)));
+  }
+  function compareEpisodeCoordinates(first, second) {
+    const [firstSeason, firstEpisode] = first.split(":").map(Number);
+    const [secondSeason, secondEpisode] = second.split(":").map(Number);
+    return firstSeason - secondSeason || firstEpisode - secondEpisode;
+  }
+  function mediaTitleId(media) {
+    return media.imdbId || media.providerId || media.id;
   }
   function parseMedia(value) {
     const item = getRecord2(value);
@@ -752,7 +845,16 @@
       const existing = entries.get(key);
       entries.set(key, existing ? mergeEntry(existing, entry) : entry);
     }
-    return [...entries.values()].sort((a, b) => timestamp(b.lastPlayedAt) - timestamp(a.lastPlayedAt)).slice(0, MAX_HISTORY_ITEMS2);
+    const unfinishedTitles = new Set;
+    return [...entries.values()].sort((a, b) => timestamp(b.lastPlayedAt) - timestamp(a.lastPlayedAt)).filter((entry) => {
+      if (entry.watched)
+        return true;
+      const id = historyTitleId(entry);
+      if (unfinishedTitles.has(id))
+        return false;
+      unfinishedTitles.add(id);
+      return true;
+    }).slice(0, MAX_HISTORY_ITEMS2);
   }
   function parseRemote(value, watched) {
     const item = getRecord4(value);

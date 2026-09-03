@@ -19,6 +19,16 @@ Before finishing a change:
 3. Update this handbook if architecture, behavior, commands, ownership, constraints, or known issues changed.
 4. Report anything that still requires manual IINA testing.
 
+## Agent Delegation
+
+- Agents may delegate concrete, bounded, independent investigation, implementation, or review
+  tasks to subagents without asking the user first when parallel work is useful.
+- The primary agent owns scope, integration, verification, and the final response. Avoid overlapping
+  edits, and never let delegated work overwrite or stage pre-existing changes.
+- Every subagent must read this handbook and run `git status --short`, then use the repository map
+  to inspect only its assigned area. It does not need to rescan or reread the entire codebase.
+- Do not delegate trivial work when coordination would cost more than doing it directly.
+
 ## Project Scope
 
 Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.5.0`) for discovering media and playing direct streams supplied by configured Stremio addons.
@@ -241,9 +251,31 @@ of deleting something watchable. Episode lists are cached per session; failures 
 The strip refills to `HOME_HISTORY_CARDS` as cards drop out, so lookups cost one per shown card
 plus one per removal rather than one per history entry.
 
-### Preferences and Trakt
+### Preferences, Trakt, and Simkl
 
 `src/ui/preferences.ts` manages addon manifests and Trakt device authorization in IINA's preference webview. Composite preferences are stored as arrays/objects, not JSON strings. `src/plugin/preferences.ts` migrates legacy stringified values. Playback-side Trakt work is serialized in `src/plugin/trakt.ts`; transport failures must never interrupt playback, and local history remains the fallback.
+
+Recent progress and exact watched episodes are separate persisted values. `watchHistory` remains
+capped at 100 items for recent cards and resume positions. `episodeWatchState` stores compact
+`season:episode` coordinates by show in separate `local` and `simkl` origins; episode rows use their
+union plus watched entries still present in legacy history. Local playback adds a coordinate at the
+existing 90% watched threshold. Disconnecting or changing Simkl credentials clears only the Simkl
+origin.
+
+Simkl history sync keeps `/sync/activities` as its incremental gate and requests
+`/sync/all-items/?extended=full_anime_seasons&episode_watched_at=yes&include_all_episodes=yes`,
+adding `date_from` after the first successful pull. Each valid IMDb-backed show response replaces
+only that show's Simkl coordinates, using `seasons[].number` with `episodes[].number` and only
+episodes carrying the requested `watched_at` marker. That numbering is what matches the Cinemeta
+coordinates the sidebar renders, for anime as well as shows - do not switch to the `tvdb` mapping
+each anime episode also carries, which addresses the whole franchise (Bleach cour one is TVDB
+season 17, not season 1). Verified against a live account in September 2026. Playback rows name the
+title `anime` for anime and `show` otherwise, and the episode number `number`, so both spellings are
+accepted. Missing or malformed episode lists leave stored state untouched, while an explicit empty
+list clears the show. The recent-history merge retains every watched entry but only the newest
+unfinished episode per title, so the latest pause/close checkpoint wins across devices. No live
+playback polling was added. A `HistoryUpdated` message repaints an open episode list from its cached
+episodes while retaining its selected season and scroll position.
 
 ## Engineering Rules
 
@@ -351,11 +383,8 @@ As of 2026-08-27:
 - `2.2.1` adds Simkl history sync, which the shipped `2.2.0` client lacked: it only ever posted, so
   anything watched on another device stayed invisible. `syncSimklHistory` mirrors the Trakt sync and
   stores the `/sync/activities` `all` timestamp as a cursor. Simkl suspends client ids that pull the
-  full list every time, so `/sync/activities` runs first and `date_from` is always sent.
-  `extended=full` is unused because the 100-item local cap would discard per-episode history
-  anyway, so each title contributes only its `last_watched` position. The size argument that
-  originally justified this does not hold - a full `extended=full` pull for a 15-title account
-  measured under 10 KB - so per-episode watched marks are a size-independent decision if wanted.
+  full list every time, so `/sync/activities` runs first and later pulls include `date_from`. Exact
+  per-episode state is now stored outside the capped recent list as described above.
 - `2.3.0` reworks Recently Watched into Continue Watching, hardens skip-segment data against
   intervals that seek out of the episode, keeps the overlay off playback Popcorn did not start, and
   moves the sidebar with the player when Next Episode is used. The skip-intro fix is a guard on the
@@ -486,20 +515,59 @@ Remove or revise current-state entries as soon as they are committed, verified, 
 - Skip Outro no longer waits on `nextReady`. Seeking past an outro happens inside the file and
   needs nothing loaded, but it sat behind the same guard as Next Episode, so an episode whose
   next-episode prefetch had not finished offered neither control.
-- AniSkip is no longer gated on the item looking like anime. Cinemeta reports every series as
-  `series`, so anime opened through it never reached AniSkip and had no outro source at all.
-  `parseAniZipMalId` maps the IMDb id onto a MAL id through ani.zip, and that lookup is itself
-  the anime test: a live-action IMDb id maps to nothing. Verified against `tt2560140`, which maps
-  to MAL 16498 and has both `op` and `ed`. Coverage is partial and always was: Gintama
-  (`tt0988818` -> MAL 918) is in AniSkip but holds no skip times, and IntroDB has its intro but a
-  null outro, which is why that show shows Skip Intro and no Skip Outro. That is missing data,
-  not a logic fault - do not go looking for a bug in `getOverlayAction` for it.
-  AniSkip and IntroDB now run together rather than one after the other. Chained, the added anime
-  id lookup sat in front of IntroDB, so a slow or unreachable ani.zip withheld an intro IntroDB
-  already had and Skip Intro stopped appearing. Each source applies what it found as it arrives
-  and fills only what is still missing, so when both hold the same interval the first to answer
-  wins rather than the more trusted one; that ordering no longer matters because neither can
-  block the other.
+- AniSkip is reached through AniList, not ani.zip, and is no longer gated on the item looking
+  like anime. Two general defects were behind "no Skip Intro" on show after show, found by
+  running the lookup chain over a corpus rather than fixing one title at a time:
+  - AniSkip keys its timings by cour (one MyAnimeList entry per cour), while Cinemeta numbers a
+    show in seasons. ani.zip mapped an IMDb id to a single MAL id - the first cour's - so every
+    season past the first asked AniSkip for the first season's episode of that number: wrong
+    timings, not missing ones. ani.zip also had no entry at all for many titles (`tt14986406`,
+    Bleach TYBW, maps nowhere; its own index points that show's MAL entry at the original
+    Bleach). `loadAnimeChain` now searches AniList by title (`parseAniListRoot`, which accepts a
+    result only when one of its titles is the name asked for, so live action resolves to
+    nothing) and walks `SEQUEL` relations (`parseAniListSequel`) into the franchise's cours in
+    airing order; `mapAnimeEpisode` then places a Cinemeta season and episode in that chain by
+    consuming episode counts, so Attack on Titan S3E15 becomes *Season 3 Part 2* episode 3.
+    Chains are cached per title for the session; a failed request is never cached, because a
+    rate limit (AniList allows 90/min) must not read as "not anime" until restart.
+  - AniSkip's `episodeLength` parameter filters submissions to within about fifteen seconds of
+    the runtime given, and the plugin passed mpv's exact duration. A rip cut differently from
+    the submitter's therefore answered 404: a 1443s Bleach file against a 1475s submission had
+    an opening on record and showed nothing. The request now passes `episodeLength=0` for every
+    submission and `parseAniSkipInterval` picks the nearest runtime, within
+    `ANISKIP_LENGTH_TOLERANCE_SEC`.
+  Coverage is still bounded by what the databases hold: Bleach TYBW seasons 2-4 answer 404 from
+  AniSkip under their correct ids and IntroDB has only season 1, so that show's later seasons
+  offer nothing and no client-side change can supply it. The corpus run that verified the chain
+  is recorded here; rerun something like it before touching this area again rather than testing
+  on one title. Corpus, 2026-09-03, running the plugin's own functions against live services
+  (`before` is the 2.5.0 chain: ani.zip's first-cour id and AniSkip filtered on exact runtime):
+
+  | show | ep | before | after | IntroDB |
+  | --- | --- | --- | --- | --- |
+  | Bleach TYBW | S1E6 | no mal id | 41467 ep 6: op+ed | intro |
+  | Bleach TYBW | S3E6 | no mal id | 56784 ep 6: 404 | none |
+  | Attack on Titan | S3E15 | op (season 1's) | 38524 ep 3: op+ed | intro+outro |
+  | Attack on Titan | S4E20 | op (season 1's) | 48583 ep 4: op+ed | intro+outro |
+  | Gintama | S1E11 | 404 | 918 ep 11: op+ed | intro |
+  | Jujutsu Kaisen | S2E5 | op+ed (season 1's) | 51009 ep 5: op+ed | intro+outro |
+  | Demon Slayer | S2E3 | op+ed (season 1's) | 49926 ep 3: 404 | intro+outro |
+  | Frieren | S1E5 | 404 | 52991 ep 5: op+ed | intro+outro |
+  | Re:Zero | S2E5 | 404 | 39587 ep 5: 404 | intro+outro |
+  | Spy x Family | S1E3 | op+ed | 50265 ep 3: op+ed | intro+outro |
+  | My Hero Academia | S3E10 | op+ed (season 1's) | 36456 ep 10: op+ed | intro+outro |
+  | Hunter x Hunter | S1E5 | op+ed | 136 ep 5: op+ed | intro+outro |
+  | One Piece | S21E40 | op | 21 absolute ep 930: op | - |
+  | Breaking Bad, The Office, Game of Thrones, Severance | - | no mal id | not anime | intro+outro |
+
+  Skip Intro from some source: 13 of 14 anime episodes; the one miss is Bleach TYBW season 3,
+  which no database holds. Every "before" marked "season 1's" was wrong data that looked right.
+- AniSkip and IntroDB run together rather than one after the other. Chained, the anime id lookup
+  sat in front of IntroDB, so a slow or unreachable lookup withheld an intro IntroDB already had
+  and Skip Intro stopped appearing. Each source applies what it found as it arrives and fills
+  only what is still missing, so when both hold the same interval the first to answer wins
+  rather than the more trusted one; that ordering no longer matters because neither can block
+  the other.
 - The overlay's Next Episode transitioned and IINA then died: that session's log ends with no
   `App will terminate`, and IINA stopped logging ~49s before the process went while mpv kept
   decoding, so its main thread froze. The cause is NOT established. A first theory blamed the
@@ -518,6 +586,19 @@ Remove or revise current-state entries as soon as they are committed, verified, 
 - Chapter names are matched by `INTRO_CHAPTER` and `CREDITS_CHAPTER` rather than an exact list.
   `Ending Song`, `ED1`, and `NCOP` are ordinary in anime releases and were all missed, leaving
   files looking unchaptered. Matching stays anchored so `Endcard` and `Introduction` do not match.
+- Multi-cour anime does not reach Simkl at all, and no amount of import work fixes it. Simkl
+  indexes each cour as its own show: `search/id?imdb=tt14986406` resolves only to "Bleach: Sennen
+  Kessen Hen", a 13-episode record covering cour one, while cours two and three are separate Simkl
+  shows reachable by MAL id (53998, 56784). `buildScrobblePayload` addresses shows by IMDb id and
+  Cinemeta season, so every `tt14986406` season 2 and 3 scrobble lands on that 13-episode record
+  out of range and Simkl silently drops it. A live account watched through Bleach S3E6 locally and
+  Simkl held only S1E1-13, which is why a second device offered S2E1 as next. Shows and
+  single-cour anime are unaffected and verified correct (Gintama, Attack on Titan, Family Guy).
+  Fixing it means addressing anime by MAL id on the way out and mapping MAL plus in-cour episode
+  back onto Cinemeta coordinates on the way in, both of which the AniList chain in
+  `src/plugin/intro.ts` already computes for skip times. Do not change only the write side: Simkl
+  numbers every cour from season 1, so scrobbling by MAL without the inverse map would report
+  cour three as season 1 and mark the wrong episodes watched.
 
 ## Handbook Maintenance
 

@@ -6,11 +6,14 @@ import {
     getOverlayAction,
     isInsideIntro,
     NEXT_EPISODE_TAIL_SEC,
+    mapAnimeEpisode,
+    parseAniListRoot,
+    parseAniListSequel,
     parseAniSkipInterval,
-    parseAniZipMalId,
     parseIntroDbSegment,
     parseKitsuMalId,
-    sanitizeSegments
+    sanitizeSegments,
+    seasonEpisodeCounts
 } from "./intro";
 
 test("uses a named intro chapter with the next chapter as its end", () => {
@@ -225,15 +228,102 @@ test("credits too long to be an ending song are not offered as a skip", () => {
     expect(getOverlayAction(1400, segments, true, 1440)).toBe("next");
 });
 
-test("reads the MyAnimeList id ani.zip maps an IMDb id onto", () => {
-    expect(parseAniZipMalId({ mappings: { mal_id: 16498, imdb_id: "tt2560140" } })).toBe("16498");
-    // A live-action IMDb id maps to no anime, which is how non-anime is detected at all.
-    expect(parseAniZipMalId({ mappings: { mal_id: null } })).toBe("");
-    expect(parseAniZipMalId({ mappings: {} })).toBe("");
-    expect(parseAniZipMalId({})).toBe("");
-    expect(parseAniZipMalId(null)).toBe("");
-    // Anything that is not a positive whole id is not one.
-    expect(parseAniZipMalId({ mappings: { mal_id: 0 } })).toBe("");
-    expect(parseAniZipMalId({ mappings: { mal_id: -3 } })).toBe("");
-    expect(parseAniZipMalId({ mappings: { mal_id: "918" } })).toBe("");
+const search = (media: unknown[]) => ({ data: { Page: { media } } });
+const tv = (id: number, idMal: number, year: number, episodes: number | null, english: string, extra: Record<string, unknown> = {}) => ({
+    id, idMal, format: "TV", episodes, startDate: { year, month: 4 }, synonyms: [], title: { english, romaji: english }, ...extra
+});
+
+test("finds the first cour of the franchise a title names, and only for a title it knows", () => {
+    // Copied shape of a live search: the search ranks a sequel above the first season.
+    const bleach = search([
+        tv(2, 53998, 2023, 13, "BLEACH: Thousand-Year Blood War - The Separation"),
+        tv(1, 41467, 2022, 13, "BLEACH: Thousand-Year Blood War"),
+        tv(3, 56784, 2024, 14, "BLEACH: Thousand-Year Blood War - The Conflict")
+    ]);
+    expect(parseAniListRoot(bleach, "Bleach: Thousand-Year Blood War")).toEqual({ anilistId: 1, malId: "41467", episodes: 13 });
+
+    // A spin-off shares the leading words but the first season is earlier, so it is the root.
+    const titan = search([
+        tv(5, 31374, 2015, 12, "Attack on Titan: Junior High"),
+        tv(4, 16498, 2013, 25, "Attack on Titan"),
+        { ...tv(6, 42091, 2020, 1, "Attack on Titan ~Chronicle~"), format: "MOVIE" }
+    ]);
+    expect(parseAniListRoot(titan, "Attack on Titan")?.malId).toBe("16498");
+    // Romaji and synonyms count as the title too; punctuation and case do not.
+    expect(parseAniListRoot(search([tv(7, 16498, 2013, 25, "Attack on Titan", { title: { english: "Attack on Titan", romaji: "Shingeki no Kyojin" } })]), "SHINGEKI NO KYOJIN")?.malId).toBe("16498");
+    expect(parseAniListRoot(search([tv(8, 52991, 2023, 28, "Frieren: Beyond Journey\u2019s End")]), "Frieren: Beyond Journey's End")?.malId).toBe("52991");
+
+    // A search answers something for any words at all; without a matching title it is not anime.
+    expect(parseAniListRoot(search([tv(9, 1, 2001, 12, "Office Ladies Anime")]), "The Office")).toBeNull();
+    expect(parseAniListRoot(search([{ ...tv(10, 21, 1999, null, "ONE PIECE"), idMal: null }]), "One Piece")).toBeNull();
+    expect(parseAniListRoot({ errors: [{ message: "Too Many Requests" }] }, "One Piece")).toBeNull();
+    expect(parseAniListRoot(null, "")).toBeNull();
+});
+
+test("follows the earliest sequel that is itself a run of episodes", () => {
+    const relations = (edges: unknown[]) => ({ data: { Media: { relations: { edges } } } });
+    expect(parseAniListSequel(relations([
+        { relationType: "SIDE_STORY", node: tv(20, 31374, 2015, 12, "Junior High") },
+        { relationType: "SEQUEL", node: { ...tv(21, 36702, 2018, 1, "Roar of Awakening"), format: "MOVIE" } },
+        { relationType: "SEQUEL", node: tv(22, 35760, 2018, 12, "Season 3") },
+        { relationType: "PREQUEL", node: tv(23, 16498, 2013, 25, "Season 1") }
+    ]))).toEqual({ anilistId: 22, malId: "35760", episodes: 12 });
+    // An airing cour reports no episode count yet.
+    expect(parseAniListSequel(relations([{ relationType: "SEQUEL", node: tv(24, 61316, 2026, null, "Season 4") }])))
+        .toEqual({ anilistId: 24, malId: "61316", episodes: null });
+    expect(parseAniListSequel(relations([]))).toBeNull();
+    expect(parseAniListSequel({ errors: [] })).toBeNull();
+});
+
+test("counts a series' episodes per season, leaving specials out", () => {
+    const episodes = [
+        { season: 1, episode: 1 }, { season: 1, episode: 2 }, { season: 0, episode: 1 },
+        { season: 2, episode: 1 }, { season: 2, episode: 2 }, { season: 2, episode: 3 }
+    ];
+    expect(seasonEpisodeCounts(episodes)).toEqual([{ season: 1, count: 2 }, { season: 2, count: 3 }]);
+    expect(seasonEpisodeCounts([])).toEqual([]);
+});
+
+test("places a Cinemeta season and episode in the cour AniSkip keys by", () => {
+    const entry = (malId: string, episodes: number | null) => ({ anilistId: Number(malId), malId, episodes });
+    // Attack on Titan: Cinemeta season 3 is 22 episodes, MAL has it as 12 + 10.
+    const titan = [entry("16498", 25), entry("25777", 12), entry("35760", 12), entry("38524", 10), entry("40028", 16), entry("48583", 12)];
+    const titanSeasons = [{ season: 1, count: 25 }, { season: 2, count: 12 }, { season: 3, count: 22 }, { season: 4, count: 28 }];
+    expect(mapAnimeEpisode(titanSeasons, titan, 1, 21)).toEqual({ malId: "16498", episode: 21 });
+    expect(mapAnimeEpisode(titanSeasons, titan, 3, 12)).toEqual({ malId: "35760", episode: 12 });
+    expect(mapAnimeEpisode(titanSeasons, titan, 3, 15)).toEqual({ malId: "38524", episode: 3 });
+    expect(mapAnimeEpisode(titanSeasons, titan, 4, 20)).toEqual({ malId: "48583", episode: 4 });
+    // Past everything the chain covers there is nothing to ask for.
+    expect(mapAnimeEpisode(titanSeasons, titan, 4, 29)).toBeNull();
+    expect(mapAnimeEpisode(titanSeasons, titan, 5, 1)).toBeNull();
+
+    // One cour give or take a special is that cour, so the specials do not shift later seasons.
+    const seasonsWithSpecial = [{ season: 1, count: 26 }, { season: 2, count: 12 }];
+    expect(mapAnimeEpisode(seasonsWithSpecial, titan, 2, 1)).toEqual({ malId: "25777", episode: 1 });
+    // One cour split across two Cinemeta seasons continues its numbering.
+    const split = [{ season: 1, count: 13 }, { season: 2, count: 12 }];
+    expect(mapAnimeEpisode(split, [entry("31240", 25)], 2, 1)).toEqual({ malId: "31240", episode: 14 });
+    // An airing cour with no count yet covers the rest of its season.
+    expect(mapAnimeEpisode([{ season: 1, count: 1100 }], [entry("21", null)], 1, 1000)).toEqual({ malId: "21", episode: 1000 });
+    expect(mapAnimeEpisode([], titan, 1, 1)).toBeNull();
+});
+
+test("takes the AniSkip submission nearest the file's runtime, and none for a different cut", () => {
+    const response = {
+        found: true,
+        results: [
+            { skipType: "op", episodeLength: 1449, interval: { startTime: 198, endTime: 288 } },
+            { skipType: "op", episodeLength: 1463, interval: { startTime: 208, endTime: 298 } },
+            { skipType: "ed", episodeLength: 1464, interval: { startTime: 1358, endTime: 1448 } }
+        ]
+    };
+    expect(parseAniSkipInterval(response, "op", 1443)).toEqual({ start: 198, end: 288 });
+    expect(parseAniSkipInterval(response, "op", 1470)).toEqual({ start: 208, end: 298 });
+    // The one ending submission is 21 seconds off the 1443s file, which AniSkip's own filter
+    // rejected; it is well inside a minute and now counts.
+    expect(parseAniSkipInterval(response, "ed", 1443)).toEqual({ start: 1358, end: 1448 });
+    // Two minutes off is another edit of the episode altogether.
+    expect(parseAniSkipInterval(response, "op", 1600)).toBeNull();
+    // Without a runtime to compare against, the first valid submission stands, as before.
+    expect(parseAniSkipInterval(response, "op")).toEqual({ start: 198, end: 288 });
 });

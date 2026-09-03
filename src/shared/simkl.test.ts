@@ -8,6 +8,7 @@ import {
     parseSimklExternalLinkRequest,
     parseSimklState,
     parseSimklHistory,
+    parseSimklWatchedPatches,
     pollSimklPin,
     requestSimklPin,
     simklScrobble,
@@ -328,7 +329,7 @@ test("pulls the full lists on a first sync and stores the activity cursor", asyn
 
     expect(calls.map((call) => call.url)).toEqual([
         "https://api.simkl.com/sync/activities",
-        "https://api.simkl.com/sync/all-items/",
+        "https://api.simkl.com/sync/all-items/?extended=full_anime_seasons&episode_watched_at=yes&include_all_episodes=yes",
         "https://api.simkl.com/sync/playback"
     ]);
     expect(result.state.lastActivityAt).toBe("2026-08-13T10:00:00Z");
@@ -337,6 +338,7 @@ test("pulls the full lists on a first sync and stores the activity cursor", asyn
         "tt0145487"
     ]);
     expect(result.history.every((entry) => entry.watched)).toBe(true);
+    expect(result.watchedPatches).toEqual([]);
 });
 
 test("sends the stored cursor as date_from on later syncs", async () => {
@@ -350,6 +352,64 @@ test("sends the stored cursor as date_from on later syncs", async () => {
 
     expect(calls[1].url).toContain("date_from=2026-08-01T00%3A00%3A00Z");
     expect(calls[2].url).toContain("date_from=2026-08-01T00%3A00%3A00Z");
+});
+
+test("parses exact watched episodes into per-show patches", () => {
+    expect(parseSimklWatchedPatches({
+        shows: [
+            {
+                show: { title: "Dark", ids: { imdb: "tt5753856" } },
+                seasons: [{ number: 2, episodes: [
+                    { number: 1, watched_at: "2026-09-01T00:00:00Z" },
+                    { number: 2 },
+                    { number: 3, watched_at: "2026-09-02T00:00:00Z" }
+                ] }]
+            },
+            {
+                show: { title: "Cleared", ids: { imdb: "tt1234567" } },
+                seasons: []
+            },
+            {
+                show: { title: "Not included", ids: { tmdb: 1 } },
+                seasons: [{ number: 1, episodes: [{ number: 1 }] }]
+            }
+        ],
+        anime: [{
+            // Shaped like a live Simkl anime row: its `tvdb` mapping points at the
+            // franchise season, which is not what Popcorn's episode rows are keyed by.
+            show: { title: "Mapped", ids: { imdb: "tt2098220" } },
+            seasons: [{
+                number: 1,
+                episodes: [
+                    { number: 1, watched_at: "a", tvdb: { season: 17, episode: 1 } },
+                    { number: 2, watched_at: "b", tvdb: { season: 17, episode: 2 } },
+                    { number: 3, tvdb: { season: 17, episode: 3 } },
+                    { number: -1, watched_at: "c" },
+                    { number: 2.5, watched_at: "d" },
+                    null
+                ]
+            }]
+        }]
+    })).toEqual([
+        { id: "tt5753856", episodes: ["2:1", "2:3"] },
+        { id: "tt1234567", episodes: [] },
+        { id: "tt2098220", episodes: ["1:1", "1:2"] }
+    ]);
+});
+
+test("does not turn missing or malformed episode lists into clearing patches", () => {
+    expect(parseSimklWatchedPatches({
+        shows: [
+            { show: { ids: { imdb: "tt5753856" } } },
+            { show: { ids: { imdb: "tt5753856" } }, seasons: "bad" },
+            {
+                show: { ids: { imdb: "tt5753856" } },
+                seasons: [{ number: "bad", episodes: [] }]
+            },
+            null
+        ],
+        anime: [{ show: { ids: { imdb: "tt2098220" } }, seasons: [{ number: 1 }] }]
+    })).toEqual([]);
 });
 
 test("treats bare anime episode numbers as season one", () => {
@@ -391,6 +451,22 @@ test("turns paused playback sessions into unwatched progress entries", () => {
         ["tt5753856:3:4", false, 45.5]
     ]);
     expect(history[1].episode?.name).toBe("The Travellers");
+});
+
+test("reads anime playback sessions, which name the title and episode differently", () => {
+    // Live shape: the title arrives under `anime` and the episode under `number`.
+    const history = parseSimklHistory(null, [{
+        id: 29485829,
+        progress: 46.14,
+        paused_at: "2026-08-28T16:16:32Z",
+        type: "episode",
+        episode: { season: 1, number: 22, title: "The Defeated", tvdb_season: 1, tvdb_number: 22 },
+        anime: { title: "Attack on Titan", year: 2013, ids: { imdb: "tt2560140" } }
+    }]);
+
+    expect(history.map((entry) => [entry.id, entry.watched, entry.progress])).toEqual([
+        ["tt2560140:1:22", false, 46.14]
+    ]);
 });
 
 test("drops remote items that carry no usable imdb id or position", () => {
@@ -449,6 +525,7 @@ test("reports a sync failure without clearing local history", async () => {
     expect(result.history).toBe(local);
     expect(result.state.retryAt).toBe(1000 + 30_000);
     expect(result.state.accessToken).toBe("access-token");
+    expect(result.watchedPatches).toEqual([]);
 });
 
 test("records when a pull last succeeded, including the one that had nothing to fetch", async () => {

@@ -113,3 +113,11 @@ test("keeps addon URL visibility controllers isolated per row", () => {
     expect(first.state()).toEqual(getAddonUrlVisibility(true));
     expect(second.state()).toEqual(getAddonUrlVisibility(false));
 });
+
+test("merges exact Simkl episode state and clears it on account changes", () => {
+    expect(preferencesSource).toContain("applySimklWatchedPatches");
+    expect(preferencesSource).toContain("parseEpisodeWatchState");
+    expect(preferencesSource).toContain('preferences.set("episodeWatchState"');
+    expect(preferencesSource).toContain("clearSimklWatched");
+    expect(preferencesSource).toContain("simklWatchedReset = simklWatchedReset.then");
+});
