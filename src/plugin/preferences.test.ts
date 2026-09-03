@@ -13,7 +13,7 @@ const preferenceWriters = await Promise.all([
 test("stores composite preferences as structured values for IINA's webview bridge", () => {
     expect(info.preferenceDefaults.addons).toEqual([]);
     expect(info.preferenceDefaults.watchHistory).toEqual([]);
-    expect(info.preferenceDefaults.episodeWatchState).toEqual({ local: [], simkl: [] });
+    expect(info.preferenceDefaults.episodeWatchState).toEqual({ local: [], simkl: [], simklCours: [] });
     expect(info.preferenceDefaults.trakt).toEqual({});
     expect(preferenceWriters.join("\n")).not.toMatch(
         /preferences\.set\("(?:addons|watchHistory|trakt)", JSON\.stringify/

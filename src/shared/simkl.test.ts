@@ -8,6 +8,7 @@ import {
     parseSimklExternalLinkRequest,
     parseSimklState,
     parseSimklHistory,
+    parseSimklWatchedCours,
     parseSimklWatchedPatches,
     pollSimklPin,
     requestSimklPin,
@@ -247,6 +248,7 @@ test("sends nothing when disconnected, non-imdb, or inside a retry window", asyn
         "start",
         context,
         5,
+        null,
         1000
     );
 
@@ -259,7 +261,7 @@ test("records a rate limit as a retry window rather than throwing", async () => 
     ]);
     const context: PlaybackContext = { media: movie, episodes: [] };
 
-    const state = await simklScrobble(transport, connected, "start", context, 5, 1000);
+    const state = await simklScrobble(transport, connected, "start", context, 5, null, 1000);
 
     expect(state.retryAt).toBe(1000 + 30_000);
     expect(state.lastError).not.toBe("");
@@ -374,27 +376,46 @@ test("parses exact watched episodes into per-show patches", () => {
                 seasons: [{ number: 1, episodes: [{ number: 1 }] }]
             }
         ],
+        // Anime never becomes an IMDb-keyed patch: Simkl reports Bleach's later cours under
+        // the 2004 series they continue, so this id would mark a different show watched.
         anime: [{
-            // Shaped like a live Simkl anime row: its `tvdb` mapping points at the
-            // franchise season, which is not what Popcorn's episode rows are keyed by.
-            show: { title: "Mapped", ids: { imdb: "tt2098220" } },
-            seasons: [{
-                number: 1,
-                episodes: [
-                    { number: 1, watched_at: "a", tvdb: { season: 17, episode: 1 } },
-                    { number: 2, watched_at: "b", tvdb: { season: 17, episode: 2 } },
-                    { number: 3, tvdb: { season: 17, episode: 3 } },
-                    { number: -1, watched_at: "c" },
-                    { number: 2.5, watched_at: "d" },
-                    null
-                ]
-            }]
+            show: { title: "Mapped", ids: { imdb: "tt0434665", mal: "56784" } },
+            seasons: [{ number: 1, episodes: [{ number: 1, watched_at: "a" }] }]
         }]
     })).toEqual([
         { id: "tt5753856", episodes: ["2:1", "2:3"] },
-        { id: "tt1234567", episodes: [] },
-        { id: "tt2098220", episodes: ["1:1", "1:2"] }
+        { id: "tt1234567", episodes: [] }
     ]);
+});
+
+test("reads anime watched episodes as cour numbers keyed by MAL id", () => {
+    expect(parseSimklWatchedCours({
+        // The `tvdb` mapping each anime episode carries addresses the whole franchise
+        // (Bleach cour one is TVDB season 17), so only the cour's own numbering is kept.
+        anime: [
+            {
+                show: { title: "Bleach", ids: { imdb: "tt14986406", mal: "41467" } },
+                seasons: [{
+                    number: 1,
+                    episodes: [
+                        { number: 1, watched_at: "a", tvdb: { season: 17, episode: 1 } },
+                        { number: 2, watched_at: "b", tvdb: { season: 17, episode: 2 } },
+                        { number: 3, tvdb: { season: 17, episode: 3 } },
+                        { number: -1, watched_at: "c" },
+                        { number: 2.5, watched_at: "d" },
+                        null
+                    ]
+                }]
+            },
+            { show: { ids: { mal: "53998" } }, seasons: "bad" },
+            { show: { ids: { imdb: "tt0434665" } }, seasons: [{ number: 1, episodes: [{ number: 1, watched_at: "a" }] }] }
+        ],
+        shows: [{
+            show: { ids: { imdb: "tt5753856" } },
+            seasons: [{ number: 1, episodes: [{ number: 1, watched_at: "a" }] }]
+        }]
+    })).toEqual([{ malId: "41467", episodes: [1, 2] }]);
+    expect(parseSimklWatchedCours({})).toEqual([]);
 });
 
 test("does not turn missing or malformed episode lists into clearing patches", () => {

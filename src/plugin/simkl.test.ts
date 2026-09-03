@@ -27,7 +27,7 @@ function preferences(value: unknown) {
 test("returns an empty watched patch list when disconnected", async () => {
     const client = createIinaSimklClient({} as never, preferences({ ...connected, accessToken: "" }) as never, () => {});
 
-    expect(await client.sync([])).toEqual({ history: [], watchedPatches: [] });
+    expect(await client.sync([])).toEqual({ history: [], watchedPatches: [], watchedCours: [] });
 });
 
 test("returns exact watched patches from a connected sync", async () => {
@@ -62,7 +62,8 @@ test("returns exact watched patches from a connected sync", async () => {
 
     expect(await client.sync([])).toEqual({
         history: [],
-        watchedPatches: [{ id: "tt5753856", episodes: ["2:1"] }]
+        watchedPatches: [{ id: "tt5753856", episodes: ["2:1"] }],
+        watchedCours: []
     });
 });
 
@@ -113,5 +114,5 @@ test("drops watched patches from an account disconnected during sync", async () 
     stored = { ...connected, accessToken: "" };
     releaseRequest();
 
-    expect(await result).toEqual({ history: [], watchedPatches: [] });
+    expect(await result).toEqual({ history: [], watchedPatches: [], watchedCours: [] });
 });

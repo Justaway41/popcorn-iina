@@ -18,9 +18,25 @@ export interface WatchedShow {
 export interface EpisodeWatchState {
     local: WatchedShow[];
     simkl: WatchedShow[];
+    /**
+     * Anime Simkl reported per cour, held as it arrived. Only the plugin can place these on
+     * Cinemeta's seasons, so keeping them means a sync started anywhere else - the preferences
+     * window's Sync Now - still advances the cursor without losing what it pulled.
+     */
+    simklCours: WatchedCour[];
 }
 
 export type WatchedShowPatch = WatchedShow;
+
+/**
+ * Watched episodes as Simkl numbers an anime cour: `malId` names the cour and the numbers
+ * count from one within it. They are not season coordinates and cannot be stored as they
+ * arrive - see `parseSimklWatchedCours`.
+ */
+export interface WatchedCour {
+    malId: string;
+    episodes: number[];
+}
 
 const MAX_HISTORY_ITEMS = 100;
 
@@ -47,7 +63,8 @@ export function parseEpisodeWatchState(
     const item = getRecord(stored);
     const state = {
         local: parseWatchedShows(item?.local),
-        simkl: parseWatchedShows(item?.simkl)
+        simkl: parseWatchedShows(item?.simkl),
+        simklCours: parseWatchedCours(item?.simklCours)
     };
     for (const entry of legacyHistory) {
         if (!entry.watched || !entry.episode) continue;
@@ -82,8 +99,50 @@ export function applySimklWatchedPatches(
     return next;
 }
 
+/**
+ * Adds to a show's Simkl coordinates instead of replacing them. One Popcorn show can span
+ * several Simkl anime cours, and an incremental pull carries only the cours that changed, so
+ * replacing would drop the marks for every cour the user did not touch this time.
+ */
+export function addSimklWatchedEpisodes(
+    state: EpisodeWatchState,
+    patches: WatchedShowPatch[]
+): EpisodeWatchState {
+    const next = parseEpisodeWatchState(state);
+    for (const patch of parseWatchedShows(patches)) {
+        for (const episode of patch.episodes) addWatchedEpisode(next.simkl, patch.id, episode);
+    }
+    return next;
+}
+
 export function clearSimklWatched(state: EpisodeWatchState): EpisodeWatchState {
-    return { ...parseEpisodeWatchState(state), simkl: [] };
+    return { ...parseEpisodeWatchState(state), simkl: [], simklCours: [] };
+}
+
+/** Keeps the newest numbers for each cour and leaves cours this pull did not mention alone. */
+export function mergeSimklCours(
+    state: EpisodeWatchState,
+    cours: WatchedCour[]
+): EpisodeWatchState {
+    const next = parseEpisodeWatchState(state);
+    for (const cour of parseWatchedCours(cours)) {
+        next.simklCours = next.simklCours.filter((item) => item.malId !== cour.malId);
+        next.simklCours.push(cour);
+    }
+    return next;
+}
+
+function parseWatchedCours(value: unknown): WatchedCour[] {
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((item) => {
+        const record = getRecord(item);
+        const malId = typeof record?.malId === "string" ? record.malId : "";
+        const episodes = Array.isArray(record?.episodes)
+            ? record.episodes.filter((number): number is number =>
+                typeof number === "number" && Number.isInteger(number) && number > 0)
+            : [];
+        return malId && episodes.length > 0 ? [{ malId, episodes: [...new Set(episodes)] }] : [];
+    });
 }
 
 export function isEpisodeWatched(

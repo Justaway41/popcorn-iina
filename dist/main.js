@@ -189,7 +189,8 @@
     const item = getRecord2(stored);
     const state = {
       local: parseWatchedShows(item?.local),
-      simkl: parseWatchedShows(item?.simkl)
+      simkl: parseWatchedShows(item?.simkl),
+      simklCours: parseWatchedCours(item?.simklCours)
     };
     for (const entry of legacyHistory) {
       if (!entry.watched || !entry.episode)
@@ -216,6 +217,32 @@
         next.simkl.push(patch);
     }
     return next;
+  }
+  function addSimklWatchedEpisodes(state, patches) {
+    const next = parseEpisodeWatchState(state);
+    for (const patch of parseWatchedShows(patches)) {
+      for (const episode of patch.episodes)
+        addWatchedEpisode(next.simkl, patch.id, episode);
+    }
+    return next;
+  }
+  function mergeSimklCours(state, cours) {
+    const next = parseEpisodeWatchState(state);
+    for (const cour of parseWatchedCours(cours)) {
+      next.simklCours = next.simklCours.filter((item) => item.malId !== cour.malId);
+      next.simklCours.push(cour);
+    }
+    return next;
+  }
+  function parseWatchedCours(value) {
+    if (!Array.isArray(value))
+      return [];
+    return value.flatMap((item) => {
+      const record = getRecord2(item);
+      const malId = typeof record?.malId === "string" ? record.malId : "";
+      const episodes = Array.isArray(record?.episodes) ? record.episodes.filter((number) => typeof number === "number" && Number.isInteger(number) && number > 0) : [];
+      return malId && episodes.length > 0 ? [{ malId, episodes: [...new Set(episodes)] }] : [];
+    });
   }
   function recordPlayback(entries, context, percent, playedAt) {
     if (!Number.isFinite(percent) || percent < 5)
@@ -394,6 +421,9 @@
     ["Tamil", ["tamil", "tam"]],
     ["Telugu", ["telugu", "tel"]]
   ];
+  function buildCinemetaSeriesUrl(imdbId) {
+    return `${CINEMETA_BASE_URL}/meta/series/${encodeURIComponent(imdbId)}.json`;
+  }
   function buildStremioStreamUrl(manifestUrl, type, videoId) {
     return buildStremioResourceUrl(manifestUrl, "stream", type, videoId);
   }
@@ -417,8 +447,82 @@
   function cacheRank(cached) {
     return cached === true ? 0 : cached === null ? 1 : 2;
   }
+  function parseMediaResponse(value, source = { manifestUrl: CINEMETA_MANIFEST_URL }) {
+    const metas = getRecord3(value)?.metas;
+    if (!Array.isArray(metas)) {
+      return [];
+    }
+    return metas.flatMap((entry) => {
+      const item = getRecord3(entry);
+      const id = getString3(item?.id);
+      const providerType = getString3(item?.type);
+      const type = providerType === "movie" ? "movie" : providerType === "series" || providerType === "anime" ? "series" : null;
+      const name = getString3(item?.name);
+      if (!id || !type || !name) {
+        return [];
+      }
+      const imdbId = firstImdbId(item?.imdb_id, id, getRecord3(item?.behaviorHints)?.defaultVideoId);
+      return [{
+        id,
+        imdbId,
+        type,
+        name,
+        releaseInfo: getString3(item?.releaseInfo) || getStringOrNumber(item?.year),
+        poster: getString3(item?.poster),
+        sourceManifestUrl: source.manifestUrl,
+        providerId: id,
+        providerType,
+        malId: getStringOrNumber(item?.mal_id)
+      }];
+    });
+  }
+  function parseMediaMetadata(value, source, preview) {
+    const meta = getRecord3(getRecord3(value)?.meta);
+    if (!meta)
+      return { media: preview, episodes: [] };
+    const parsed = parseMediaResponse({ metas: [meta] }, source)[0];
+    const media = parsed ? {
+      ...preview,
+      ...parsed,
+      name: parsed.name || preview.name,
+      releaseInfo: parsed.releaseInfo || preview.releaseInfo,
+      poster: parsed.poster || preview.poster,
+      imdbId: parsed.imdbId || preview.imdbId,
+      malId: parsed.malId || preview.malId || ""
+    } : preview;
+    return { media, episodes: parseSeriesEpisodes(value) };
+  }
   function isImdbId(value) {
     return /^tt\d+$/i.test(value.trim());
+  }
+  function parseSeriesEpisodes(value) {
+    const videos = getRecord3(getRecord3(value)?.meta)?.videos;
+    if (!Array.isArray(videos)) {
+      return [];
+    }
+    return videos.flatMap((entry) => {
+      const item = getRecord3(entry);
+      const providerId = getString3(item?.id);
+      const name = getString3(item?.name) || getString3(item?.title);
+      const season = getNumber2(item?.season);
+      const episode = getNumber2(item?.number);
+      if (!providerId || !name || season === null || episode === null) {
+        return [];
+      }
+      const imdbId = firstImdbId(item?.imdb_id);
+      const imdbSeason = getNumber2(item?.imdbSeason);
+      const imdbEpisode = getNumber2(item?.imdbEpisode);
+      const id = imdbId && imdbSeason !== null && imdbEpisode !== null ? `${imdbId}:${imdbSeason}:${imdbEpisode}` : providerId;
+      return [{
+        id,
+        name,
+        season,
+        episode,
+        aired: getString3(item?.firstAired) || getString3(item?.released),
+        description: getString3(item?.description) || getString3(item?.overview),
+        thumbnail: getString3(item?.thumbnail)
+      }];
+    });
   }
   function parseReleaseShowTitle(description) {
     const line = (description.split(`
@@ -579,6 +683,15 @@
   }
   function getNonNegativeInteger(value) {
     return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+  }
+  function getStringOrNumber(value) {
+    return typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+  }
+  function firstImdbId(...values) {
+    return values.map(getString3).find(isImdbId) || "";
+  }
+  function getNumber2(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
 
   // src/shared/stream-choice.ts
@@ -1043,7 +1156,7 @@
       preferredAudio: "",
       preferredSubtitle: "",
       watchHistory: [],
-      episodeWatchState: { local: [], simkl: [] },
+      episodeWatchState: { local: [], simkl: [], simklCours: [] },
       trakt: {},
       skipSegments: true,
       simkl: {}
@@ -1177,6 +1290,403 @@
     ticksSinceSpawn = 0;
   }
 
+  // src/plugin/http.ts
+  function safeJson(value) {
+    if (typeof value !== "string")
+      return value ?? null;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  function createJsonClient(http) {
+    const read = (response) => {
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw new Error(`Request failed with HTTP ${response.statusCode}.`);
+      }
+      const data = safeJson(response.data ?? response.text);
+      if (data === null)
+        throw new Error("Response was not valid JSON.");
+      return data;
+    };
+    return {
+      async getJson(url) {
+        return read(await http.get(url, {
+          params: {},
+          headers: { Accept: "application/json" },
+          data: {}
+        }));
+      },
+      async postJson(url, body) {
+        return read(await http.post(url, {
+          params: {},
+          headers: { Accept: "application/json", "Content-Type": "application/json" },
+          data: body
+        }));
+      }
+    };
+  }
+
+  // src/plugin/intro.ts
+  var NEXT_EPISODE_TAIL_SEC = 60;
+  var MIN_TAIL_DURATION_SEC = 300;
+  var INTRO_CHAPTER = /^(?:intro|opening|avant)\b|^(?:nc)?op\s*\d*$/i;
+  var CREDITS_CHAPTER = /^(?:ending|credits|outro|end\s*credits)\b|^(?:nc)?ed\s*\d*$/i;
+  function findChapterIntro(chapters) {
+    return findChapterInterval(chapters, INTRO_CHAPTER);
+  }
+  function findChapterCredits(chapters, duration) {
+    return findChapterInterval(chapters, CREDITS_CHAPTER, Number.isFinite(duration) && duration > 0 ? duration : null);
+  }
+  function findChapterInterval(chapters, names, fallbackEnd = null) {
+    const sorted = chapters.filter((chapter) => Number.isFinite(chapter.start)).sort((a, b) => a.start - b.start);
+    const index = sorted.findIndex((chapter) => names.test(chapter.title.trim()));
+    if (index === -1)
+      return null;
+    const next = sorted.slice(index + 1).find((chapter) => chapter.start > sorted[index].start);
+    const end = next?.start ?? fallbackEnd;
+    return end !== null && end > sorted[index].start ? { start: sorted[index].start, end } : null;
+  }
+  function parseKitsuMalId(value) {
+    const data = record(value)?.data;
+    if (!Array.isArray(data))
+      return "";
+    for (const entry of data) {
+      const attributes = record(record(entry)?.attributes);
+      if (attributes?.externalSite === "myanimelist/anime") {
+        const id = stringValue(attributes.externalId);
+        if (/^\d+$/.test(id))
+          return id;
+      }
+    }
+    return "";
+  }
+  var ANIME_SERIES_FORMATS = new Set(["TV", "TV_SHORT", "ONA"]);
+  var SEASON_SNAP_TOLERANCE = 2;
+  var ANISKIP_LENGTH_TOLERANCE_SEC = 60;
+  function normalizeTitle(value) {
+    return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  }
+  function parseAnimeEntry(node) {
+    if (!node || !ANIME_SERIES_FORMATS.has(stringValue(node.format)))
+      return null;
+    const anilistId = node.id;
+    const malId = node.idMal;
+    if (typeof anilistId !== "number" || !Number.isInteger(anilistId) || anilistId <= 0)
+      return null;
+    if (typeof malId !== "number" || !Number.isInteger(malId) || malId <= 0)
+      return null;
+    const episodes = numberValue(node.episodes);
+    return { anilistId, malId: String(malId), episodes: episodes !== null && episodes > 0 ? episodes : null };
+  }
+  function startOrder(node) {
+    const date = record(node?.startDate);
+    return (numberValue(date?.year) ?? 9999) * 12 + (numberValue(date?.month) ?? 0);
+  }
+  function parseAniListRoot(value, name) {
+    const wanted = normalizeTitle(name);
+    const media = record(record(record(value)?.data)?.Page)?.media;
+    if (!wanted || !Array.isArray(media))
+      return null;
+    let best = null;
+    for (const item of media) {
+      const node = record(item);
+      const entry = parseAnimeEntry(node);
+      if (!node || !entry)
+        continue;
+      const title = record(node.title);
+      const synonyms = Array.isArray(node.synonyms) ? node.synonyms : [];
+      const names = [title?.english, title?.romaji, ...synonyms].map((candidate) => normalizeTitle(stringValue(candidate))).filter(Boolean);
+      const exact = names.includes(wanted);
+      const leading = exact || names.some((candidate) => wanted.startsWith(`${candidate} `) || candidate.startsWith(`${wanted} `));
+      if (!leading)
+        continue;
+      const order = startOrder(node);
+      if (!best || exact && !best.exact || exact === best.exact && order < best.order) {
+        best = { entry, exact, order };
+      }
+    }
+    return best?.entry ?? null;
+  }
+  function parseAniListSequel(value) {
+    const edges = record(record(record(record(value)?.data)?.Media)?.relations)?.edges;
+    if (!Array.isArray(edges))
+      return null;
+    let best = null;
+    for (const item of edges) {
+      const edge = record(item);
+      if (edge?.relationType !== "SEQUEL")
+        continue;
+      const node = record(edge.node);
+      const entry = parseAnimeEntry(node);
+      if (!entry)
+        continue;
+      const order = startOrder(node);
+      if (!best || order < best.order)
+        best = { entry, order };
+    }
+    return best?.entry ?? null;
+  }
+  function seasonEpisodeCounts(episodes) {
+    const counts = new Map;
+    for (const episode of episodes) {
+      if (episode.season > 0)
+        counts.set(episode.season, (counts.get(episode.season) ?? 0) + 1);
+    }
+    return [...counts.entries()].map(([season, count]) => ({ season, count })).sort((a, b) => a.season - b.season);
+  }
+  function mapAnimeEpisode(seasons, chain, season, episode) {
+    for (const segment of courSegments(seasons, chain)) {
+      if (segment.season !== season)
+        continue;
+      if (episode <= segment.seasonStart || episode > segment.seasonStart + segment.count)
+        continue;
+      return { malId: segment.malId, episode: segment.courStart + episode - segment.seasonStart };
+    }
+    return null;
+  }
+  function mapCourEpisode(seasons, chain, malId, episode) {
+    for (const segment of courSegments(seasons, chain)) {
+      if (segment.malId !== malId)
+        continue;
+      if (episode <= segment.courStart || episode > segment.courStart + segment.count)
+        continue;
+      return { season: segment.season, episode: segment.seasonStart + episode - segment.courStart };
+    }
+    return null;
+  }
+  function courSegments(seasons, chain) {
+    const segments = [];
+    let index = 0;
+    let used = 0;
+    for (const current of seasons) {
+      let filled = 0;
+      while (filled < current.count && index < chain.length) {
+        const entry = chain[index];
+        const total = entry.episodes ?? Number.POSITIVE_INFINITY;
+        const snap = used === 0 && filled === 0 && Number.isFinite(total) && Math.abs(total - current.count) <= SEASON_SNAP_TOLERANCE;
+        const take = snap ? current.count : Math.min(total - used, current.count - filled);
+        if (take <= 0) {
+          index += 1;
+          used = 0;
+          continue;
+        }
+        segments.push({
+          season: current.season,
+          malId: entry.malId,
+          seasonStart: filled,
+          courStart: used,
+          count: take
+        });
+        filled += take;
+        used += take;
+        if (snap || used >= total) {
+          index += 1;
+          used = 0;
+        }
+      }
+    }
+    return segments;
+  }
+  function parseAniSkipInterval(value, skipType = "op", duration = 0) {
+    const response = record(value);
+    if (response?.found !== true || !Array.isArray(response.results))
+      return null;
+    let best = null;
+    for (const result of response.results) {
+      const item = record(result);
+      if (item?.skipType !== skipType)
+        continue;
+      const interval = record(item.interval);
+      const start = numberValue(interval?.startTime);
+      const end = numberValue(interval?.endTime);
+      if (start === null || end === null || start < 0 || start >= end)
+        continue;
+      const length = numberValue(item.episodeLength);
+      const distance = duration > 0 && length !== null ? Math.abs(length - duration) : 0;
+      if (distance > ANISKIP_LENGTH_TOLERANCE_SEC)
+        continue;
+      if (!best || distance < best.distance)
+        best = { interval: { start, end }, distance };
+    }
+    return best?.interval ?? null;
+  }
+  function parseIntroDbSegment(value, type) {
+    const segment = record(record(value)?.[type]);
+    const start = numberValue(segment?.start_sec);
+    const end = numberValue(segment?.end_sec);
+    return start !== null && end !== null && start >= 0 && start < end ? { start, end } : null;
+  }
+  function isInsideIntro(time, interval) {
+    return Boolean(interval && Number.isFinite(time) && time >= interval.start && time < interval.end);
+  }
+  function isInsideTail(time, duration) {
+    if (!Number.isFinite(time) || !Number.isFinite(duration))
+      return false;
+    if (duration < MIN_TAIL_DURATION_SEC)
+      return false;
+    return time >= duration - NEXT_EPISODE_TAIL_SEC;
+  }
+  function getOverlayAction(time, segments, nextReady, duration = 0) {
+    if (isInsideIntro(time, segments.recap))
+      return "recap";
+    if (isInsideIntro(time, segments.intro))
+      return "intro";
+    const credits = segments.credits;
+    if (credits && isInsideIntro(time, credits)) {
+      if (!endsEpisode(credits, duration)) {
+        return credits.end - credits.start <= MAX_SKIP_SEGMENT_SEC ? "credits" : null;
+      }
+      return nextReady ? "next" : null;
+    }
+    return nextReady && isInsideTail(time, duration) ? "next" : null;
+  }
+  function endsEpisode(credits, duration) {
+    if (!Number.isFinite(duration) || duration <= 0)
+      return true;
+    return credits.end > duration - NEXT_EPISODE_TAIL_SEC;
+  }
+  function record(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+  }
+  function stringValue(value) {
+    return typeof value === "string" ? value.trim() : "";
+  }
+  function numberValue(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+  var MAX_SKIP_SEGMENT_SEC = 300;
+  function sanitizeSegments(found, duration) {
+    const known = Number.isFinite(duration) && duration > 0;
+    const inFile = (interval) => interval && (!known || interval.end <= duration) ? interval : null;
+    const skippable = (interval) => {
+      const inside = inFile(interval);
+      if (!inside || inside.end - inside.start > MAX_SKIP_SEGMENT_SEC)
+        return null;
+      return !known || inside.end <= duration - NEXT_EPISODE_TAIL_SEC ? inside : null;
+    };
+    return { intro: skippable(found.intro), recap: skippable(found.recap), credits: inFile(found.credits) };
+  }
+
+  // src/plugin/anime.ts
+  var ANILIST_URL = "https://graphql.anilist.co";
+  var ANILIST_ROOT_QUERY = "query ($search: String) { Page(perPage: 25) { media(search: $search, " + "type: ANIME, sort: SEARCH_MATCH) { id idMal format episodes startDate { year month } " + "synonyms title { romaji english } } } }";
+  var ANILIST_SEQUEL_QUERY = "query ($id: Int) { Media(id: $id) { relations { edges { relationType " + "node { id idMal format episodes startDate { year month } } } } } }";
+  var MAX_SEQUEL_HOPS = 12;
+  function createAnimeChainClient(http) {
+    const json = createJsonClient(http);
+    const chains = new Map;
+    const kitsuMalIds = new Map;
+    const seasonCounts = new Map;
+    async function loadChain(name) {
+      if (chains.has(name))
+        return chains.get(name) ?? null;
+      const root = parseAniListRoot(await json.postJson(ANILIST_URL, {
+        query: ANILIST_ROOT_QUERY,
+        variables: { search: name }
+      }), name);
+      if (!root) {
+        chains.set(name, null);
+        return null;
+      }
+      const chain = [root];
+      for (let hop = 0;hop < MAX_SEQUEL_HOPS; hop += 1) {
+        const next = parseAniListSequel(await json.postJson(ANILIST_URL, {
+          query: ANILIST_SEQUEL_QUERY,
+          variables: { id: chain[chain.length - 1].anilistId }
+        }));
+        if (!next || chain.some((entry) => entry.anilistId === next.anilistId))
+          break;
+        chain.push(next);
+      }
+      chains.set(name, chain);
+      return chain;
+    }
+    async function loadKitsuMalId(providerId) {
+      const kitsuId = providerId.match(/^kitsu:(\d+)$/i)?.[1] || "";
+      if (!kitsuId)
+        return "";
+      const cached = kitsuMalIds.get(kitsuId);
+      if (cached !== undefined)
+        return cached;
+      const response = await http.get(`https://kitsu.io/api/edge/anime/${encodeURIComponent(kitsuId)}/mappings`, { params: {}, headers: { Accept: "application/vnd.api+json" }, data: {} });
+      if (response.statusCode < 200 || response.statusCode >= 300)
+        return "";
+      const malId = parseKitsuMalId(response.data ?? safeJson(response.text));
+      kitsuMalIds.set(kitsuId, malId);
+      return malId;
+    }
+    async function loadSeasonCounts(imdbId, preview) {
+      const cached = seasonCounts.get(imdbId);
+      if (cached !== undefined)
+        return cached;
+      const details = parseMediaMetadata(await json.getJson(buildCinemetaSeriesUrl(imdbId)), { manifestUrl: "" }, preview);
+      const counts = seasonEpisodeCounts(details.episodes);
+      const value = counts.length > 0 ? counts : null;
+      seasonCounts.set(imdbId, value);
+      return value;
+    }
+    return {
+      async resolveEpisode(context, episode) {
+        const providerId = context.media.providerId || context.media.id || "";
+        const known = context.media.malId || (providerId.startsWith("kitsu:") ? await loadKitsuMalId(providerId) : "");
+        if (known)
+          return { malId: known, episode: episode.episode };
+        const chain = await loadChain(context.media.name);
+        if (!chain)
+          return null;
+        return mapAnimeEpisode(seasonEpisodeCounts(context.episodes), chain, episode.season, episode.episode);
+      },
+      async resolveWatchedCours(cours, history) {
+        const byMal = new Map(cours.map((cour) => [cour.malId, cour.episodes]));
+        if (byMal.size === 0)
+          return [];
+        const patches = [];
+        const seen = new Set;
+        for (const entry of history) {
+          if (byMal.size === 0)
+            break;
+          const media = entry.media;
+          if (media.type !== "series" || !isImdbId(media.imdbId))
+            continue;
+          if (seen.has(media.imdbId))
+            continue;
+          seen.add(media.imdbId);
+          try {
+            const chain = await loadChain(media.name);
+            if (!chain || !chain.some((cour) => byMal.has(cour.malId)))
+              continue;
+            const seasons = await loadSeasonCounts(media.imdbId, {
+              id: media.id,
+              imdbId: media.imdbId,
+              type: "series",
+              name: media.name,
+              releaseInfo: media.releaseInfo,
+              poster: media.poster
+            });
+            if (!seasons)
+              continue;
+            const episodes = new Set;
+            for (const cour of chain) {
+              for (const number of byMal.get(cour.malId) ?? []) {
+                const placed = mapCourEpisode(seasons, chain, cour.malId, number);
+                if (placed)
+                  episodes.add(`${placed.season}:${placed.episode}`);
+              }
+              byMal.delete(cour.malId);
+            }
+            if (episodes.size > 0)
+              patches.push({ id: media.imdbId, episodes: [...episodes] });
+          } catch (error) {
+            logDebug("Popcorn: Anime cour placement failed:", formatError(error));
+          }
+        }
+        return patches;
+      }
+    };
+  }
+
   // src/shared/simkl.ts
   class SimklError extends Error {
     status;
@@ -1204,7 +1714,16 @@
   function isSimklConnected(state) {
     return state.clientId !== "" && state.accessToken !== "";
   }
-  async function simklScrobble(transport, state, action, context, progress, now = Date.now()) {
+  function buildSimklScrobblePayload(context, progress, cour) {
+    if (!cour)
+      return buildScrobblePayload(context, progress);
+    return {
+      progress: Math.max(0, Math.min(100, progress)),
+      anime: { ids: { mal: cour.malId } },
+      episode: { season: 1, number: cour.episode }
+    };
+  }
+  async function simklScrobble(transport, state, action, context, progress, cour = null, now = Date.now()) {
     if (!isSimklConnected(state))
       return state;
     if (!isImdbId(context.media.imdbId))
@@ -1212,7 +1731,7 @@
     if (state.retryAt > now)
       return state;
     try {
-      await request2(transport, state, "POST", `/scrobble/${action}`, buildScrobblePayload(context, progress), now);
+      await request2(transport, state, "POST", `/scrobble/${action}`, buildSimklScrobblePayload(context, progress, cour), now);
       return { ...state, lastError: "", retryAt: 0 };
     } catch (error) {
       if (error instanceof SimklError && error.status === 401) {
@@ -1232,7 +1751,7 @@
   }
   async function syncSimklHistory(transport, state, local, now = Date.now()) {
     if (!isSimklConnected(state) || state.retryAt > now) {
-      return { state, history: local, watchedPatches: [] };
+      return { state, history: local, watchedPatches: [], watchedCours: [] };
     }
     try {
       const activities = getRecord4(await request2(transport, state, "GET", "/sync/activities", null, now));
@@ -1241,7 +1760,8 @@
         return {
           state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
           history: local,
-          watchedPatches: []
+          watchedPatches: [],
+          watchedCours: []
         };
       }
       const cursor = state.lastActivityAt ? `?date_from=${encodeURIComponent(state.lastActivityAt)}` : "";
@@ -1262,7 +1782,8 @@
           retryAt: 0
         },
         history: mergeWatchHistory(local, parseSimklHistory(items, playback)),
-        watchedPatches: parseSimklWatchedPatches(items)
+        watchedPatches: parseSimklWatchedPatches(items),
+        watchedCours: parseSimklWatchedCours(items)
       };
     } catch (error) {
       if (error instanceof SimklError && error.status === 401) {
@@ -1274,7 +1795,8 @@
             retryAt: 0
           },
           history: local,
-          watchedPatches: []
+          watchedPatches: [],
+          watchedCours: []
         };
       }
       return {
@@ -1284,16 +1806,39 @@
           retryAt: error instanceof SimklError ? error.retryAt : 0
         },
         history: local,
-        watchedPatches: []
+        watchedPatches: [],
+        watchedCours: []
       };
     }
   }
   function parseSimklWatchedPatches(items) {
-    const lists = getRecord4(items);
-    return [
-      ...watchedShowPatches(lists?.shows),
-      ...watchedShowPatches(lists?.anime)
-    ];
+    return watchedShowPatches(getRecord4(items)?.shows);
+  }
+  function parseSimklWatchedCours(items) {
+    const list = getRecord4(items)?.anime;
+    if (!Array.isArray(list))
+      return [];
+    return list.flatMap((value) => {
+      const item = getRecord4(value);
+      const malId = getString4(getRecord4(getRecord4(item?.show)?.ids)?.mal);
+      const seasons = item?.seasons;
+      if (!malId || !Array.isArray(seasons))
+        return [];
+      const episodes = [...new Set(seasons.flatMap(courEpisodeNumbers))];
+      return episodes.length === 0 ? [] : [{ malId, episodes }];
+    });
+  }
+  function courEpisodeNumbers(value) {
+    const season = getRecord4(value);
+    if (!Array.isArray(season?.episodes))
+      return [];
+    return season.episodes.flatMap((value2) => {
+      const episode = getRecord4(value2);
+      if (!episode || !getString4(episode.watched_at))
+        return [];
+      const number = episodeNumber(episode.number);
+      return number === null || number === 0 ? [] : [number];
+    });
   }
   function watchedShowPatches(value) {
     if (!Array.isArray(value))
@@ -1460,12 +2005,12 @@
       const response = method === "GET" ? await http.get(url, options) : await http.post(url, options);
       return {
         status: response.statusCode,
-        data: response.data ?? safeJson(response.text),
+        data: response.data ?? safeJson2(response.text),
         headers: {}
       };
     };
   }
-  function safeJson(value) {
+  function safeJson2(value) {
     try {
       return JSON.parse(value);
     } catch {
@@ -1541,13 +2086,13 @@
       return result;
     };
     return {
-      sendPlayback(action, context, progress) {
+      sendPlayback(action, context, progress, cour) {
         return enqueue(async () => {
           const state = read();
           if (!state.accessToken)
             return;
           try {
-            saveIfCurrent(state, await simklScrobble(transport, state, action, context, progress));
+            saveIfCurrent(state, await simklScrobble(transport, state, action, context, progress, cour));
           } catch (error) {
             onError(error);
           }
@@ -1556,17 +2101,21 @@
       sync(history) {
         return enqueue(async () => {
           const state = read();
+          const empty = { history, watchedPatches: [], watchedCours: [] };
           if (!state.accessToken)
-            return { history, watchedPatches: [] };
+            return empty;
           try {
             const result = await syncSimklHistory(transport, state, history);
-            if (!saveIfCurrent(state, result.state)) {
-              return { history, watchedPatches: [] };
-            }
-            return { history: result.history, watchedPatches: result.watchedPatches };
+            if (!saveIfCurrent(state, result.state))
+              return empty;
+            return {
+              history: result.history,
+              watchedPatches: result.watchedPatches,
+              watchedCours: result.watchedCours
+            };
           } catch (error) {
             onError(error);
-            return { history, watchedPatches: [] };
+            return empty;
           }
         });
       }
@@ -1574,219 +2123,6 @@
   }
   function sameConnection2(current, input) {
     return current.clientId === input.clientId && current.accessToken === input.accessToken;
-  }
-
-  // src/plugin/intro.ts
-  var NEXT_EPISODE_TAIL_SEC = 60;
-  var MIN_TAIL_DURATION_SEC = 300;
-  var INTRO_CHAPTER = /^(?:intro|opening|avant)\b|^(?:nc)?op\s*\d*$/i;
-  var CREDITS_CHAPTER = /^(?:ending|credits|outro|end\s*credits)\b|^(?:nc)?ed\s*\d*$/i;
-  function findChapterIntro(chapters) {
-    return findChapterInterval(chapters, INTRO_CHAPTER);
-  }
-  function findChapterCredits(chapters, duration) {
-    return findChapterInterval(chapters, CREDITS_CHAPTER, Number.isFinite(duration) && duration > 0 ? duration : null);
-  }
-  function findChapterInterval(chapters, names, fallbackEnd = null) {
-    const sorted = chapters.filter((chapter) => Number.isFinite(chapter.start)).sort((a, b) => a.start - b.start);
-    const index = sorted.findIndex((chapter) => names.test(chapter.title.trim()));
-    if (index === -1)
-      return null;
-    const next = sorted.slice(index + 1).find((chapter) => chapter.start > sorted[index].start);
-    const end = next?.start ?? fallbackEnd;
-    return end !== null && end > sorted[index].start ? { start: sorted[index].start, end } : null;
-  }
-  function parseKitsuMalId(value) {
-    const data = record(value)?.data;
-    if (!Array.isArray(data))
-      return "";
-    for (const entry of data) {
-      const attributes = record(record(entry)?.attributes);
-      if (attributes?.externalSite === "myanimelist/anime") {
-        const id = stringValue(attributes.externalId);
-        if (/^\d+$/.test(id))
-          return id;
-      }
-    }
-    return "";
-  }
-  var ANIME_SERIES_FORMATS = new Set(["TV", "TV_SHORT", "ONA"]);
-  var SEASON_SNAP_TOLERANCE = 2;
-  var ANISKIP_LENGTH_TOLERANCE_SEC = 60;
-  function normalizeTitle(value) {
-    return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  }
-  function parseAnimeEntry(node) {
-    if (!node || !ANIME_SERIES_FORMATS.has(stringValue(node.format)))
-      return null;
-    const anilistId = node.id;
-    const malId = node.idMal;
-    if (typeof anilistId !== "number" || !Number.isInteger(anilistId) || anilistId <= 0)
-      return null;
-    if (typeof malId !== "number" || !Number.isInteger(malId) || malId <= 0)
-      return null;
-    const episodes = numberValue(node.episodes);
-    return { anilistId, malId: String(malId), episodes: episodes !== null && episodes > 0 ? episodes : null };
-  }
-  function startOrder(node) {
-    const date = record(node?.startDate);
-    return (numberValue(date?.year) ?? 9999) * 12 + (numberValue(date?.month) ?? 0);
-  }
-  function parseAniListRoot(value, name) {
-    const wanted = normalizeTitle(name);
-    const media = record(record(record(value)?.data)?.Page)?.media;
-    if (!wanted || !Array.isArray(media))
-      return null;
-    let best = null;
-    for (const item of media) {
-      const node = record(item);
-      const entry = parseAnimeEntry(node);
-      if (!node || !entry)
-        continue;
-      const title = record(node.title);
-      const synonyms = Array.isArray(node.synonyms) ? node.synonyms : [];
-      const names = [title?.english, title?.romaji, ...synonyms].map((candidate) => normalizeTitle(stringValue(candidate))).filter(Boolean);
-      const exact = names.includes(wanted);
-      const leading = exact || names.some((candidate) => wanted.startsWith(`${candidate} `) || candidate.startsWith(`${wanted} `));
-      if (!leading)
-        continue;
-      const order = startOrder(node);
-      if (!best || exact && !best.exact || exact === best.exact && order < best.order) {
-        best = { entry, exact, order };
-      }
-    }
-    return best?.entry ?? null;
-  }
-  function parseAniListSequel(value) {
-    const edges = record(record(record(record(value)?.data)?.Media)?.relations)?.edges;
-    if (!Array.isArray(edges))
-      return null;
-    let best = null;
-    for (const item of edges) {
-      const edge = record(item);
-      if (edge?.relationType !== "SEQUEL")
-        continue;
-      const node = record(edge.node);
-      const entry = parseAnimeEntry(node);
-      if (!entry)
-        continue;
-      const order = startOrder(node);
-      if (!best || order < best.order)
-        best = { entry, order };
-    }
-    return best?.entry ?? null;
-  }
-  function seasonEpisodeCounts(episodes) {
-    const counts = new Map;
-    for (const episode of episodes) {
-      if (episode.season > 0)
-        counts.set(episode.season, (counts.get(episode.season) ?? 0) + 1);
-    }
-    return [...counts.entries()].map(([season, count]) => ({ season, count })).sort((a, b) => a.season - b.season);
-  }
-  function mapAnimeEpisode(seasons, chain, season, episode) {
-    let index = 0;
-    let used = 0;
-    for (const current of seasons) {
-      let filled = 0;
-      while (filled < current.count && index < chain.length) {
-        const entry = chain[index];
-        const total = entry.episodes ?? Number.POSITIVE_INFINITY;
-        const snap = used === 0 && filled === 0 && Number.isFinite(total) && Math.abs(total - current.count) <= SEASON_SNAP_TOLERANCE;
-        const take = snap ? current.count : Math.min(total - used, current.count - filled);
-        if (current.season === season && episode > filled && episode <= filled + take) {
-          return { malId: entry.malId, episode: used + episode - filled };
-        }
-        filled += take;
-        used += take;
-        if (snap || used >= total) {
-          index += 1;
-          used = 0;
-        }
-      }
-      if (current.season === season)
-        return null;
-    }
-    return null;
-  }
-  function parseAniSkipInterval(value, skipType = "op", duration = 0) {
-    const response = record(value);
-    if (response?.found !== true || !Array.isArray(response.results))
-      return null;
-    let best = null;
-    for (const result of response.results) {
-      const item = record(result);
-      if (item?.skipType !== skipType)
-        continue;
-      const interval = record(item.interval);
-      const start = numberValue(interval?.startTime);
-      const end = numberValue(interval?.endTime);
-      if (start === null || end === null || start < 0 || start >= end)
-        continue;
-      const length = numberValue(item.episodeLength);
-      const distance = duration > 0 && length !== null ? Math.abs(length - duration) : 0;
-      if (distance > ANISKIP_LENGTH_TOLERANCE_SEC)
-        continue;
-      if (!best || distance < best.distance)
-        best = { interval: { start, end }, distance };
-    }
-    return best?.interval ?? null;
-  }
-  function parseIntroDbSegment(value, type) {
-    const segment = record(record(value)?.[type]);
-    const start = numberValue(segment?.start_sec);
-    const end = numberValue(segment?.end_sec);
-    return start !== null && end !== null && start >= 0 && start < end ? { start, end } : null;
-  }
-  function isInsideIntro(time, interval) {
-    return Boolean(interval && Number.isFinite(time) && time >= interval.start && time < interval.end);
-  }
-  function isInsideTail(time, duration) {
-    if (!Number.isFinite(time) || !Number.isFinite(duration))
-      return false;
-    if (duration < MIN_TAIL_DURATION_SEC)
-      return false;
-    return time >= duration - NEXT_EPISODE_TAIL_SEC;
-  }
-  function getOverlayAction(time, segments, nextReady, duration = 0) {
-    if (isInsideIntro(time, segments.recap))
-      return "recap";
-    if (isInsideIntro(time, segments.intro))
-      return "intro";
-    const credits = segments.credits;
-    if (credits && isInsideIntro(time, credits)) {
-      if (!endsEpisode(credits, duration)) {
-        return credits.end - credits.start <= MAX_SKIP_SEGMENT_SEC ? "credits" : null;
-      }
-      return nextReady ? "next" : null;
-    }
-    return nextReady && isInsideTail(time, duration) ? "next" : null;
-  }
-  function endsEpisode(credits, duration) {
-    if (!Number.isFinite(duration) || duration <= 0)
-      return true;
-    return credits.end > duration - NEXT_EPISODE_TAIL_SEC;
-  }
-  function record(value) {
-    return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
-  }
-  function stringValue(value) {
-    return typeof value === "string" ? value.trim() : "";
-  }
-  function numberValue(value) {
-    return typeof value === "number" && Number.isFinite(value) ? value : null;
-  }
-  var MAX_SKIP_SEGMENT_SEC = 300;
-  function sanitizeSegments(found, duration) {
-    const known = Number.isFinite(duration) && duration > 0;
-    const inFile = (interval) => interval && (!known || interval.end <= duration) ? interval : null;
-    const skippable = (interval) => {
-      const inside = inFile(interval);
-      if (!inside || inside.end - inside.start > MAX_SKIP_SEGMENT_SEC)
-        return null;
-      return !known || inside.end <= duration - NEXT_EPISODE_TAIL_SEC ? inside : null;
-    };
-    return { intro: skippable(found.intro), recap: skippable(found.recap), credits: inFile(found.credits) };
   }
 
   // src/plugin/preferences.ts
@@ -1817,6 +2153,8 @@
 
   // src/plugin/main.ts
   var { core, event, global, http, mpv, overlay, preferences, sidebar, utils } = iina;
+  var json = createJsonClient(http);
+  var anime = createAnimeChainClient(http);
   var trakt = createIinaTraktClient(http, preferences, (error) => {
     logDebug("Popcorn: Trakt request failed:", formatError(error));
   });
@@ -1845,6 +2183,7 @@
   var recapInterval = null;
   var creditsInterval = null;
   var playbackRevision = 0;
+  var activeCour = Promise.resolve(null);
   var overlayAction = null;
   var overlayVisible = false;
   var overlayLabel = "";
@@ -1852,8 +2191,6 @@
   var prefetchedNextEpisode = null;
   var prefetchedNextEpisodeAt = 0;
   var PREFETCH_FRESH_MS = 30 * 60000;
-  var kitsuMalIds = new Map;
-  var animeChains = new Map;
   var addonManifests = new Map;
   function setPlayerUIHidden(hidden) {
     const api = core;
@@ -1942,7 +2279,20 @@
     if (action === "stop")
       scrobbleStopSent = true;
     trakt.sendPlayback(action, context, percent);
-    simkl.sendPlayback(action, context, percent);
+    activeCour.then((cour) => simkl.sendPlayback(action, context, percent, cour));
+  }
+  async function resolveActiveCour(revision) {
+    const context = activePlaybackContext;
+    const episode = context?.episode;
+    if (!context || !episode)
+      return null;
+    try {
+      const target = await anime.resolveEpisode(context, episode);
+      return isCurrentRequest(revision, playbackRevision) ? target : null;
+    } catch (error) {
+      logDebug("Popcorn: Anime cour lookup failed:", formatError(error));
+      return null;
+    }
   }
   function checkpointPlayback(forceStop = false) {
     const context = activePlaybackContext;
@@ -2062,6 +2412,7 @@
   }
   function clearIntro() {
     playbackRevision += 1;
+    activeCour = Promise.resolve(null);
     introInterval = null;
     recapInterval = null;
     creditsInterval = null;
@@ -2235,13 +2586,13 @@
   }
   async function loadAniSkipSegments(revision, context, episode, duration) {
     try {
-      const target = await resolveAnimeEpisode(context, episode);
+      const target = await anime.resolveEpisode(context, episode);
       if (!target || !isCurrentRequest(revision, playbackRevision))
         return null;
       const response = await http.get(`https://api.aniskip.com/v2/skip-times/${encodeURIComponent(target.malId)}/${target.episode}` + "?types=op&types=ed&episodeLength=0", { params: {}, headers: { Accept: "application/json" }, data: {} });
       if (response.statusCode < 200 || response.statusCode >= 300)
         return null;
-      const data = safeJson2(response.data ?? response.text);
+      const data = safeJson(response.data ?? response.text);
       const runtime = Number.isFinite(duration) && duration > 0 ? duration : 0;
       return {
         intro: parseAniSkipInterval(data, "op", runtime),
@@ -2252,46 +2603,11 @@
       return null;
     }
   }
-  async function resolveAnimeEpisode(context, episode) {
-    const providerId = context.media.providerId || context.media.id || "";
-    const known = context.media.malId || (providerId.startsWith("kitsu:") ? await loadKitsuMalId(providerId) : "");
-    if (known)
-      return { malId: known, episode: episode.episode };
-    const chain = await loadAnimeChain(context.media.name);
-    if (!chain)
-      return null;
-    return mapAnimeEpisode(seasonEpisodeCounts(context.episodes), chain, episode.season, episode.episode);
-  }
-  var ANILIST_URL = "https://graphql.anilist.co";
-  var ANILIST_ROOT_QUERY = "query ($search: String) { Page(perPage: 25) { media(search: $search, " + "type: ANIME, sort: SEARCH_MATCH) { id idMal format episodes startDate { year month } " + "synonyms title { romaji english } } } }";
-  var ANILIST_SEQUEL_QUERY = "query ($id: Int) { Media(id: $id) { relations { edges { relationType " + "node { id idMal format episodes startDate { year month } } } } } }";
-  var MAX_SEQUEL_HOPS = 12;
-  async function loadAnimeChain(name) {
-    if (animeChains.has(name))
-      return animeChains.get(name) ?? null;
-    const root = parseAniListRoot(await postJson(ANILIST_URL, { query: ANILIST_ROOT_QUERY, variables: { search: name } }), name);
-    if (!root) {
-      animeChains.set(name, null);
-      return null;
-    }
-    const chain = [root];
-    for (let hop = 0;hop < MAX_SEQUEL_HOPS; hop += 1) {
-      const next = parseAniListSequel(await postJson(ANILIST_URL, {
-        query: ANILIST_SEQUEL_QUERY,
-        variables: { id: chain[chain.length - 1].anilistId }
-      }));
-      if (!next || chain.some((entry) => entry.anilistId === next.anilistId))
-        break;
-      chain.push(next);
-    }
-    animeChains.set(name, chain);
-    return chain;
-  }
   async function loadIntroDbSegments(revision, imdbId, episode) {
     if (!isImdbId(imdbId) || !(episode.season >= 1) || !(episode.episode >= 1))
       return null;
     try {
-      const data = await requestJson(`https://api.introdb.app/segments?imdb_id=${encodeURIComponent(imdbId)}` + `&season=${encodeURIComponent(String(episode.season))}` + `&episode=${encodeURIComponent(String(episode.episode))}`);
+      const data = await json.getJson(`https://api.introdb.app/segments?imdb_id=${encodeURIComponent(imdbId)}` + `&season=${encodeURIComponent(String(episode.season))}` + `&episode=${encodeURIComponent(String(episode.episode))}`);
       if (!isCurrentRequest(revision, playbackRevision))
         return null;
       return {
@@ -2330,7 +2646,7 @@
     if (!next)
       return;
     try {
-      const result = await loadEnabledAddonStreams(parseAddons(preferences.get("addons"), preferences.get("addonManifestUrl")), loadAddonManifest, async (addon) => parsePlayableStreams(await requestJson(buildStremioStreamUrl(addon.manifestUrl, context.media.type, next.id))));
+      const result = await loadEnabledAddonStreams(parseAddons(preferences.get("addons"), preferences.get("addonManifestUrl")), loadAddonManifest, async (addon) => parsePlayableStreams(await json.getJson(buildStremioStreamUrl(addon.manifestUrl, context.media.type, next.id))));
       if (!isCurrentRequest(revision, playbackRevision))
         return;
       const stream = pickNextEpisodeStream(result.streams, {
@@ -2363,60 +2679,9 @@
     const cached = addonManifests.get(addon.manifestUrl);
     if (cached)
       return cached;
-    const manifest = parseAddonManifest(await requestJson(addon.manifestUrl));
+    const manifest = parseAddonManifest(await json.getJson(addon.manifestUrl));
     addonManifests.set(addon.manifestUrl, manifest);
     return manifest;
-  }
-  async function postJson(url, body) {
-    const response = await http.post(url, {
-      params: {},
-      headers: { Accept: "application/json", "Content-Type": "application/json" },
-      data: body
-    });
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw new Error(`Request failed with HTTP ${response.statusCode}.`);
-    }
-    const data = safeJson2(response.data ?? response.text);
-    if (data === null)
-      throw new Error("Response was not valid JSON.");
-    return data;
-  }
-  async function requestJson(url) {
-    const response = await http.get(url, {
-      params: {},
-      headers: { Accept: "application/json" },
-      data: {}
-    });
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw new Error(`Request failed with HTTP ${response.statusCode}.`);
-    }
-    const data = safeJson2(response.data ?? response.text);
-    if (data === null)
-      throw new Error("Response was not valid JSON.");
-    return data;
-  }
-  async function loadKitsuMalId(providerId) {
-    const kitsuId = providerId.match(/^kitsu:(\d+)$/i)?.[1] || "";
-    if (!kitsuId)
-      return "";
-    const cached = kitsuMalIds.get(kitsuId);
-    if (cached !== undefined)
-      return cached;
-    const response = await http.get(`https://kitsu.io/api/edge/anime/${encodeURIComponent(kitsuId)}/mappings`, { params: {}, headers: { Accept: "application/vnd.api+json" }, data: {} });
-    if (response.statusCode < 200 || response.statusCode >= 300)
-      return "";
-    const malId = parseKitsuMalId(response.data ?? safeJson2(response.text));
-    kitsuMalIds.set(kitsuId, malId);
-    return malId;
-  }
-  function safeJson2(value) {
-    if (typeof value !== "string")
-      return value ?? null;
-    try {
-      return JSON.parse(value);
-    } catch {
-      return null;
-    }
   }
   function syncRemoteHistory() {
     const now = Date.now();
@@ -2424,10 +2689,12 @@
       return;
     historySyncInFlight = true;
     lastHistorySyncAt = now;
-    trakt.sync(watchHistory).then((synced) => simkl.sync(synced)).then((synced) => {
+    trakt.sync(watchHistory).then((synced) => simkl.sync(synced)).then(async (synced) => {
       const latestHistory = parseWatchHistory(preferences.get("watchHistory"));
       const history = mergeWatchHistory(latestHistory, synced.history);
-      const watchedState = applySimklWatchedPatches(parseEpisodeWatchState(preferences.get("episodeWatchState"), history), synced.watchedPatches);
+      const stored = mergeSimklCours(applySimklWatchedPatches(parseEpisodeWatchState(preferences.get("episodeWatchState"), history), synced.watchedPatches), synced.watchedCours);
+      const courPatches = await anime.resolveWatchedCours(stored.simklCours, history);
+      const watchedState = addSimklWatchedEpisodes(stored, courPatches);
       watchHistory = history;
       episodeWatchState = watchedState;
       preferences.set("watchHistory", history);
@@ -2516,6 +2783,7 @@
       mpv.command("seek", [String(pendingResumePercent), "absolute-percent+exact"]);
       pendingResumePercent = null;
     }
+    activeCour = resolveActiveCour(playbackRevision);
     sendScrobble("start", mpv.getNumber("percent-pos"));
     const revision = playbackRevision;
     if (!activePlaybackContext)

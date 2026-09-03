@@ -24,7 +24,7 @@
       preferredAudio: "",
       preferredSubtitle: "",
       watchHistory: [],
-      episodeWatchState: { local: [], simkl: [] },
+      episodeWatchState: { local: [], simkl: [], simklCours: [] },
       trakt: {},
       skipSegments: true,
       simkl: {}
@@ -280,7 +280,8 @@
     const item = getRecord2(stored);
     const state = {
       local: parseWatchedShows(item?.local),
-      simkl: parseWatchedShows(item?.simkl)
+      simkl: parseWatchedShows(item?.simkl),
+      simklCours: parseWatchedCours(item?.simklCours)
     };
     for (const entry of legacyHistory) {
       if (!entry.watched || !entry.episode)
@@ -307,6 +308,32 @@
         next.simkl.push(patch);
     }
     return next;
+  }
+  function addSimklWatchedEpisodes(state, patches) {
+    const next = parseEpisodeWatchState(state);
+    for (const patch of parseWatchedShows(patches)) {
+      for (const episode of patch.episodes)
+        addWatchedEpisode(next.simkl, patch.id, episode);
+    }
+    return next;
+  }
+  function mergeSimklCours(state, cours) {
+    const next = parseEpisodeWatchState(state);
+    for (const cour of parseWatchedCours(cours)) {
+      next.simklCours = next.simklCours.filter((item) => item.malId !== cour.malId);
+      next.simklCours.push(cour);
+    }
+    return next;
+  }
+  function parseWatchedCours(value) {
+    if (!Array.isArray(value))
+      return [];
+    return value.flatMap((item) => {
+      const record = getRecord2(item);
+      const malId = typeof record?.malId === "string" ? record.malId : "";
+      const episodes = Array.isArray(record?.episodes) ? record.episodes.filter((number) => typeof number === "number" && Number.isInteger(number) && number > 0) : [];
+      return malId && episodes.length > 0 ? [{ malId, episodes: [...new Set(episodes)] }] : [];
+    });
   }
   function recordPlayback(entries, context, percent, playedAt) {
     if (!Number.isFinite(percent) || percent < 5)
@@ -485,6 +512,9 @@
     ["Tamil", ["tamil", "tam"]],
     ["Telugu", ["telugu", "tel"]]
   ];
+  function buildCinemetaSeriesUrl(imdbId) {
+    return `${CINEMETA_BASE_URL}/meta/series/${encodeURIComponent(imdbId)}.json`;
+  }
   function buildStremioStreamUrl(manifestUrl, type, videoId) {
     return buildStremioResourceUrl(manifestUrl, "stream", type, videoId);
   }
@@ -508,8 +538,82 @@
   function cacheRank(cached) {
     return cached === true ? 0 : cached === null ? 1 : 2;
   }
+  function parseMediaResponse(value, source = { manifestUrl: CINEMETA_MANIFEST_URL }) {
+    const metas = getRecord3(value)?.metas;
+    if (!Array.isArray(metas)) {
+      return [];
+    }
+    return metas.flatMap((entry) => {
+      const item = getRecord3(entry);
+      const id = getString3(item?.id);
+      const providerType = getString3(item?.type);
+      const type = providerType === "movie" ? "movie" : providerType === "series" || providerType === "anime" ? "series" : null;
+      const name = getString3(item?.name);
+      if (!id || !type || !name) {
+        return [];
+      }
+      const imdbId = firstImdbId(item?.imdb_id, id, getRecord3(item?.behaviorHints)?.defaultVideoId);
+      return [{
+        id,
+        imdbId,
+        type,
+        name,
+        releaseInfo: getString3(item?.releaseInfo) || getStringOrNumber(item?.year),
+        poster: getString3(item?.poster),
+        sourceManifestUrl: source.manifestUrl,
+        providerId: id,
+        providerType,
+        malId: getStringOrNumber(item?.mal_id)
+      }];
+    });
+  }
+  function parseMediaMetadata(value, source, preview) {
+    const meta = getRecord3(getRecord3(value)?.meta);
+    if (!meta)
+      return { media: preview, episodes: [] };
+    const parsed = parseMediaResponse({ metas: [meta] }, source)[0];
+    const media = parsed ? {
+      ...preview,
+      ...parsed,
+      name: parsed.name || preview.name,
+      releaseInfo: parsed.releaseInfo || preview.releaseInfo,
+      poster: parsed.poster || preview.poster,
+      imdbId: parsed.imdbId || preview.imdbId,
+      malId: parsed.malId || preview.malId || ""
+    } : preview;
+    return { media, episodes: parseSeriesEpisodes(value) };
+  }
   function isImdbId(value) {
     return /^tt\d+$/i.test(value.trim());
+  }
+  function parseSeriesEpisodes(value) {
+    const videos = getRecord3(getRecord3(value)?.meta)?.videos;
+    if (!Array.isArray(videos)) {
+      return [];
+    }
+    return videos.flatMap((entry) => {
+      const item = getRecord3(entry);
+      const providerId = getString3(item?.id);
+      const name = getString3(item?.name) || getString3(item?.title);
+      const season = getNumber2(item?.season);
+      const episode = getNumber2(item?.number);
+      if (!providerId || !name || season === null || episode === null) {
+        return [];
+      }
+      const imdbId = firstImdbId(item?.imdb_id);
+      const imdbSeason = getNumber2(item?.imdbSeason);
+      const imdbEpisode = getNumber2(item?.imdbEpisode);
+      const id = imdbId && imdbSeason !== null && imdbEpisode !== null ? `${imdbId}:${imdbSeason}:${imdbEpisode}` : providerId;
+      return [{
+        id,
+        name,
+        season,
+        episode,
+        aired: getString3(item?.firstAired) || getString3(item?.released),
+        description: getString3(item?.description) || getString3(item?.overview),
+        thumbnail: getString3(item?.thumbnail)
+      }];
+    });
   }
   function parseReleaseShowTitle(description) {
     const line = (description.split(`
@@ -670,6 +774,15 @@
   }
   function getNonNegativeInteger(value) {
     return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+  }
+  function getStringOrNumber(value) {
+    return typeof value === "string" ? value : typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+  }
+  function firstImdbId(...values) {
+    return values.map(getString3).find(isImdbId) || "";
+  }
+  function getNumber2(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
 
   // src/shared/trakt.ts

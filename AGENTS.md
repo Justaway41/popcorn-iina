@@ -262,6 +262,22 @@ union plus watched entries still present in legacy history. Local playback adds 
 existing 90% watched threshold. Disconnecting or changing Simkl credentials clears only the Simkl
 origin.
 
+Anime is addressed by MAL id in both directions. Simkl indexes each cour as its own show, so
+`tt14986406` resolves only to Bleach's first cour and a season 3 scrobble sent as `show` plus an
+IMDb id is answered with a 404 - which is how seasons 2 and 3 went missing from a live account
+entirely. `src/plugin/anime.ts` owns the AniList sequel chain and turns Cinemeta coordinates into
+`{malId, episode}` for the scrobble, and cour episodes read back from Simkl into Cinemeta
+coordinates for the sidebar. `mapAnimeEpisode` and `mapCourEpisode` in `src/plugin/intro.ts` are
+exact inverses over one shared walk of the chain; keep them that way. Verified live in September
+2026: `anime: {ids: {mal: 56784}}` with episode 6 resolves to Bleach cour three's "The Holy
+Newborn", which is Cinemeta's S3E6, while the same episode addressed by IMDb id 404s.
+
+Cour state is stored raw in `episodeWatchState.simklCours` and placed by the plugin, never by the
+preferences window, which has no way to look up a chain. Placement merges rather than replaces:
+one Popcorn show spans several Simkl cours and an incremental pull carries only the ones that
+changed. A show's own entry does return its full episode list even under `date_from`, so
+`shows[]` patches still replace.
+
 Simkl history sync keeps `/sync/activities` as its incremental gate and requests
 `/sync/all-items/?extended=full_anime_seasons&episode_watched_at=yes&include_all_episodes=yes`,
 adding `date_from` after the first successful pull. Each valid IMDb-backed show response replaces
@@ -586,24 +602,12 @@ Remove or revise current-state entries as soon as they are committed, verified, 
 - Chapter names are matched by `INTRO_CHAPTER` and `CREDITS_CHAPTER` rather than an exact list.
   `Ending Song`, `ED1`, and `NCOP` are ordinary in anime releases and were all missed, leaving
   files looking unchaptered. Matching stays anchored so `Endcard` and `Introduction` do not match.
-- Multi-cour anime does not reach Simkl at all, and no amount of import work fixes it. Simkl
-  indexes each cour as its own show: `search/id?imdb=tt14986406` resolves only to "Bleach: Sennen
-  Kessen Hen", a 13-episode record covering cour one, while cours two and three are separate Simkl
-  shows reachable by MAL id (53998, 56784). `buildScrobblePayload` addresses shows by IMDb id and
-  Cinemeta season, so every `tt14986406` season 2 and 3 scrobble lands on that 13-episode record
-  out of range and Simkl silently drops it. A live account watched through Bleach S3E6 locally and
-  Simkl held only S1E1-13, which is why a second device offered S2E1 as next. Shows and
-  single-cour anime are unaffected and verified correct (Gintama, Attack on Titan, Family Guy).
-  Fixing it means addressing anime by MAL id on the way out and mapping MAL plus in-cour episode
-  back onto Cinemeta coordinates on the way in, both of which the AniList chain in
-  `src/plugin/intro.ts` already computes for skip times. Do not change only the write side: Simkl
-  numbers every cour from season 1, so scrobbling by MAL without the inverse map would report
-  cour three as season 1 and mark the wrong episodes watched.
-
-## Handbook Maintenance
-
-Update this file in the same change when any of these change:
-
+- Multi-cour anime reaches Simkl only when addressed by MAL id; see the Simkl section above.
+  The evidence, so nobody re-derives it: `search/id?imdb=tt14986406` returns one 13-episode show
+  covering cour one, cours two and three are separate Simkl shows carrying `imdb: tt0434665` (the
+  2004 series they continue), and Cinemeta's TMDB id for the show, 215105, is not indexed by
+  Simkl at all. So neither the IMDb id nor the TMDB id can address a later cour, and anime
+  watched state cannot be keyed by IMDb id on the way back in either.
 - feature behavior or supported scope;
 - file/module ownership or runtime flow;
 - commands, tests, packaging, versioning, or release process;

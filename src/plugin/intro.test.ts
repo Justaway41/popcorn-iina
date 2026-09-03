@@ -7,6 +7,7 @@ import {
     isInsideIntro,
     NEXT_EPISODE_TAIL_SEC,
     mapAnimeEpisode,
+    mapCourEpisode,
     parseAniListRoot,
     parseAniListSequel,
     parseAniSkipInterval,
@@ -306,6 +307,39 @@ test("places a Cinemeta season and episode in the cour AniSkip keys by", () => {
     // An airing cour with no count yet covers the rest of its season.
     expect(mapAnimeEpisode([{ season: 1, count: 1100 }], [entry("21", null)], 1, 1000)).toEqual({ malId: "21", episode: 1000 });
     expect(mapAnimeEpisode([], titan, 1, 1)).toBeNull();
+});
+
+test("reads a cour episode back onto the season the sidebar draws", () => {
+    const entry = (malId: string, episodes: number | null) => ({ anilistId: Number(malId), malId, episodes });
+    // Bleach: Thousand-Year Blood War. Simkl files every cour as its own show numbered from
+    // one, so "episode 6 of MAL 56784" is the sidebar's season 3 episode 6.
+    const bleach = [entry("41467", 13), entry("53998", 13), entry("56784", 14), entry("62651", 10)];
+    const bleachSeasons = [
+        { season: 1, count: 13 },
+        { season: 2, count: 13 },
+        { season: 3, count: 14 },
+        { season: 4, count: 10 }
+    ];
+    expect(mapCourEpisode(bleachSeasons, bleach, "56784", 6)).toEqual({ season: 3, episode: 6 });
+    expect(mapCourEpisode(bleachSeasons, bleach, "41467", 13)).toEqual({ season: 1, episode: 13 });
+    expect(mapCourEpisode(bleachSeasons, bleach, "53998", 1)).toEqual({ season: 2, episode: 1 });
+    // Nothing to place: past the cour's own length, or a cour this show does not contain.
+    expect(mapCourEpisode(bleachSeasons, bleach, "56784", 15)).toBeNull();
+    expect(mapCourEpisode(bleachSeasons, bleach, "16498", 1)).toBeNull();
+
+    // Exact inverse of the forward mapping, including a season split across two MAL entries
+    // and a cour split across two Cinemeta seasons.
+    const titan = [entry("16498", 25), entry("25777", 12), entry("35760", 12), entry("38524", 10), entry("40028", 16), entry("48583", 12)];
+    const titanSeasons = [{ season: 1, count: 25 }, { season: 2, count: 12 }, { season: 3, count: 22 }, { season: 4, count: 28 }];
+    for (const [season, episode] of [[1, 21], [3, 12], [3, 15], [4, 20]] as const) {
+        const cour = mapAnimeEpisode(titanSeasons, titan, season, episode);
+        expect(cour).not.toBeNull();
+        expect(mapCourEpisode(titanSeasons, titan, cour?.malId ?? "", cour?.episode ?? 0))
+            .toEqual({ season, episode });
+    }
+    const split = [{ season: 1, count: 13 }, { season: 2, count: 12 }];
+    expect(mapCourEpisode(split, [entry("31240", 25)], "31240", 14)).toEqual({ season: 2, episode: 1 });
+    expect(mapCourEpisode([], titan, "16498", 1)).toBeNull();
 });
 
 test("takes the AniSkip submission nearest the file's runtime, and none for a different cut", () => {

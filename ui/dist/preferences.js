@@ -210,7 +210,8 @@
     const item = getRecord2(stored);
     const state = {
       local: parseWatchedShows(item?.local),
-      simkl: parseWatchedShows(item?.simkl)
+      simkl: parseWatchedShows(item?.simkl),
+      simklCours: parseWatchedCours(item?.simklCours)
     };
     for (const entry of legacyHistory) {
       if (!entry.watched || !entry.episode)
@@ -232,7 +233,25 @@
     return next;
   }
   function clearSimklWatched(state) {
-    return { ...parseEpisodeWatchState(state), simkl: [] };
+    return { ...parseEpisodeWatchState(state), simkl: [], simklCours: [] };
+  }
+  function mergeSimklCours(state, cours) {
+    const next = parseEpisodeWatchState(state);
+    for (const cour of parseWatchedCours(cours)) {
+      next.simklCours = next.simklCours.filter((item) => item.malId !== cour.malId);
+      next.simklCours.push(cour);
+    }
+    return next;
+  }
+  function parseWatchedCours(value) {
+    if (!Array.isArray(value))
+      return [];
+    return value.flatMap((item) => {
+      const record = getRecord2(item);
+      const malId = typeof record?.malId === "string" ? record.malId : "";
+      const episodes = Array.isArray(record?.episodes) ? record.episodes.filter((number) => typeof number === "number" && Number.isInteger(number) && number > 0) : [];
+      return malId && episodes.length > 0 ? [{ malId, episodes: [...new Set(episodes)] }] : [];
+    });
   }
   function isEpisodeWatched(state, media, episode, legacyHistory = []) {
     const titleId = mediaTitleId(media);
@@ -1219,7 +1238,7 @@
   }
   async function syncSimklHistory(transport, state, local, now = Date.now()) {
     if (!isSimklConnected(state) || state.retryAt > now) {
-      return { state, history: local, watchedPatches: [] };
+      return { state, history: local, watchedPatches: [], watchedCours: [] };
     }
     try {
       const activities = getRecord4(await request2(transport, state, "GET", "/sync/activities", null, now));
@@ -1228,7 +1247,8 @@
         return {
           state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
           history: local,
-          watchedPatches: []
+          watchedPatches: [],
+          watchedCours: []
         };
       }
       const cursor = state.lastActivityAt ? `?date_from=${encodeURIComponent(state.lastActivityAt)}` : "";
@@ -1249,7 +1269,8 @@
           retryAt: 0
         },
         history: mergeWatchHistory(local, parseSimklHistory(items, playback)),
-        watchedPatches: parseSimklWatchedPatches(items)
+        watchedPatches: parseSimklWatchedPatches(items),
+        watchedCours: parseSimklWatchedCours(items)
       };
     } catch (error) {
       if (error instanceof SimklError && error.status === 401) {
@@ -1261,7 +1282,8 @@
             retryAt: 0
           },
           history: local,
-          watchedPatches: []
+          watchedPatches: [],
+          watchedCours: []
         };
       }
       return {
@@ -1271,16 +1293,39 @@
           retryAt: error instanceof SimklError ? error.retryAt : 0
         },
         history: local,
-        watchedPatches: []
+        watchedPatches: [],
+        watchedCours: []
       };
     }
   }
   function parseSimklWatchedPatches(items) {
-    const lists = getRecord4(items);
-    return [
-      ...watchedShowPatches(lists?.shows),
-      ...watchedShowPatches(lists?.anime)
-    ];
+    return watchedShowPatches(getRecord4(items)?.shows);
+  }
+  function parseSimklWatchedCours(items) {
+    const list = getRecord4(items)?.anime;
+    if (!Array.isArray(list))
+      return [];
+    return list.flatMap((value) => {
+      const item = getRecord4(value);
+      const malId = getString4(getRecord4(getRecord4(item?.show)?.ids)?.mal);
+      const seasons = item?.seasons;
+      if (!malId || !Array.isArray(seasons))
+        return [];
+      const episodes = [...new Set(seasons.flatMap(courEpisodeNumbers))];
+      return episodes.length === 0 ? [] : [{ malId, episodes }];
+    });
+  }
+  function courEpisodeNumbers(value) {
+    const season = getRecord4(value);
+    if (!Array.isArray(season?.episodes))
+      return [];
+    return season.episodes.flatMap((value2) => {
+      const episode = getRecord4(value2);
+      if (!episode || !getString4(episode.watched_at))
+        return [];
+      const number = episodeNumber(episode.number);
+      return number === null || number === 0 ? [] : [number];
+    });
   }
   function watchedShowPatches(value) {
     if (!Array.isArray(value))
@@ -1471,7 +1516,7 @@
       preferredAudio: "",
       preferredSubtitle: "",
       watchHistory: [],
-      episodeWatchState: { local: [], simkl: [] },
+      episodeWatchState: { local: [], simkl: [], simklCours: [] },
       trakt: {},
       skipSegments: true,
       simkl: {}
@@ -1976,7 +2021,7 @@
       return;
     const latest = parseWatchHistory(storedHistory);
     const history = mergeWatchHistory(latest, result.history);
-    const watchedState = applySimklWatchedPatches(parseEpisodeWatchState(storedState, history), result.watchedPatches);
+    const watchedState = mergeSimklCours(applySimklWatchedPatches(parseEpisodeWatchState(storedState, history), result.watchedPatches), result.watchedCours);
     simkl = result.state;
     preferences.set("watchHistory", history);
     preferences.set("episodeWatchState", watchedState);

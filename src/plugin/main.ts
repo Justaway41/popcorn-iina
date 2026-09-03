@@ -11,7 +11,9 @@ import type { AddonManifest, StremioAddon } from "../shared/addons";
 import { MESSAGE_NAMES } from "../shared/messages";
 import { loadEnabledAddonStreams, parseAddonManifest, parseAddons } from "../shared/addons";
 import {
+    addSimklWatchedEpisodes,
     applySimklWatchedPatches,
+    mergeSimklCours,
     getHistoryEntry,
     historyContextId,
     markEpisodeWatched,
@@ -48,21 +50,19 @@ import {
     shouldSendWatchedStop
 } from "./playback";
 import { keepAwakeTick, startKeepAwake, stopKeepAwake } from "./sleep";
+import { createAnimeChainClient } from "./anime";
+import { createJsonClient, safeJson } from "./http";
 import { createIinaSimklClient } from "./simkl";
+import type { AnimeCourEpisode } from "../shared/simkl";
 import { createIinaTraktClient } from "./trakt";
 import {
     findChapterCredits,
     findChapterIntro,
     getOverlayAction,
-    mapAnimeEpisode,
-    parseAniListRoot,
-    parseAniListSequel,
     parseAniSkipInterval,
     parseIntroDbSegment,
-    parseKitsuMalId,
     sanitizeSegments,
     seasonEpisodeCounts,
-    type AnimeEntry,
     type IntroInterval,
     type OverlayAction
 } from "./intro";
@@ -70,6 +70,8 @@ import { parseLanguagePreference } from "./preferences";
 import { formatError, isHttpUrl, logDebug, sanitizeMediaTitle } from "./utils";
 
 const { core, event, global, http, mpv, overlay, preferences, sidebar, utils } = iina;
+const json = createJsonClient(http);
+const anime = createAnimeChainClient(http);
 const trakt = createIinaTraktClient(http, preferences, (error) => {
     logDebug("Popcorn: Trakt request failed:", formatError(error));
 });
@@ -103,6 +105,7 @@ let introInterval: IntroInterval | null = null;
 let recapInterval: IntroInterval | null = null;
 let creditsInterval: IntroInterval | null = null;
 let playbackRevision = 0;
+let activeCour: Promise<AnimeCourEpisode | null> = Promise.resolve(null);
 let overlayAction: OverlayAction | null = null;
 let overlayVisible = false;
 let overlayLabel = "";
@@ -111,9 +114,6 @@ let prefetchedNextEpisode: PlayItemPayload | null = null;
 let prefetchedNextEpisodeAt = 0;
 /** Debrid links can expire within the hour; past this the sidebar picks a fresh one instead. */
 const PREFETCH_FRESH_MS = 30 * 60_000;
-const kitsuMalIds = new Map<string, string>();
-/** Sequel chains by title; null records a title AniList does not know, which is live action. */
-const animeChains = new Map<string, AnimeEntry[] | null>();
 const addonManifests = new Map<string, AddonManifest>();
 
 function setPlayerUIHidden(hidden: boolean): void {
@@ -210,7 +210,27 @@ function sendScrobble(action: TraktScrobbleAction, percent: number): void {
     if (!context || !Number.isFinite(percent) || scrobbleStopSent) return;
     if (action === "stop") scrobbleStopSent = true;
     void trakt.sendPlayback(action, context, percent);
-    void simkl.sendPlayback(action, context, percent);
+    // Simkl files anime one cour per show, so the episode has to be placed in the sequel chain
+    // before it can be addressed at all. The lookup is cached per show and the promise is
+    // shared by every scrobble of this file, so only the first one waits.
+    void activeCour.then((cour) => simkl.sendPlayback(action, context, percent, cour));
+}
+
+/**
+ * The cour the playing episode belongs to, resolved once per file. Null for live action and
+ * for anime the chain cannot place, which leaves the scrobble addressed by IMDb id as before.
+ */
+async function resolveActiveCour(revision: number): Promise<AnimeCourEpisode | null> {
+    const context = activePlaybackContext;
+    const episode = context?.episode;
+    if (!context || !episode) return null;
+    try {
+        const target = await anime.resolveEpisode(context, episode);
+        return isCurrentRequest(revision, playbackRevision) ? target : null;
+    } catch (error) {
+        logDebug("Popcorn: Anime cour lookup failed:", formatError(error));
+        return null;
+    }
 }
 
 function checkpointPlayback(forceStop = false): void {
@@ -355,6 +375,7 @@ function handleEndFile(): void {
 
 function clearIntro(): void {
     playbackRevision += 1;
+    activeCour = Promise.resolve(null);
     introInterval = null;
     recapInterval = null;
     creditsInterval = null;
@@ -602,7 +623,7 @@ async function loadAniSkipSegments(
     duration: number
 ): Promise<{ intro: IntroInterval | null; credits: IntroInterval | null } | null> {
     try {
-        const target = await resolveAnimeEpisode(context, episode);
+        const target = await anime.resolveEpisode(context, episode);
         if (!target || !isCurrentRequest(revision, playbackRevision)) return null;
         // Every submission is requested and the nearest runtime chosen here. AniSkip's own
         // `episodeLength` filter is tight enough that a rip cut differently from the
@@ -626,62 +647,6 @@ async function loadAniSkipSegments(
 }
 
 /**
- * The cour and in-cour episode number AniSkip wants. A catalogue id that is already per cour
- * (a Kitsu entry) numbers its episodes within the cour and is used as is; a Cinemeta series is
- * numbered in seasons and has to be placed in the franchise's sequel chain first.
- */
-async function resolveAnimeEpisode(
-    context: PlaybackContext,
-    episode: Episode
-): Promise<{ malId: string; episode: number } | null> {
-    const providerId = context.media.providerId || context.media.id || "";
-    const known = context.media.malId ||
-        (providerId.startsWith("kitsu:") ? await loadKitsuMalId(providerId) : "");
-    if (known) return { malId: known, episode: episode.episode };
-    const chain = await loadAnimeChain(context.media.name);
-    if (!chain) return null;
-    return mapAnimeEpisode(seasonEpisodeCounts(context.episodes), chain, episode.season, episode.episode);
-}
-
-const ANILIST_URL = "https://graphql.anilist.co";
-const ANILIST_ROOT_QUERY = "query ($search: String) { Page(perPage: 25) { media(search: $search, " +
-    "type: ANIME, sort: SEARCH_MATCH) { id idMal format episodes startDate { year month } " +
-    "synonyms title { romaji english } } } }";
-const ANILIST_SEQUEL_QUERY = "query ($id: Int) { Media(id: $id) { relations { edges { relationType " +
-    "node { id idMal format episodes startDate { year month } } } } } }";
-/** Longer runs exist, but past this a chain is more likely a loop in the relation data. */
-const MAX_SEQUEL_HOPS = 12;
-
-/**
- * The franchise's cours in airing order, found from the title. One request finds the first
- * cour and one more per sequel, so the chain is cached for the session; a title AniList does
- * not know is cached as null so live action stops asking. A failed request is not cached: a
- * rate limit must not read as "not anime" until restart.
- */
-async function loadAnimeChain(name: string): Promise<AnimeEntry[] | null> {
-    if (animeChains.has(name)) return animeChains.get(name) ?? null;
-    const root = parseAniListRoot(
-        await postJson(ANILIST_URL, { query: ANILIST_ROOT_QUERY, variables: { search: name } }),
-        name
-    );
-    if (!root) {
-        animeChains.set(name, null);
-        return null;
-    }
-    const chain = [root];
-    for (let hop = 0; hop < MAX_SEQUEL_HOPS; hop += 1) {
-        const next = parseAniListSequel(await postJson(ANILIST_URL, {
-            query: ANILIST_SEQUEL_QUERY,
-            variables: { id: chain[chain.length - 1].anilistId }
-        }));
-        if (!next || chain.some((entry) => entry.anilistId === next.anilistId)) break;
-        chain.push(next);
-    }
-    animeChains.set(name, chain);
-    return chain;
-}
-
-/**
  * IntroDB is keyed on the series IMDb id plus season and episode, and answers 200 with null
  * segments when it holds nothing, so an empty answer is not an error.
  */
@@ -692,7 +657,7 @@ async function loadIntroDbSegments(
 ): Promise<SegmentSources | null> {
     if (!isImdbId(imdbId) || !(episode.season >= 1) || !(episode.episode >= 1)) return null;
     try {
-        const data = await requestJson(
+        const data = await json.getJson(
             `https://api.introdb.app/segments?imdb_id=${encodeURIComponent(imdbId)}` +
                 `&season=${encodeURIComponent(String(episode.season))}` +
                 `&episode=${encodeURIComponent(String(episode.episode))}`
@@ -748,7 +713,7 @@ async function prefetchNextEpisode(revision: number): Promise<void> {
         const result = await loadEnabledAddonStreams(
             parseAddons(preferences.get("addons"), preferences.get("addonManifestUrl")),
             loadAddonManifest,
-            async (addon) => parsePlayableStreams(await requestJson(
+            async (addon) => parsePlayableStreams(await json.getJson(
                 buildStremioStreamUrl(addon.manifestUrl, context.media.type, next.id)
             ))
         );
@@ -790,63 +755,9 @@ async function prefetchNextEpisode(revision: number): Promise<void> {
 async function loadAddonManifest(addon: StremioAddon): Promise<AddonManifest> {
     const cached = addonManifests.get(addon.manifestUrl);
     if (cached) return cached;
-    const manifest = parseAddonManifest(await requestJson(addon.manifestUrl));
+    const manifest = parseAddonManifest(await json.getJson(addon.manifestUrl));
     addonManifests.set(addon.manifestUrl, manifest);
     return manifest;
-}
-
-async function postJson(url: string, body: unknown): Promise<unknown> {
-    const response = await http.post(url, {
-        params: {},
-        headers: { Accept: "application/json", "Content-Type": "application/json" },
-        data: body
-    });
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw new Error(`Request failed with HTTP ${response.statusCode}.`);
-    }
-    const data = safeJson(response.data ?? response.text);
-    if (data === null) throw new Error("Response was not valid JSON.");
-    return data;
-}
-
-async function requestJson(url: string): Promise<unknown> {
-    const response = await http.get(url, {
-        params: {},
-        headers: { Accept: "application/json" },
-        data: {}
-    });
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw new Error(`Request failed with HTTP ${response.statusCode}.`);
-    }
-    const data = safeJson(response.data ?? response.text);
-    if (data === null) throw new Error("Response was not valid JSON.");
-    return data;
-}
-
-async function loadKitsuMalId(providerId: string): Promise<string> {
-    const kitsuId = providerId.match(/^kitsu:(\d+)$/i)?.[1] || "";
-    if (!kitsuId) return "";
-    const cached = kitsuMalIds.get(kitsuId);
-    if (cached !== undefined) return cached;
-    const response = await http.get(
-        `https://kitsu.io/api/edge/anime/${encodeURIComponent(kitsuId)}/mappings`,
-        { params: {}, headers: { Accept: "application/vnd.api+json" }, data: {} }
-    );
-    // A successful answer without a mapping is a real "no MAL id"; a failed request is
-    // transient and must not be cached, or AniSkip stays broken until restart.
-    if (response.statusCode < 200 || response.statusCode >= 300) return "";
-    const malId = parseKitsuMalId(response.data ?? safeJson(response.text));
-    kitsuMalIds.set(kitsuId, malId);
-    return malId;
-}
-
-function safeJson(value: unknown): unknown {
-    if (typeof value !== "string") return value ?? null;
-    try {
-        return JSON.parse(value) as unknown;
-    } catch {
-        return null;
-    }
 }
 
 /**
@@ -862,16 +773,26 @@ function syncRemoteHistory(): void {
     lastHistorySyncAt = now;
     void trakt.sync(watchHistory)
         .then((synced) => simkl.sync(synced))
-        .then((synced) => {
+        .then(async (synced) => {
             const latestHistory = parseWatchHistory(preferences.get("watchHistory"));
             const history = mergeWatchHistory(
                 latestHistory,
                 synced.history
             );
-            const watchedState = applySimklWatchedPatches(
-                parseEpisodeWatchState(preferences.get("episodeWatchState"), history),
-                synced.watchedPatches
+            // Anime arrives keyed by cour and has to be walked back onto Cinemeta's seasons
+            // before it means anything to the sidebar. Reading preferences again afterwards
+            // keeps progress recorded while the lookups ran.
+            const stored = mergeSimklCours(
+                applySimklWatchedPatches(
+                    parseEpisodeWatchState(preferences.get("episodeWatchState"), history),
+                    synced.watchedPatches
+                ),
+                synced.watchedCours
             );
+            // Every cour held so far, not only this pull's: an incremental pull carries just
+            // the cours that changed, and a show's other cours must keep their marks.
+            const courPatches = await anime.resolveWatchedCours(stored.simklCours, history);
+            const watchedState = addSimklWatchedEpisodes(stored, courPatches);
             watchHistory = history;
             episodeWatchState = watchedState;
             preferences.set("watchHistory", history);
@@ -979,6 +900,7 @@ event.on("mpv.file-loaded", () => {
         mpv.command("seek", [String(pendingResumePercent), "absolute-percent+exact"]);
         pendingResumePercent = null;
     }
+    activeCour = resolveActiveCour(playbackRevision);
     sendScrobble("start", mpv.getNumber("percent-pos"));
     const revision = playbackRevision;
     // A file this plugin did not start belongs to whatever opened it, so no skip controls and no

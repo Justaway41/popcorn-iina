@@ -1,9 +1,10 @@
-import type { WatchedShowPatch, WatchHistoryEntry } from "../shared/history";
+import type { WatchedCour, WatchedShowPatch, WatchHistoryEntry } from "../shared/history";
 import type { PlaybackContext } from "../shared/messages";
 import {
     parseSimklState,
     simklScrobble,
     syncSimklHistory,
+    type AnimeCourEpisode,
     type SimklScrobbleAction,
     type SimklState
 } from "../shared/simkl";
@@ -13,11 +14,13 @@ export interface IinaSimklClient {
     sendPlayback(
         action: SimklScrobbleAction,
         context: PlaybackContext,
-        progress: number
+        progress: number,
+        cour: AnimeCourEpisode | null
     ): Promise<void>;
     sync(history: WatchHistoryEntry[]): Promise<{
         history: WatchHistoryEntry[];
         watchedPatches: WatchedShowPatch[];
+        watchedCours: WatchedCour[];
     }>;
 }
 
@@ -44,14 +47,14 @@ export function createIinaSimklClient(
     };
 
     return {
-        sendPlayback(action, context, progress) {
+        sendPlayback(action, context, progress, cour) {
             return enqueue(async () => {
                 const state = read();
                 if (!state.accessToken) return;
                 try {
                     saveIfCurrent(
                         state,
-                        await simklScrobble(transport, state, action, context, progress)
+                        await simklScrobble(transport, state, action, context, progress, cour)
                     );
                 } catch (error) {
                     onError(error);
@@ -61,16 +64,19 @@ export function createIinaSimklClient(
         sync(history) {
             return enqueue(async () => {
                 const state = read();
-                if (!state.accessToken) return { history, watchedPatches: [] };
+                const empty = { history, watchedPatches: [], watchedCours: [] };
+                if (!state.accessToken) return empty;
                 try {
                     const result = await syncSimklHistory(transport, state, history);
-                    if (!saveIfCurrent(state, result.state)) {
-                        return { history, watchedPatches: [] };
-                    }
-                    return { history: result.history, watchedPatches: result.watchedPatches };
+                    if (!saveIfCurrent(state, result.state)) return empty;
+                    return {
+                        history: result.history,
+                        watchedPatches: result.watchedPatches,
+                        watchedCours: result.watchedCours
+                    };
                 } catch (error) {
                     onError(error);
-                    return { history, watchedPatches: [] };
+                    return empty;
                 }
             });
         }

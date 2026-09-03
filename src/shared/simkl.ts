@@ -1,4 +1,4 @@
-import type { WatchedShowPatch, WatchHistoryEntry } from "./history";
+import type { WatchedCour, WatchedShowPatch, WatchHistoryEntry } from "./history";
 import type { PlaybackContext } from "./messages";
 import { isImdbId } from "./stremio";
 import {
@@ -45,6 +45,7 @@ export interface SimklHistorySyncResult {
     state: SimklState;
     history: WatchHistoryEntry[];
     watchedPatches: WatchedShowPatch[];
+    watchedCours: WatchedCour[];
 }
 
 export class SimklError extends Error {
@@ -143,12 +144,41 @@ export async function pollSimklPin(
     throw new Error("Simkl pin expired before it was approved.");
 }
 
+/**
+ * Where the episode sits in Simkl's own numbering, for anime that Simkl files one cour per
+ * show. `malId` names the cour and `episode` counts from one within it.
+ */
+export interface AnimeCourEpisode {
+    malId: string;
+    episode: number;
+}
+
+/**
+ * Simkl indexes each anime cour as a separate show: `tt14986406` resolves only to Bleach's
+ * first cour, so a season 3 scrobble addressed by IMDb id lands out of that show's 13 episodes
+ * and is answered with a 404. Addressing the cour by its MAL id is what Simkl accepts, and it
+ * files the episode where the other devices will find it.
+ */
+export function buildSimklScrobblePayload(
+    context: PlaybackContext,
+    progress: number,
+    cour: AnimeCourEpisode | null
+): unknown {
+    if (!cour) return buildScrobblePayload(context, progress);
+    return {
+        progress: Math.max(0, Math.min(100, progress)),
+        anime: { ids: { mal: cour.malId } },
+        episode: { season: 1, number: cour.episode }
+    };
+}
+
 export async function simklScrobble(
     transport: HttpTransport,
     state: SimklState,
     action: SimklScrobbleAction,
     context: PlaybackContext,
     progress: number,
+    cour: AnimeCourEpisode | null = null,
     now = Date.now()
 ): Promise<SimklState> {
     if (!isSimklConnected(state)) return state;
@@ -160,7 +190,7 @@ export async function simklScrobble(
             state,
             "POST",
             `/scrobble/${action}`,
-            buildScrobblePayload(context, progress),
+            buildSimklScrobblePayload(context, progress, cour),
             now
         );
         return { ...state, lastError: "", retryAt: 0 };
@@ -189,7 +219,7 @@ export async function syncSimklHistory(
     now = Date.now()
 ): Promise<SimklHistorySyncResult> {
     if (!isSimklConnected(state) || state.retryAt > now) {
-        return { state, history: local, watchedPatches: [] };
+        return { state, history: local, watchedPatches: [], watchedCours: [] };
     }
     try {
         const activities = getRecord(
@@ -201,7 +231,8 @@ export async function syncSimklHistory(
             return {
                 state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
                 history: local,
-                watchedPatches: []
+                watchedPatches: [],
+                watchedCours: []
             };
         }
 
@@ -229,7 +260,8 @@ export async function syncSimklHistory(
                 retryAt: 0
             },
             history: mergeWatchHistory(local, parseSimklHistory(items, playback)),
-            watchedPatches: parseSimklWatchedPatches(items)
+            watchedPatches: parseSimklWatchedPatches(items),
+            watchedCours: parseSimklWatchedCours(items)
         };
     } catch (error) {
         if (error instanceof SimklError && error.status === 401) {
@@ -241,7 +273,8 @@ export async function syncSimklHistory(
                     retryAt: 0
                 },
                 history: local,
-                watchedPatches: []
+                watchedPatches: [],
+                watchedCours: []
             };
         }
         return {
@@ -251,17 +284,44 @@ export async function syncSimklHistory(
                 retryAt: error instanceof SimklError ? error.retryAt : 0
             },
             history: local,
-            watchedPatches: []
+            watchedPatches: [],
+            watchedCours: []
         };
     }
 }
 
 export function parseSimklWatchedPatches(items: unknown): WatchedShowPatch[] {
-    const lists = getRecord(items);
-    return [
-        ...watchedShowPatches(lists?.shows),
-        ...watchedShowPatches(lists?.anime)
-    ];
+    return watchedShowPatches(getRecord(items)?.shows);
+}
+
+/**
+ * Anime watched state, keyed by the cour's MAL id. It cannot be keyed by IMDb id like a show:
+ * Simkl reports Bleach's later cours under `tt0434665`, the 2004 series they continue, so
+ * storing them against that id would mark episodes watched on an entirely different show.
+ * Placing them needs the sequel chain, which only the plugin can resolve.
+ */
+export function parseSimklWatchedCours(items: unknown): WatchedCour[] {
+    const list = getRecord(items)?.anime;
+    if (!Array.isArray(list)) return [];
+    return list.flatMap((value) => {
+        const item = getRecord(value);
+        const malId = getString(getRecord(getRecord(item?.show)?.ids)?.mal);
+        const seasons = item?.seasons;
+        if (!malId || !Array.isArray(seasons)) return [];
+        const episodes = [...new Set(seasons.flatMap(courEpisodeNumbers))];
+        return episodes.length === 0 ? [] : [{ malId, episodes }];
+    });
+}
+
+function courEpisodeNumbers(value: unknown): number[] {
+    const season = getRecord(value);
+    if (!Array.isArray(season?.episodes)) return [];
+    return season.episodes.flatMap((value) => {
+        const episode = getRecord(value);
+        if (!episode || !getString(episode.watched_at)) return [];
+        const number = episodeNumber(episode.number);
+        return number === null || number === 0 ? [] : [number];
+    });
 }
 
 function watchedShowPatches(value: unknown): WatchedShowPatch[] {

@@ -176,7 +176,8 @@
     const item = getRecord2(stored);
     const state = {
       local: parseWatchedShows(item?.local),
-      simkl: parseWatchedShows(item?.simkl)
+      simkl: parseWatchedShows(item?.simkl),
+      simklCours: parseWatchedCours(item?.simklCours)
     };
     for (const entry of legacyHistory) {
       if (!entry.watched || !entry.episode)
@@ -198,7 +199,25 @@
     return next;
   }
   function clearSimklWatched(state) {
-    return { ...parseEpisodeWatchState(state), simkl: [] };
+    return { ...parseEpisodeWatchState(state), simkl: [], simklCours: [] };
+  }
+  function mergeSimklCours(state, cours) {
+    const next = parseEpisodeWatchState(state);
+    for (const cour of parseWatchedCours(cours)) {
+      next.simklCours = next.simklCours.filter((item) => item.malId !== cour.malId);
+      next.simklCours.push(cour);
+    }
+    return next;
+  }
+  function parseWatchedCours(value) {
+    if (!Array.isArray(value))
+      return [];
+    return value.flatMap((item) => {
+      const record = getRecord2(item);
+      const malId = typeof record?.malId === "string" ? record.malId : "";
+      const episodes = Array.isArray(record?.episodes) ? record.episodes.filter((number) => typeof number === "number" && Number.isInteger(number) && number > 0) : [];
+      return malId && episodes.length > 0 ? [{ malId, episodes: [...new Set(episodes)] }] : [];
+    });
   }
   function isEpisodeWatched(state, media, episode, legacyHistory = []) {
     const titleId = mediaTitleId(media);
@@ -781,7 +800,7 @@
       preferredAudio: "",
       preferredSubtitle: "",
       watchHistory: [],
-      episodeWatchState: { local: [], simkl: [] },
+      episodeWatchState: { local: [], simkl: [], simklCours: [] },
       trakt: {},
       skipSegments: true,
       simkl: {}

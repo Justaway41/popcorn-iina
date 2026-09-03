@@ -14,6 +14,7 @@ import {
 } from "../shared/addons";
 import {
     applySimklWatchedPatches,
+    mergeSimklCours,
     clearSimklWatched,
     parseEpisodeWatchState,
     parseWatchHistory
@@ -572,9 +573,14 @@ async function persistSimklSync(
     if (revision !== simklRevision) return;
     const latest = parseWatchHistory(storedHistory);
     const history = mergeWatchHistory(latest, result.history);
-    const watchedState = applySimklWatchedPatches(
-        parseEpisodeWatchState(storedState, history),
-        result.watchedPatches
+    // Anime cours are kept as they arrived: placing them on Cinemeta's seasons needs the
+    // sequel chain, which only the plugin can look up. It reads them from here on its next sync.
+    const watchedState = mergeSimklCours(
+        applySimklWatchedPatches(
+            parseEpisodeWatchState(storedState, history),
+            result.watchedPatches
+        ),
+        result.watchedCours
     );
     simkl = result.state;
     preferences.set("watchHistory", history);

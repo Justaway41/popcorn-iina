@@ -3,12 +3,14 @@ import { expect, test } from "bun:test";
 import type { PlaybackContext } from "./messages";
 
 import {
+    addSimklWatchedEpisodes,
     applySimklWatchedPatches,
     clearSimklWatched,
     getHistoryEntry,
     getResumePercent,
     isEpisodeWatched,
     latestPerTitle,
+    mergeSimklCours,
     markEpisodeWatched,
     parseEpisodeWatchState,
     parseWatchHistory,
@@ -224,9 +226,18 @@ test("normalizes compact episode watch state", () => {
         simkl: [{ id: "tt9", episodes: ["1:2"] }, null]
     })).toEqual({
         local: [{ id: "tt9", episodes: ["2:3"] }],
-        simkl: [{ id: "tt9", episodes: ["1:2"] }]
+        simkl: [{ id: "tt9", episodes: ["1:2"] }],
+        simklCours: []
     });
-    expect(parseEpisodeWatchState("not json")).toEqual({ local: [], simkl: [] });
+    expect(parseEpisodeWatchState({
+        simklCours: [
+            { malId: "56784", episodes: [6, 6, 0, -2, 1.5] },
+            { malId: "", episodes: [1] },
+            { malId: "41467", episodes: [] },
+            null
+        ]
+    })).toEqual({ local: [], simkl: [], simklCours: [{ malId: "56784", episodes: [6] }] });
+    expect(parseEpisodeWatchState("not json")).toEqual({ local: [], simkl: [], simklCours: [] });
 });
 
 test("marks local episodes once and migrates watched legacy entries", () => {
@@ -252,16 +263,40 @@ test("replaces only the changed Simkl show and clears only Simkl state", () => {
         simkl: [
             { id: "tt8", episodes: ["2:2"] },
             { id: "tt9", episodes: ["1:2"] }
-        ]
+        ],
+        simklCours: []
     });
     expect(applySimklWatchedPatches(patched, [{ id: "tt9", episodes: [] }])).toEqual({
         local: [{ id: "tt9", episodes: ["1:1"] }],
-        simkl: [{ id: "tt8", episodes: ["2:2"] }]
+        simkl: [{ id: "tt8", episodes: ["2:2"] }],
+        simklCours: []
     });
     expect(clearSimklWatched(patched)).toEqual({
         local: [{ id: "tt9", episodes: ["1:1"] }],
-        simkl: []
+        simkl: [],
+        simklCours: []
     });
+});
+
+test("adds Simkl episodes without dropping the cours a pull left out", () => {
+    // One Popcorn show spans several Simkl anime cours, and an incremental pull carries only
+    // the cours that changed, so season three arriving alone must not erase seasons one and two.
+    const state = parseEpisodeWatchState({ simkl: [{ id: "tt14986406", episodes: ["1:1", "2:1"] }] });
+    expect(addSimklWatchedEpisodes(state, [{ id: "tt14986406", episodes: ["3:6", "1:1"] }])).toEqual({
+        local: [],
+        simkl: [{ id: "tt14986406", episodes: ["1:1", "2:1", "3:6"] }],
+        simklCours: []
+    });
+
+    const held = mergeSimklCours(state, [
+        { malId: "41467", episodes: [1] },
+        { malId: "56784", episodes: [6] }
+    ]);
+    expect(mergeSimklCours(held, [{ malId: "56784", episodes: [6, 7] }]).simklCours).toEqual([
+        { malId: "41467", episodes: [1] },
+        { malId: "56784", episodes: [6, 7] }
+    ]);
+    expect(clearSimklWatched(held).simklCours).toEqual([]);
 });
 
 test("checks exact local, Simkl, and legacy episode marks", () => {

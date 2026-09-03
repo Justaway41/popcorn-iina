@@ -201,6 +201,54 @@ export function mapAnimeEpisode(
     season: number,
     episode: number
 ): { malId: string; episode: number } | null {
+    for (const segment of courSegments(seasons, chain)) {
+        if (segment.season !== season) continue;
+        if (episode <= segment.seasonStart || episode > segment.seasonStart + segment.count) continue;
+        return { malId: segment.malId, episode: segment.courStart + episode - segment.seasonStart };
+    }
+    return null;
+}
+
+/**
+ * The reverse: where a cour's own episode number lands in Cinemeta's seasons. Simkl files each
+ * cour as its own show numbered from one, so an episode read back from it says nothing about
+ * the season the sidebar draws until it is walked back through the same chain.
+ */
+export function mapCourEpisode(
+    seasons: Array<{ season: number; count: number }>,
+    chain: AnimeEntry[],
+    malId: string,
+    episode: number
+): { season: number; episode: number } | null {
+    for (const segment of courSegments(seasons, chain)) {
+        if (segment.malId !== malId) continue;
+        if (episode <= segment.courStart || episode > segment.courStart + segment.count) continue;
+        return { season: segment.season, episode: segment.seasonStart + episode - segment.courStart };
+    }
+    return null;
+}
+
+interface CourSegment {
+    season: number;
+    malId: string;
+    /** Episodes already used in this Cinemeta season before the segment. */
+    seasonStart: number;
+    /** Episodes already used in this cour before the segment. */
+    courStart: number;
+    count: number;
+}
+
+/**
+ * The seasons and cours laid side by side. Cinemeta numbers a show in seasons and MyAnimeList
+ * numbers it in cours, and the two rarely agree - Attack on Titan season 3 is two MAL entries -
+ * so the chain is consumed in order, each season taking as many cour episodes as it has. Both
+ * directions read the same segments, which is what keeps them exact inverses.
+ */
+function courSegments(
+    seasons: Array<{ season: number; count: number }>,
+    chain: AnimeEntry[]
+): CourSegment[] {
+    const segments: CourSegment[] = [];
     let index = 0;
     let used = 0;
     for (const current of seasons) {
@@ -211,9 +259,19 @@ export function mapAnimeEpisode(
             const snap = used === 0 && filled === 0 && Number.isFinite(total) &&
                 Math.abs(total - current.count) <= SEASON_SNAP_TOLERANCE;
             const take = snap ? current.count : Math.min(total - used, current.count - filled);
-            if (current.season === season && episode > filled && episode <= filled + take) {
-                return { malId: entry.malId, episode: used + episode - filled };
+            // An entry AniList reports as having no episodes would never advance the walk.
+            if (take <= 0) {
+                index += 1;
+                used = 0;
+                continue;
             }
+            segments.push({
+                season: current.season,
+                malId: entry.malId,
+                seasonStart: filled,
+                courStart: used,
+                count: take
+            });
             filled += take;
             used += take;
             if (snap || used >= total) {
@@ -221,9 +279,8 @@ export function mapAnimeEpisode(
                 used = 0;
             }
         }
-        if (current.season === season) return null;
     }
-    return null;
+    return segments;
 }
 
 /**
