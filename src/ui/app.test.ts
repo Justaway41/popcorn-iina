@@ -9,6 +9,9 @@ import {
     getTierRowCap,
     getSkeletonCells,
     getVaryingStreamFields,
+    isPlayingStream,
+    parseNowPlaying,
+    playingStream,
     stripSeriesPrefix,
     getCacheBadge,
     getEpisodeOrderButtonId,
@@ -236,4 +239,55 @@ test("skeleton stands in for the bands the view resolves into", () => {
     // stream bands must never leak into the episode shape - their heights differ
     expect(getSkeletonCells("episodes")).not.toContain("sk-summary");
     expect(getSkeletonCells("episodes")).not.toContain("sk-row");
+});
+
+test("marks the playing row only on the episode actually playing", () => {
+    const playing = {
+        videoId: "tt0988818:1:11",
+        url: "https://cdn.example/a.mkv",
+        releaseName: "[Mattmurdock] Gintama - 011.mkv"
+    };
+    const row = { url: "https://cdn.example/a.mkv", rawTitle: "[Mattmurdock] Gintama - 011.mkv" };
+
+    expect(isPlayingStream(row, playingStream(playing, "tt0988818:1:11"))).toBe(true);
+    // Opening any other episode marks nothing, even though the player is still going.
+    expect(isPlayingStream(row, playingStream(playing, "tt0988818:1:12"))).toBe(false);
+    expect(isPlayingStream(row, playingStream(playing, ""))).toBe(false);
+
+    // A debrid addon mints a fresh URL per request, so the name has to carry the match.
+    const reissued = { url: "https://cdn.example/DIFFERENT.mkv", rawTitle: row.rawTitle };
+    expect(isPlayingStream(reissued, playingStream(playing, "tt0988818:1:11"))).toBe(true);
+    // A different file at neither the same URL nor the same name is not the one playing.
+    const other = { url: "https://cdn.example/b.mkv", rawTitle: "[AnimeRG] Gintama - 011.mkv" };
+    expect(isPlayingStream(other, playingStream(playing, "tt0988818:1:11"))).toBe(false);
+    // Nothing playing marks nothing, even for a row with empty fields of its own.
+    expect(isPlayingStream({ url: "", rawTitle: "" }, { videoId: "", url: "", releaseName: "" }))
+        .toBe(false);
+});
+
+test("reads what the player reports defensively", () => {
+    expect(parseNowPlaying(undefined)).toEqual({ videoId: "", url: "", releaseName: "" });
+    expect(parseNowPlaying({ videoId: 7, url: null, releaseName: [] }))
+        .toEqual({ videoId: "", url: "", releaseName: "" });
+    expect(parseNowPlaying({ videoId: "tt1:1:1", url: "https://cdn.example/a.mkv", releaseName: "a.mkv" }))
+        .toEqual({ videoId: "tt1:1:1", url: "https://cdn.example/a.mkv", releaseName: "a.mkv" });
+});
+
+test("matches the row when the overlay started the stream, not just a sidebar click", () => {
+    // The overlay's own prefetch supplies the release name too; without it the plugin reports
+    // an empty name and, once the debrid link is reissued, nothing can match.
+    const overlayStarted = parseNowPlaying({
+        videoId: "tt0988818:1:11",
+        url: "https://cdn.example/issued-at-prefetch.mkv",
+        releaseName: "[ReinForce] Gintama 11 (BDRip 1920x1080 x264 FLAC).mkv"
+    });
+    const row = {
+        url: "https://cdn.example/reissued-for-the-list.mkv",
+        rawTitle: "[ReinForce] Gintama 11 (BDRip 1920x1080 x264 FLAC).mkv"
+    };
+
+    expect(isPlayingStream(row, playingStream(overlayStarted, "tt0988818:1:11"))).toBe(true);
+    // A missing release name is what the bug looked like: no url match, no name to fall back on.
+    const nameless = parseNowPlaying({ videoId: "tt0988818:1:11", url: overlayStarted.url });
+    expect(isPlayingStream(row, playingStream(nameless, "tt0988818:1:11"))).toBe(false);
 });

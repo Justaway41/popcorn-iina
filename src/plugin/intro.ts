@@ -9,7 +9,7 @@ export interface PlaybackSegments {
     credits: IntroInterval | null;
 }
 
-export type OverlayAction = "recap" | "intro" | "next";
+export type OverlayAction = "recap" | "intro" | "credits" | "next";
 
 /**
  * How long before the end of a file Next Episode appears when no credits interval was found.
@@ -20,10 +20,19 @@ export const NEXT_EPISODE_TAIL_SEC = 60;
 /** Below this, a file is a clip rather than an episode and the tail would cover most of it. */
 const MIN_TAIL_DURATION_SEC = 300;
 
+/**
+ * Chapter names are whatever the person who encoded the file typed. Exact-match patterns missed
+ * everything but the four most literal spellings, so `Ending Song`, `ED1`, and `NCED` - all
+ * ordinary in anime releases - left the file looking as though it had no marked segments at all.
+ * Deliberately still strict at the start of the name: `Endcard` and `Introduction` are not these.
+ */
+const INTRO_CHAPTER = /^(?:intro|opening|avant)\b|^(?:nc)?op\s*\d*$/i;
+const CREDITS_CHAPTER = /^(?:ending|credits|outro|end\s*credits)\b|^(?:nc)?ed\s*\d*$/i;
+
 export function findChapterIntro(
     chapters: Array<{ title: string; start: number }>
 ): IntroInterval | null {
-    return findChapterInterval(chapters, /^(intro|opening|op)$/i);
+    return findChapterInterval(chapters, INTRO_CHAPTER);
 }
 
 export function findChapterCredits(
@@ -32,7 +41,7 @@ export function findChapterCredits(
 ): IntroInterval | null {
     return findChapterInterval(
         chapters,
-        /^(ending|credits|outro|ed)$/i,
+        CREDITS_CHAPTER,
         Number.isFinite(duration) && duration > 0 ? duration : null
     );
 }
@@ -65,6 +74,16 @@ export function parseKitsuMalId(value: unknown): string {
         }
     }
     return "";
+}
+
+/**
+ * The MyAnimeList id ani.zip maps an IMDb id onto. AniSkip is keyed by MAL id alone, so an anime
+ * opened through Cinemeta - which knows only IMDb ids - had no way to reach it and never got
+ * intro or outro timings. A non-anime IMDb id simply maps to nothing.
+ */
+export function parseAniZipMalId(value: unknown): string {
+    const id = record(record(value)?.mappings)?.mal_id;
+    return typeof id === "number" && Number.isInteger(id) && id > 0 ? String(id) : "";
 }
 
 export function parseAniSkipInterval(
@@ -117,10 +136,28 @@ export function getOverlayAction(
     // A recap runs before the intro, so it is offered first.
     if (isInsideIntro(time, segments.recap)) return "recap";
     if (isInsideIntro(time, segments.intro)) return "intro";
-    if (!nextReady) return null;
-    if (isInsideIntro(time, segments.credits)) return "next";
-    // Only stand in for a credits interval that no source supplied.
-    return !segments.credits && isInsideTail(time, duration) ? "next" : null;
+    const credits = segments.credits;
+    if (credits && isInsideIntro(time, credits)) {
+        // An ending song the episode plays past is an outro to skip, not the end of the episode.
+        // Offering Next Episode there ended a file that still had a scene left in it.
+        if (!endsEpisode(credits, duration)) {
+            // Skipping an outro is a seek inside this file, so unlike Next Episode it needs
+            // nothing loaded and must still be offered when no next episode is ready.
+            // Too long to be an ending song is bad data: seeking to the end of such an interval
+            // would drop the viewer somewhere arbitrary, so offer nothing instead.
+            return credits.end - credits.start <= MAX_SKIP_SEGMENT_SEC ? "credits" : null;
+        }
+        return nextReady ? "next" : null;
+    }
+    // Stands in when no credits interval was supplied, and closes out an episode that played on
+    // past its outro.
+    return nextReady && isInsideTail(time, duration) ? "next" : null;
+}
+
+/** Whether credits run to the end of the file rather than sitting inside the episode. */
+function endsEpisode(credits: IntroInterval, duration: number): boolean {
+    if (!Number.isFinite(duration) || duration <= 0) return true;
+    return credits.end > duration - NEXT_EPISODE_TAIL_SEC;
 }
 
 function record(value: unknown): Record<string, unknown> | null {

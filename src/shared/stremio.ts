@@ -41,6 +41,8 @@ export interface PlayableStream {
     subtitleLanguages: string[] | null;
     cached: boolean | null;
     seeders: number | null;
+    /** Show title the addon parsed out of the release, empty when it reported none. */
+    showTitle: string;
 }
 
 const CINEMETA_BASE_URL = "https://v3-cinemeta.strem.io";
@@ -156,7 +158,7 @@ export function sortStreamsBySize<T extends { size: string }>(
 
 // Availability outranks file size: an uncached stream costs a download wait no matter how
 // good it is. Unknown sits between the two because it may still play instantly.
-function cacheRank(cached: boolean | null): number {
+export function cacheRank(cached: boolean | null): number {
     return cached === true ? 0 : cached === null ? 1 : 2;
 }
 
@@ -192,61 +194,6 @@ export function parseByteSize(value: string): number | null {
     const amount = Number(match[1]);
     const power = ["K", "M", "G", "T"].indexOf(match[2].toUpperCase()) + 1;
     return Number.isFinite(amount) && amount >= 0 ? amount * 1024 ** power : null;
-}
-
-export interface NextEpisodeStreamOptions {
-    previousResolution?: string;
-    preferredAudio?: string;
-    preferredSubtitle?: string;
-}
-
-/**
- * Picks the stream the overlay's Next Episode button will play. Availability decides whether
- * playback starts now, so a stream reported cached ranks first; then come the user's audio and
- * subtitle preferences - unknown states stay neutral and never read as negative - then the
- * closest resolution to what is playing, with higher quality winning ties.
- */
-export function pickNextEpisodeStream<T extends {
-    resolution: string;
-    cached: boolean | null;
-    audioLanguages: string[];
-    subtitleLanguages: string[] | null;
-}>(streams: T[], options: NextEpisodeStreamOptions = {}): T | null {
-    const target = qualityHeight(options.previousResolution || "");
-    const preferredAudio = (options.preferredAudio || "").trim().toLowerCase();
-    const preferredSubtitle = (options.preferredSubtitle || "").trim().toLowerCase();
-    let bestStream: T | null = null;
-    let bestRank: number[] = [];
-    streams.forEach((stream, index) => {
-        const height = qualityHeight(stream.resolution);
-        if (height === null) return;
-        const rank = [
-            cacheRank(stream.cached),
-            languageRank(stream.audioLanguages, preferredAudio),
-            languageRank(stream.subtitleLanguages, preferredSubtitle),
-            target === null ? -height : Math.abs(height - target),
-            -height,
-            index
-        ];
-        if (!bestStream || compareRanks(rank, bestRank) < 0) {
-            bestStream = stream;
-            bestRank = rank;
-        }
-    });
-    return bestStream;
-}
-
-function languageRank(languages: string[] | null, preferred: string): number {
-    if (!preferred) return 0;
-    if (!languages || languages.length === 0) return 1;
-    return languages.some((language) => language.trim().toLowerCase() === preferred) ? 0 : 2;
-}
-
-function compareRanks(a: number[], b: number[]): number {
-    for (let index = 0; index < a.length; index += 1) {
-        if (a[index] !== b[index]) return a[index] - b[index];
-    }
-    return 0;
 }
 
 export function parseMediaResponse(
@@ -356,6 +303,23 @@ export function parseSeriesEpisodes(value: unknown): Episode[] {
     });
 }
 
+/**
+ * The show title an addon parsed out of a release, taken from the first line of its description.
+ * One IMDb id can answer with several different shows - `Gintama` and
+ * `Gintama Mr Ginpachis Zany Class` both carry an episode 11 - and this is the only field that
+ * separates them. Description layout is the user's choice of formatter, so anything that does not
+ * read as a title is reported as unknown rather than guessed at.
+ */
+export function parseReleaseShowTitle(description: string): string {
+    // Emoji separate the fields in every stock formatter; dropping non-ASCII leaves the words.
+    const line = (description.split("\n")[0] || "").replace(/[^\x20-\x7E]+/g, " ");
+    const marker = /\bS\d{1,2}(?:-\d{1,2})?\b|\bE\d{1,4}\b|\(\d{4}\)/i.exec(line);
+    // The title is what precedes the season, episode, or year. Without one of those the line is
+    // not a title line at all, and a file size or codec would be read as the name of a show.
+    if (!marker || marker.index === 0) return "";
+    return line.slice(0, marker.index).trim().replace(/\s+/g, " ");
+}
+
 export function parsePlayableStreams(value: unknown): PlayableStream[] {
     const streams = getRecord(value)?.streams;
     if (!Array.isArray(streams)) {
@@ -393,7 +357,8 @@ export function parsePlayableStreams(value: unknown): PlayableStream[] {
             audioLanguages: parseAudioLanguages(metadata),
             subtitleLanguages: parseSubtitleLanguages(stream?.subtitles),
             cached: structuredCached ?? parseCacheStatus(metadata),
-            seeders: structuredSeeders ?? parseSeeders(metadata)
+            seeders: structuredSeeders ?? parseSeeders(metadata),
+            showTitle: parseReleaseShowTitle(description)
         }];
     });
 }
@@ -526,12 +491,6 @@ function parseAudioLanguages(value: string): string[] {
     return languages.length === 0 ? [generic] : [...languages, "Other"];
 }
 
-function qualityHeight(quality: string): number | null {
-    if (/^4k$/i.test(quality)) return 2160;
-    const match = quality.match(/^(\d{3,4})p$/i);
-    return match ? Number(match[1]) : null;
-}
-
 function parseSubtitleLanguages(value: unknown): string[] | null {
     if (!Array.isArray(value)) return null;
     return [...new Set(value.flatMap((entry) => {
@@ -540,7 +499,11 @@ function parseSubtitleLanguages(value: unknown): string[] | null {
     }))];
 }
 
-function normalizeLanguage(value: string): string {
+/**
+ * Maps a language tag onto the names stream titles are parsed into, so a track tagged `jpn`
+ * can be compared with a release labelled `Japanese`.
+ */
+export function normalizeLanguage(value: string): string {
     const normalized = value.trim().toLowerCase();
     if (!normalized) return "";
     const language = LANGUAGE_ALIASES.find(([, aliases]) => aliases.includes(normalized))?.[0];

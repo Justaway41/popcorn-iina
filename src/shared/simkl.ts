@@ -30,6 +30,8 @@ export interface SimklState {
      * `date_from` cursor. Simkl suspends client ids that pull the full list every time.
      */
     lastActivityAt: string;
+    /** When the last successful pull finished, so preferences can show whether sync still runs. */
+    lastSyncAt: string;
 }
 
 export interface SimklPin {
@@ -67,7 +69,8 @@ export function parseSimklState(value: unknown): SimklState {
         accessToken: getString(item?.accessToken),
         lastError: getString(item?.lastError),
         retryAt: getNonNegativeNumber(item?.retryAt),
-        lastActivityAt: getString(item?.lastActivityAt)
+        lastActivityAt: getString(item?.lastActivityAt),
+        lastSyncAt: getString(item?.lastSyncAt)
     };
 }
 
@@ -167,7 +170,7 @@ export async function simklScrobble(
         }
         return {
             ...state,
-            lastError: error instanceof SimklError ? error.message : "Simkl request failed.",
+            lastError: error instanceof Error ? error.message : "Simkl request failed.",
             retryAt: error instanceof SimklError ? error.retryAt : 0
         };
     }
@@ -187,7 +190,10 @@ export async function syncSimklHistory(
         const activityAt = getString(activities?.all);
         // Nothing changed since the last pull, so skip the expensive lists entirely.
         if (activityAt && activityAt === state.lastActivityAt) {
-            return { state: { ...state, lastError: "", retryAt: 0 }, history: local };
+            return {
+                state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
+                history: local
+            };
         }
 
         // Without a cursor this is the documented first full sync; after that it stays small.
@@ -201,6 +207,7 @@ export async function syncSimklHistory(
             state: {
                 ...state,
                 lastActivityAt: activityAt || state.lastActivityAt,
+                lastSyncAt: new Date(now).toISOString(),
                 lastError: "",
                 retryAt: 0
             },
@@ -221,7 +228,7 @@ export async function syncSimklHistory(
         return {
             state: {
                 ...state,
-                lastError: error instanceof SimklError ? error.message : "Simkl request failed.",
+                lastError: error instanceof Error ? error.message : "Simkl request failed.",
                 retryAt: error instanceof SimklError ? error.retryAt : 0
             },
             history: local
@@ -384,11 +391,24 @@ async function request(
         `${SIMKL_API}${path}`,
         body,
         apiHeaders(state)
-    ).catch(() => {
-        throw new Error("Simkl request failed.");
+    ).catch((error: unknown) => {
+        throw transportError(error);
     });
     if (response.status >= 200 && response.status < 300) return response.data;
     throw responseError(response, now);
+}
+
+/**
+ * A rejected request carries the only account of what went wrong, and discarding it left
+ * "Simkl request failed." as the entire diagnosis. Keep the reason, drop any URL: the pin path
+ * carries the client id in its query string.
+ */
+function transportError(error: unknown): Error {
+    const reason = (error instanceof Error ? error.message : String(error))
+        .replace(/https?:\/\/\S*/gi, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    return new Error(reason ? `Simkl request failed: ${reason}` : "Simkl request failed.");
 }
 
 function responseError(response: HttpResponse, now: number): SimklError {

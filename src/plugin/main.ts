@@ -1,4 +1,5 @@
 import type {
+    NowPlaying,
     PlaybackContext,
     PlayItemPayload,
     RemoveHistoryEntryPayload,
@@ -9,7 +10,7 @@ import type { AddonManifest, StremioAddon } from "../shared/addons";
 
 import { MESSAGE_NAMES } from "../shared/messages";
 import { loadEnabledAddonStreams, parseAddonManifest, parseAddons } from "../shared/addons";
-import { parseWatchHistory, recordPlayback, removeHistoryEntry } from "../shared/history";
+import { historyContextId, parseWatchHistory, recordPlayback, removeHistoryEntry } from "../shared/history";
 import {
     buildStremioStreamUrl,
     findNextEpisode,
@@ -17,12 +18,14 @@ import {
     parseEpisodeOrder,
     parseMediaTypePreference,
     parsePlayableStreams,
+    normalizeLanguage,
     parseSkipSegments,
-    pickNextEpisodeStream,
     type Episode
 } from "../shared/stremio";
+import { pickNextEpisodeStream } from "../shared/stream-choice";
 import { mergeWatchHistory, type TraktScrobbleAction } from "../shared/trakt";
 import {
+    HISTORY_SYNC_INTERVAL_MS,
     PLAYBACK_TICK_INTERVAL_MS,
     PROGRESS_SAVE_INTERVAL_MS,
     SHOW_SIDEBAR_DELAY_MS,
@@ -43,6 +46,7 @@ import {
     findChapterIntro,
     getOverlayAction,
     parseAniSkipInterval,
+    parseAniZipMalId,
     parseIntroDbSegment,
     parseKitsuMalId,
     sanitizeSegments,
@@ -72,6 +76,11 @@ let lastProgressSavedAt = 0;
 let isReplacingPlayback = false;
 let reachedNaturalEof = false;
 let scrobbleStopSent = false;
+/** The stream playing now, reported to the sidebar so it can mark that row. */
+let activeStreamUrl = "";
+let activeStreamRelease = "";
+let lastHistorySyncAt = 0;
+let historySyncInFlight = false;
 let watchHistory = parseWatchHistory(preferences.get("watchHistory"));
 let introInterval: IntroInterval | null = null;
 let recapInterval: IntroInterval | null = null;
@@ -228,8 +237,12 @@ function playItem(payload: PlayItemPayload): void {
     const title = sanitizeMediaTitle(payload.title || "Popcorn");
     checkpointPlayback();
     const previousContext = activePlaybackContext;
+    const previousStreamUrl = activeStreamUrl;
+    const previousStreamRelease = activeStreamRelease;
     const previousScrobbleStopSent = scrobbleStopSent;
     activePlaybackContext = payload.playbackContext || null;
+    activeStreamUrl = url;
+    activeStreamRelease = String(payload?.releaseName || "");
     scrobbleStopSent = false;
     pendingResumePercent = typeof payload.resumePercent === "number" &&
         Number.isFinite(payload.resumePercent) &&
@@ -247,12 +260,35 @@ function playItem(payload: PlayItemPayload): void {
         // The old file is still playing, so hand state back or progress and
         // scrobbles would be recorded under the item we just failed to load.
         activePlaybackContext = previousContext;
+        activeStreamUrl = previousStreamUrl;
+        activeStreamRelease = previousStreamRelease;
         scrobbleStopSent = previousScrobbleStopSent;
         pendingResumePercent = null;
         isReplacingPlayback = false;
         logDebug("Popcorn: Failed to start stream:", formatError(error));
         utils.ask("Popcorn could not start this stream.");
     }
+}
+
+/**
+ * The sidebar is told as playback changes, not only when it asks. A viewer starts a stream from
+ * a list that is already on screen and never reloaded, so a value delivered with the
+ * configuration reply would always predate the playback it describes.
+ *
+ * Posted from mpv events only, never from inside `playItem`. `playItem` runs inside a sidebar or
+ * overlay message callback, and posting back into the webview from there is re-entrant.
+ */
+function postNowPlaying(): void {
+    if (!windowReady) return;
+    sidebar.postMessage(MESSAGE_NAMES.NowPlaying, nowPlayingState());
+}
+
+function nowPlayingState(): NowPlaying {
+    return {
+        videoId: activePlaybackContext ? historyContextId(activePlaybackContext) : "",
+        url: activePlaybackContext ? activeStreamUrl : "",
+        releaseName: activePlaybackContext ? activeStreamRelease : ""
+    };
 }
 
 function handleEndFile(): void {
@@ -268,6 +304,9 @@ function handleEndFile(): void {
     checkpointPlayback(naturalEof);
     const context = activePlaybackContext;
     activePlaybackContext = null;
+    activeStreamUrl = "";
+    activeStreamRelease = "";
+    postNowPlaying();
     if (!offerNextEpisode || !context?.episode) {
         return;
     }
@@ -303,6 +342,7 @@ function clearIntro(): void {
 const OVERLAY_LABELS: Record<OverlayAction, string> = {
     recap: "Skip Recap",
     intro: "Skip Intro",
+    credits: "Skip Outro",
     next: "Next Episode"
 };
 
@@ -359,6 +399,13 @@ function handleOverlayAction(data: unknown): void {
     }
     if (requested === "intro" && introInterval) {
         const end = introInterval.end;
+        overlayAction = null;
+        applyOverlayState();
+        seekToSeconds(end);
+        return;
+    }
+    if (requested === "credits" && creditsInterval) {
+        const end = creditsInterval.end;
         overlayAction = null;
         applyOverlayState();
         seekToSeconds(end);
@@ -473,23 +520,37 @@ async function resolvePlaybackIntervals(revision: number): Promise<void> {
     if (!parseSkipSegments(preferences.get("skipSegments"))) return;
 
     const providerId = context.media.providerId || context.media.id || "";
-    if (context.media.providerType === "anime" || providerId.startsWith("kitsu:")) {
-        const anime = await loadAniSkipSegments(revision, context.media.malId || "", providerId, episode, duration);
-        if (!isCurrentRequest(revision, playbackRevision)) return;
-        if (anime) {
-            found.intro = found.intro || anime.intro;
-            found.credits = found.credits || anime.credits;
-            applySegments(found, duration);
-        }
-    }
-    if (found.intro && found.recap && found.credits) return;
+    // AniSkip is no longer gated on the item looking like anime: Cinemeta reports every series
+    // as `series`, so anime opened through it never reached AniSkip at all. The id lookup is
+    // itself the anime test, since a live-action IMDb id maps to no MAL id.
+    //
+    // The two run together rather than one after the other. Chained, a slow or unreachable anime
+    // lookup withheld IntroDB's answer as well, and the Skip Intro it already had never appeared.
+    const merge = (part: PartialSegments | null): void => {
+        if (!part || !isCurrentRequest(revision, playbackRevision)) return;
+        found.intro = found.intro || part.intro;
+        found.recap = found.recap || (part.recap ?? null);
+        found.credits = found.credits || part.credits;
+        applySegments(found, duration);
+    };
+    await Promise.all([
+        loadAniSkipSegments(
+            revision,
+            context.media.malId || "",
+            providerId,
+            context.media.imdbId,
+            episode,
+            duration
+        ).then(merge),
+        loadIntroDbSegments(revision, context.media.imdbId, episode).then(merge)
+    ]);
+}
 
-    const db = await loadIntroDbSegments(revision, context.media.imdbId, episode);
-    if (!db || !isCurrentRequest(revision, playbackRevision)) return;
-    found.intro = found.intro || db.intro;
-    found.recap = found.recap || db.recap;
-    found.credits = found.credits || db.credits;
-    applySegments(found, duration);
+/** What a single source found; only IntroDB reports recaps. */
+interface PartialSegments {
+    intro: IntroInterval | null;
+    recap?: IntroInterval | null;
+    credits: IntroInterval | null;
 }
 
 /**
@@ -518,11 +579,14 @@ async function loadAniSkipSegments(
     revision: number,
     knownMalId: string,
     providerId: string,
+    imdbId: string,
     episode: Episode,
     duration: number
 ): Promise<{ intro: IntroInterval | null; credits: IntroInterval | null } | null> {
     try {
-        const malId = knownMalId || await loadKitsuMalId(providerId);
+        const malId = knownMalId ||
+            (providerId.startsWith("kitsu:") ? await loadKitsuMalId(providerId) : "") ||
+            await loadAniZipMalId(imdbId);
         if (!malId || !Number.isFinite(duration) || duration <= 0 ||
             !isCurrentRequest(revision, playbackRevision)) return null;
         const response = await http.get(
@@ -568,6 +632,33 @@ async function loadIntroDbSegments(
     }
 }
 
+/**
+ * The language of the track being played. A standing setting cannot know that this particular
+ * show is being watched subbed rather than dubbed, so the next episode follows the file the
+ * viewer is actually watching and falls back to the setting only when the file says nothing.
+ */
+function playingReleaseName(): string {
+    try {
+        // The file itself, not the title Popcorn wrote over it.
+        return mpv.getString("filename") || "";
+    } catch (error) {
+        logDebug("Popcorn: Filename lookup failed:", formatError(error));
+        return "";
+    }
+}
+
+function playingTrackLanguage(track: "audio" | "sub"): string {
+    try {
+        const tag = (mpv.getString(`current-tracks/${track}/lang`) || "").trim();
+        // An untagged track carries no preference; treating "und" as one would rank every
+        // stream that does name a language as a mismatch.
+        return /^(und|undetermined|unknown)$/i.test(tag) ? "" : normalizeLanguage(tag);
+    } catch (error) {
+        logDebug("Popcorn: Track language lookup failed:", formatError(error));
+        return "";
+    }
+}
+
 async function prefetchNextEpisode(revision: number): Promise<void> {
     const context = activePlaybackContext;
     const current = context?.episode;
@@ -584,16 +675,24 @@ async function prefetchNextEpisode(revision: number): Promise<void> {
             ))
         );
         if (!isCurrentRequest(revision, playbackRevision)) return;
-        // The overlay button plays this without asking, so honor the user's standing audio and
-        // subtitle choices, and prefer streams that can actually start now.
+        // The overlay button plays this without asking, so it follows what is actually playing
+        // first and the standing settings only where the file says nothing, and prefers streams
+        // that can start now.
         const stream = pickNextEpisodeStream(result.streams, {
             previousResolution: context.resolution || "",
-            preferredAudio: parseLanguagePreference(preferences.get("preferredAudio")),
-            preferredSubtitle: parseLanguagePreference(preferences.get("preferredSubtitle"))
+            previousRelease: playingReleaseName(),
+            showTitle: context.media.name,
+            preferredAudio: playingTrackLanguage("audio") ||
+                parseLanguagePreference(preferences.get("preferredAudio")),
+            preferredSubtitle: playingTrackLanguage("sub") ||
+                parseLanguagePreference(preferences.get("preferredSubtitle"))
         });
         if (!stream) return;
         prefetchedNextEpisode = {
             url: stream.url,
+            // Without this the overlay's own playback reports no release, and the sidebar has
+            // nothing to match its rows against once the debrid link is reissued.
+            releaseName: stream.rawTitle,
             title: `${context.media.name} · S${String(next.season).padStart(2, "0")}` +
                 `E${String(next.episode).padStart(2, "0")} · ${next.name}`,
             playbackContext: {
@@ -632,6 +731,19 @@ async function requestJson(url: string): Promise<unknown> {
     return data;
 }
 
+/** Maps an IMDb id onto a MAL id so AniSkip can be reached for anime opened through Cinemeta. */
+async function loadAniZipMalId(imdbId: string): Promise<string> {
+    if (!isImdbId(imdbId)) return "";
+    try {
+        return parseAniZipMalId(await requestJson(
+            `https://api.ani.zip/mappings?imdb_id=${encodeURIComponent(imdbId)}`
+        ));
+    } catch (error) {
+        logDebug("Popcorn: Anime id lookup failed:", formatError(error));
+        return "";
+    }
+}
+
 async function loadKitsuMalId(providerId: string): Promise<string> {
     const kitsuId = providerId.match(/^kitsu:(\d+)$/i)?.[1] || "";
     if (!kitsuId) return "";
@@ -656,6 +768,35 @@ function safeJson(value: unknown): unknown {
     } catch {
         return null;
     }
+}
+
+/**
+ * Startup was the only trigger, so a window left open never learned what was watched on another
+ * device, and a failed pull waited for the next window instead of retrying. The sidebar asks for
+ * configuration on load, on every search, and on every stream list, which is a good enough
+ * heartbeat once it is rate limited.
+ */
+function syncRemoteHistory(): void {
+    const now = Date.now();
+    if (historySyncInFlight || now - lastHistorySyncAt < HISTORY_SYNC_INTERVAL_MS) return;
+    historySyncInFlight = true;
+    lastHistorySyncAt = now;
+    void trakt.sync(watchHistory)
+        .then((synced) => simkl.sync(synced))
+        .then((synced) => {
+            const history = mergeWatchHistory(
+                parseWatchHistory(preferences.get("watchHistory")),
+                synced
+            );
+            watchHistory = history;
+            preferences.set("watchHistory", history);
+            preferences.sync();
+            sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history });
+        })
+        .catch((error) => logDebug(`History sync failed: ${formatError(error)}`))
+        .then(() => {
+            historySyncInFlight = false;
+        });
 }
 
 prepareSplash();
@@ -696,24 +837,16 @@ event.on("iina.window-loaded", () => {
             ),
             mediaType: parseMediaTypePreference(preferences.get("mediaType")),
             episodeOrder: parseEpisodeOrder(preferences.get("episodeOrder")),
-            history: watchHistory
+            history: watchHistory,
+            // Covers a sidebar that loads while something is already playing; changes after
+            // that arrive through the NowPlaying message.
+            nowPlaying: nowPlayingState()
         });
+        syncRemoteHistory();
     });
     windowReady = true;
     global.postMessage("playerReady", {});
-    void trakt.sync(watchHistory)
-        .then((synced) => simkl.sync(synced))
-        .then((synced) => {
-            const history = mergeWatchHistory(
-                parseWatchHistory(preferences.get("watchHistory")),
-                synced
-            );
-            watchHistory = history;
-            preferences.set("watchHistory", history);
-            preferences.sync();
-            sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history });
-        })
-        .catch((error) => logDebug(`Startup history sync failed: ${formatError(error)}`));
+    syncRemoteHistory();
     if (pendingShowSidebar) {
         pendingShowSidebar = false;
         showSidebarWithDelay();
@@ -732,10 +865,12 @@ event.on("mpv.file-loaded", () => {
         pendingResumePercent = null;
         setPlayerUIHidden(true);
         setWindowTitle("Popcorn");
+        postNowPlaying();
         showSidebar();
         return;
     }
     clearIntro();
+    postNowPlaying();
     restorePlayerOptions();
     setPlayerUIHidden(false);
     hideSidebar();
@@ -770,6 +905,8 @@ event.on("iina.window-will-close", () => {
     windowReady = false;
     sidebarVisible = false;
     activePlaybackContext = null;
+    activeStreamUrl = "";
+    activeStreamRelease = "";
     scrobbleStopSent = false;
     pendingResumePercent = null;
     isReplacingPlayback = false;

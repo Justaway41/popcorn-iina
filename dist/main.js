@@ -8,7 +8,8 @@
     SetEpisodeOrder: "setEpisodeOrder",
     HistoryUpdated: "historyUpdated",
     RemoveHistoryEntry: "removeHistoryEntry",
-    ShowNextEpisode: "showNextEpisode"
+    ShowNextEpisode: "showNextEpisode",
+    NowPlaying: "nowPlaying"
   };
 
   // src/shared/addons.ts
@@ -324,47 +325,16 @@
   function cacheRank(cached) {
     return cached === true ? 0 : cached === null ? 1 : 2;
   }
-  function pickNextEpisodeStream(streams, options = {}) {
-    const target = qualityHeight(options.previousResolution || "");
-    const preferredAudio = (options.preferredAudio || "").trim().toLowerCase();
-    const preferredSubtitle = (options.preferredSubtitle || "").trim().toLowerCase();
-    let bestStream = null;
-    let bestRank = [];
-    streams.forEach((stream, index) => {
-      const height = qualityHeight(stream.resolution);
-      if (height === null)
-        return;
-      const rank = [
-        cacheRank(stream.cached),
-        languageRank(stream.audioLanguages, preferredAudio),
-        languageRank(stream.subtitleLanguages, preferredSubtitle),
-        target === null ? -height : Math.abs(height - target),
-        -height,
-        index
-      ];
-      if (!bestStream || compareRanks(rank, bestRank) < 0) {
-        bestStream = stream;
-        bestRank = rank;
-      }
-    });
-    return bestStream;
-  }
-  function languageRank(languages, preferred) {
-    if (!preferred)
-      return 0;
-    if (!languages || languages.length === 0)
-      return 1;
-    return languages.some((language) => language.trim().toLowerCase() === preferred) ? 0 : 2;
-  }
-  function compareRanks(a, b) {
-    for (let index = 0;index < a.length; index += 1) {
-      if (a[index] !== b[index])
-        return a[index] - b[index];
-    }
-    return 0;
-  }
   function isImdbId(value) {
     return /^tt\d+$/i.test(value.trim());
+  }
+  function parseReleaseShowTitle(description) {
+    const line = (description.split(`
+`)[0] || "").replace(/[^\x20-\x7E]+/g, " ");
+    const marker = /\bS\d{1,2}(?:-\d{1,2})?\b|\bE\d{1,4}\b|\(\d{4}\)/i.exec(line);
+    if (!marker || marker.index === 0)
+      return "";
+    return line.slice(0, marker.index).trim().replace(/\s+/g, " ");
   }
   function parsePlayableStreams(value) {
     const streams = getRecord3(value)?.streams;
@@ -400,7 +370,8 @@
         audioLanguages: parseAudioLanguages(metadata),
         subtitleLanguages: parseSubtitleLanguages(stream?.subtitles),
         cached: structuredCached ?? parseCacheStatus(metadata),
-        seeders: structuredSeeders ?? parseSeeders(metadata)
+        seeders: structuredSeeders ?? parseSeeders(metadata),
+        showTitle: parseReleaseShowTitle(description)
       }];
     });
   }
@@ -485,12 +456,6 @@
       return languages;
     return languages.length === 0 ? [generic] : [...languages, "Other"];
   }
-  function qualityHeight(quality) {
-    if (/^4k$/i.test(quality))
-      return 2160;
-    const match = quality.match(/^(\d{3,4})p$/i);
-    return match ? Number(match[1]) : null;
-  }
   function parseSubtitleLanguages(value) {
     if (!Array.isArray(value))
       return null;
@@ -522,6 +487,85 @@
   }
   function getNonNegativeInteger(value) {
     return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+  }
+
+  // src/shared/stream-choice.ts
+  function titleKey(value) {
+    return value.replace(/\([^)]*\)/g, " ").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  }
+  function showRank(streamTitle, wanted) {
+    if (!wanted || !streamTitle)
+      return 0;
+    return titleKey(streamTitle) === titleKey(wanted) ? 0 : 1;
+  }
+  function releaseTokens(name) {
+    return new Set(name.toLowerCase().replace(/\.[a-z0-9]{2,4}$/, "").replace(/\d+/g, " ").split(/[^a-z]+/).filter((token) => token.length > 1));
+  }
+  var SAME_RELEASE_OVERLAP = 0.6;
+  function releaseRank(name, previous) {
+    if (previous.size === 0)
+      return 0;
+    const tokens = releaseTokens(name);
+    if (tokens.size === 0)
+      return 1;
+    let shared = 0;
+    tokens.forEach((token) => {
+      if (previous.has(token))
+        shared += 1;
+    });
+    return shared / Math.max(tokens.size, previous.size) >= SAME_RELEASE_OVERLAP ? 0 : 1;
+  }
+  function pickNextEpisodeStream(streams, options = {}) {
+    const target = qualityHeight(options.previousResolution || "");
+    const preferredAudio = (options.preferredAudio || "").trim().toLowerCase();
+    const preferredSubtitle = (options.preferredSubtitle || "").trim().toLowerCase();
+    const previousRelease = releaseTokens(options.previousRelease || "");
+    let bestStream = null;
+    let bestRank = [];
+    streams.forEach((stream, index) => {
+      const height = qualityHeight(stream.resolution);
+      if (height === null)
+        return;
+      const rank = [
+        showRank(stream.showTitle || "", options.showTitle || ""),
+        cacheRank(stream.cached),
+        releaseRank(stream.rawTitle || "", previousRelease),
+        languageRank(stream.audioLanguages, preferredAudio),
+        languageRank(stream.subtitleLanguages, preferredSubtitle),
+        target !== null && height === target ? 0 : 1,
+        -height,
+        index
+      ];
+      if (!bestStream || compareRanks(rank, bestRank) < 0) {
+        bestStream = stream;
+        bestRank = rank;
+      }
+    });
+    return bestStream;
+  }
+  var UNNAMED_AUDIO_LABELS = ["dual audio", "multi", "other"];
+  function languageRank(languages, preferred) {
+    if (!preferred)
+      return 0;
+    if (!languages || languages.length === 0)
+      return 1;
+    const normalized = languages.map((language) => language.trim().toLowerCase());
+    if (normalized.includes(preferred))
+      return 0;
+    return normalized.every((language) => UNNAMED_AUDIO_LABELS.includes(language)) ? 1 : 2;
+  }
+  function compareRanks(a, b) {
+    for (let index = 0;index < a.length; index += 1) {
+      if (a[index] !== b[index])
+        return a[index] - b[index];
+    }
+    return 0;
+  }
+  function qualityHeight(quality) {
+    if (/^4k$/i.test(quality))
+      return 2160;
+    const match = quality.match(/^(\d{3,4})p$/i);
+    return match ? Number(match[1]) : null;
   }
 
   // src/shared/trakt.ts
@@ -877,9 +921,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.4.2",
+    version: "2.5.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 15,
+    ghVersion: 16,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -895,8 +939,8 @@
       addons: [],
       mediaType: "movie",
       episodeOrder: "oldest",
-      preferredAudio: "English",
-      preferredSubtitle: "English",
+      preferredAudio: "",
+      preferredSubtitle: "",
       watchHistory: [],
       trakt: {},
       skipSegments: true,
@@ -925,6 +969,7 @@
   var SPLASH_URL_MARKER = "assets/Popcorn";
   var PLAYBACK_TICK_INTERVAL_MS = 1000;
   var PROGRESS_SAVE_INTERVAL_MS = 30000;
+  var HISTORY_SYNC_INTERVAL_MS = 300000;
   var SLEEP_CAFFEINATE_TIMEOUT_SEC = 30;
   var SLEEP_REFRESH_INTERVAL_SEC = 20;
   var PLUGINS_DIR = "~/Library/Application Support/com.colliderli.iina/plugins";
@@ -1050,7 +1095,8 @@
       accessToken: getString4(item?.accessToken),
       lastError: getString4(item?.lastError),
       retryAt: getNonNegativeNumber(item?.retryAt),
-      lastActivityAt: getString4(item?.lastActivityAt)
+      lastActivityAt: getString4(item?.lastActivityAt),
+      lastSyncAt: getString4(item?.lastSyncAt)
     };
   }
   function isSimklConnected(state) {
@@ -1077,7 +1123,7 @@
       }
       return {
         ...state,
-        lastError: error instanceof SimklError ? error.message : "Simkl request failed.",
+        lastError: error instanceof Error ? error.message : "Simkl request failed.",
         retryAt: error instanceof SimklError ? error.retryAt : 0
       };
     }
@@ -1089,7 +1135,10 @@
       const activities = getRecord4(await request2(transport, state, "GET", "/sync/activities", null, now));
       const activityAt = getString4(activities?.all);
       if (activityAt && activityAt === state.lastActivityAt) {
-        return { state: { ...state, lastError: "", retryAt: 0 }, history: local };
+        return {
+          state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
+          history: local
+        };
       }
       const cursor = state.lastActivityAt ? `?date_from=${encodeURIComponent(state.lastActivityAt)}` : "";
       const items = await request2(transport, state, "GET", `/sync/all-items/${cursor}`, null, now);
@@ -1098,6 +1147,7 @@
         state: {
           ...state,
           lastActivityAt: activityAt || state.lastActivityAt,
+          lastSyncAt: new Date(now).toISOString(),
           lastError: "",
           retryAt: 0
         },
@@ -1118,7 +1168,7 @@
       return {
         state: {
           ...state,
-          lastError: error instanceof SimklError ? error.message : "Simkl request failed.",
+          lastError: error instanceof Error ? error.message : "Simkl request failed.",
           retryAt: error instanceof SimklError ? error.retryAt : 0
         },
         history: local
@@ -1229,12 +1279,16 @@
     };
   }
   async function request2(transport, state, method, path, body, now) {
-    const response = await transport(method, `${SIMKL_API}${path}`, body, apiHeaders2(state)).catch(() => {
-      throw new Error("Simkl request failed.");
+    const response = await transport(method, `${SIMKL_API}${path}`, body, apiHeaders2(state)).catch((error) => {
+      throw transportError(error);
     });
     if (response.status >= 200 && response.status < 300)
       return response.data;
     throw responseError2(response, now);
+  }
+  function transportError(error) {
+    const reason = (error instanceof Error ? error.message : String(error)).replace(/https?:\/\/\S*/gi, "").replace(/\s+/g, " ").trim();
+    return new Error(reason ? `Simkl request failed: ${reason}` : "Simkl request failed.");
   }
   function responseError2(response, now) {
     const retryAt = response.status === 429 ? now + (retryAfterMs2(response.headers) ?? DEFAULT_RETRY_MS2) : 0;
@@ -1369,11 +1423,13 @@
   // src/plugin/intro.ts
   var NEXT_EPISODE_TAIL_SEC = 60;
   var MIN_TAIL_DURATION_SEC = 300;
+  var INTRO_CHAPTER = /^(?:intro|opening|avant)\b|^(?:nc)?op\s*\d*$/i;
+  var CREDITS_CHAPTER = /^(?:ending|credits|outro|end\s*credits)\b|^(?:nc)?ed\s*\d*$/i;
   function findChapterIntro(chapters) {
-    return findChapterInterval(chapters, /^(intro|opening|op)$/i);
+    return findChapterInterval(chapters, INTRO_CHAPTER);
   }
   function findChapterCredits(chapters, duration) {
-    return findChapterInterval(chapters, /^(ending|credits|outro|ed)$/i, Number.isFinite(duration) && duration > 0 ? duration : null);
+    return findChapterInterval(chapters, CREDITS_CHAPTER, Number.isFinite(duration) && duration > 0 ? duration : null);
   }
   function findChapterInterval(chapters, names, fallbackEnd = null) {
     const sorted = chapters.filter((chapter) => Number.isFinite(chapter.start)).sort((a, b) => a.start - b.start);
@@ -1397,6 +1453,10 @@
       }
     }
     return "";
+  }
+  function parseAniZipMalId(value) {
+    const id = record(record(value)?.mappings)?.mal_id;
+    return typeof id === "number" && Number.isInteger(id) && id > 0 ? String(id) : "";
   }
   function parseAniSkipInterval(value, skipType = "op") {
     const response = record(value);
@@ -1435,11 +1495,19 @@
       return "recap";
     if (isInsideIntro(time, segments.intro))
       return "intro";
-    if (!nextReady)
-      return null;
-    if (isInsideIntro(time, segments.credits))
-      return "next";
-    return !segments.credits && isInsideTail(time, duration) ? "next" : null;
+    const credits = segments.credits;
+    if (credits && isInsideIntro(time, credits)) {
+      if (!endsEpisode(credits, duration)) {
+        return credits.end - credits.start <= MAX_SKIP_SEGMENT_SEC ? "credits" : null;
+      }
+      return nextReady ? "next" : null;
+    }
+    return nextReady && isInsideTail(time, duration) ? "next" : null;
+  }
+  function endsEpisode(credits, duration) {
+    if (!Number.isFinite(duration) || duration <= 0)
+      return true;
+    return credits.end > duration - NEXT_EPISODE_TAIL_SEC;
   }
   function record(value) {
     return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
@@ -1509,6 +1577,10 @@
   var isReplacingPlayback = false;
   var reachedNaturalEof = false;
   var scrobbleStopSent = false;
+  var activeStreamUrl = "";
+  var activeStreamRelease = "";
+  var lastHistorySyncAt = 0;
+  var historySyncInFlight = false;
   var watchHistory = parseWatchHistory(preferences.get("watchHistory"));
   var introInterval = null;
   var recapInterval = null;
@@ -1655,8 +1727,12 @@
     const title = sanitizeMediaTitle(payload.title || "Popcorn");
     checkpointPlayback();
     const previousContext = activePlaybackContext;
+    const previousStreamUrl = activeStreamUrl;
+    const previousStreamRelease = activeStreamRelease;
     const previousScrobbleStopSent = scrobbleStopSent;
     activePlaybackContext = payload.playbackContext || null;
+    activeStreamUrl = url;
+    activeStreamRelease = String(payload?.releaseName || "");
     scrobbleStopSent = false;
     pendingResumePercent = typeof payload.resumePercent === "number" && Number.isFinite(payload.resumePercent) && payload.resumePercent >= 0 && payload.resumePercent <= 100 ? payload.resumePercent : null;
     isReplacingPlayback = true;
@@ -1667,12 +1743,26 @@
       mpv.command("loadfile", [url, "replace", "-1", `force-media-title=${title}`]);
     } catch (error) {
       activePlaybackContext = previousContext;
+      activeStreamUrl = previousStreamUrl;
+      activeStreamRelease = previousStreamRelease;
       scrobbleStopSent = previousScrobbleStopSent;
       pendingResumePercent = null;
       isReplacingPlayback = false;
       logDebug("Popcorn: Failed to start stream:", formatError(error));
       utils.ask("Popcorn could not start this stream.");
     }
+  }
+  function postNowPlaying() {
+    if (!windowReady)
+      return;
+    sidebar.postMessage(MESSAGE_NAMES.NowPlaying, nowPlayingState());
+  }
+  function nowPlayingState() {
+    return {
+      videoId: activePlaybackContext ? historyContextId(activePlaybackContext) : "",
+      url: activePlaybackContext ? activeStreamUrl : "",
+      releaseName: activePlaybackContext ? activeStreamRelease : ""
+    };
   }
   function handleEndFile() {
     stopPlaybackMonitoring();
@@ -1686,6 +1776,9 @@
     checkpointPlayback(naturalEof);
     const context = activePlaybackContext;
     activePlaybackContext = null;
+    activeStreamUrl = "";
+    activeStreamRelease = "";
+    postNowPlaying();
     if (!offerNextEpisode || !context?.episode) {
       return;
     }
@@ -1715,6 +1808,7 @@
   var OVERLAY_LABELS = {
     recap: "Skip Recap",
     intro: "Skip Intro",
+    credits: "Skip Outro",
     next: "Next Episode"
   };
   var OVERLAY_STYLE = `
@@ -1751,6 +1845,13 @@
     }
     if (requested === "intro" && introInterval) {
       const end = introInterval.end;
+      overlayAction = null;
+      applyOverlayState();
+      seekToSeconds(end);
+      return;
+    }
+    if (requested === "credits" && creditsInterval) {
+      const end = creditsInterval.end;
       overlayAction = null;
       applyOverlayState();
       seekToSeconds(end);
@@ -1838,25 +1939,18 @@
     if (!parseSkipSegments(preferences.get("skipSegments")))
       return;
     const providerId = context.media.providerId || context.media.id || "";
-    if (context.media.providerType === "anime" || providerId.startsWith("kitsu:")) {
-      const anime = await loadAniSkipSegments(revision, context.media.malId || "", providerId, episode, duration);
-      if (!isCurrentRequest(revision, playbackRevision))
+    const merge = (part) => {
+      if (!part || !isCurrentRequest(revision, playbackRevision))
         return;
-      if (anime) {
-        found.intro = found.intro || anime.intro;
-        found.credits = found.credits || anime.credits;
-        applySegments(found, duration);
-      }
-    }
-    if (found.intro && found.recap && found.credits)
-      return;
-    const db = await loadIntroDbSegments(revision, context.media.imdbId, episode);
-    if (!db || !isCurrentRequest(revision, playbackRevision))
-      return;
-    found.intro = found.intro || db.intro;
-    found.recap = found.recap || db.recap;
-    found.credits = found.credits || db.credits;
-    applySegments(found, duration);
+      found.intro = found.intro || part.intro;
+      found.recap = found.recap || (part.recap ?? null);
+      found.credits = found.credits || part.credits;
+      applySegments(found, duration);
+    };
+    await Promise.all([
+      loadAniSkipSegments(revision, context.media.malId || "", providerId, context.media.imdbId, episode, duration).then(merge),
+      loadIntroDbSegments(revision, context.media.imdbId, episode).then(merge)
+    ]);
   }
   function seekToSeconds(seconds) {
     if (!Number.isFinite(seconds) || seconds < 0)
@@ -1874,9 +1968,9 @@
     creditsInterval = segments.credits;
     updateIntroOverlay();
   }
-  async function loadAniSkipSegments(revision, knownMalId, providerId, episode, duration) {
+  async function loadAniSkipSegments(revision, knownMalId, providerId, imdbId, episode, duration) {
     try {
-      const malId = knownMalId || await loadKitsuMalId(providerId);
+      const malId = knownMalId || (providerId.startsWith("kitsu:") ? await loadKitsuMalId(providerId) : "") || await loadAniZipMalId(imdbId);
       if (!malId || !Number.isFinite(duration) || duration <= 0 || !isCurrentRequest(revision, playbackRevision))
         return null;
       const response = await http.get(`https://api.aniskip.com/v2/skip-times/${encodeURIComponent(malId)}/${episode.episode}` + `?types=op&types=ed&episodeLength=${encodeURIComponent(String(duration))}`, { params: {}, headers: { Accept: "application/json" }, data: {} });
@@ -1906,6 +2000,23 @@
       return null;
     }
   }
+  function playingReleaseName() {
+    try {
+      return mpv.getString("filename") || "";
+    } catch (error) {
+      logDebug("Popcorn: Filename lookup failed:", formatError(error));
+      return "";
+    }
+  }
+  function playingTrackLanguage(track) {
+    try {
+      const tag = (mpv.getString(`current-tracks/${track}/lang`) || "").trim();
+      return /^(und|undetermined|unknown)$/i.test(tag) ? "" : normalizeLanguage(tag);
+    } catch (error) {
+      logDebug("Popcorn: Track language lookup failed:", formatError(error));
+      return "";
+    }
+  }
   async function prefetchNextEpisode(revision) {
     const context = activePlaybackContext;
     const current = context?.episode;
@@ -1920,13 +2031,16 @@
         return;
       const stream = pickNextEpisodeStream(result.streams, {
         previousResolution: context.resolution || "",
-        preferredAudio: parseLanguagePreference(preferences.get("preferredAudio")),
-        preferredSubtitle: parseLanguagePreference(preferences.get("preferredSubtitle"))
+        previousRelease: playingReleaseName(),
+        showTitle: context.media.name,
+        preferredAudio: playingTrackLanguage("audio") || parseLanguagePreference(preferences.get("preferredAudio")),
+        preferredSubtitle: playingTrackLanguage("sub") || parseLanguagePreference(preferences.get("preferredSubtitle"))
       });
       if (!stream)
         return;
       prefetchedNextEpisode = {
         url: stream.url,
+        releaseName: stream.rawTitle,
         title: `${context.media.name} · S${String(next.season).padStart(2, "0")}` + `E${String(next.episode).padStart(2, "0")} · ${next.name}`,
         playbackContext: {
           media: context.media,
@@ -1963,6 +2077,16 @@
       throw new Error("Response was not valid JSON.");
     return data;
   }
+  async function loadAniZipMalId(imdbId) {
+    if (!isImdbId(imdbId))
+      return "";
+    try {
+      return parseAniZipMalId(await requestJson(`https://api.ani.zip/mappings?imdb_id=${encodeURIComponent(imdbId)}`));
+    } catch (error) {
+      logDebug("Popcorn: Anime id lookup failed:", formatError(error));
+      return "";
+    }
+  }
   async function loadKitsuMalId(providerId) {
     const kitsuId = providerId.match(/^kitsu:(\d+)$/i)?.[1] || "";
     if (!kitsuId)
@@ -1985,6 +2109,22 @@
     } catch {
       return null;
     }
+  }
+  function syncRemoteHistory() {
+    const now = Date.now();
+    if (historySyncInFlight || now - lastHistorySyncAt < HISTORY_SYNC_INTERVAL_MS)
+      return;
+    historySyncInFlight = true;
+    lastHistorySyncAt = now;
+    trakt.sync(watchHistory).then((synced) => simkl.sync(synced)).then((synced) => {
+      const history = mergeWatchHistory(parseWatchHistory(preferences.get("watchHistory")), synced);
+      watchHistory = history;
+      preferences.set("watchHistory", history);
+      preferences.sync();
+      sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history });
+    }).catch((error) => logDebug(`History sync failed: ${formatError(error)}`)).then(() => {
+      historySyncInFlight = false;
+    });
   }
   prepareSplash();
   global.onMessage("showPopcornSidebar", toggleSidebar);
@@ -2017,18 +2157,14 @@
         addons: parseAddons(preferences.get("addons"), preferences.get("addonManifestUrl")),
         mediaType: parseMediaTypePreference(preferences.get("mediaType")),
         episodeOrder: parseEpisodeOrder(preferences.get("episodeOrder")),
-        history: watchHistory
+        history: watchHistory,
+        nowPlaying: nowPlayingState()
       });
+      syncRemoteHistory();
     });
     windowReady = true;
     global.postMessage("playerReady", {});
-    trakt.sync(watchHistory).then((synced) => simkl.sync(synced)).then((synced) => {
-      const history = mergeWatchHistory(parseWatchHistory(preferences.get("watchHistory")), synced);
-      watchHistory = history;
-      preferences.set("watchHistory", history);
-      preferences.sync();
-      sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, { history });
-    }).catch((error) => logDebug(`Startup history sync failed: ${formatError(error)}`));
+    syncRemoteHistory();
     if (pendingShowSidebar) {
       pendingShowSidebar = false;
       showSidebarWithDelay();
@@ -2046,10 +2182,12 @@
       pendingResumePercent = null;
       setPlayerUIHidden(true);
       setWindowTitle("Popcorn");
+      postNowPlaying();
       showSidebar();
       return;
     }
     clearIntro();
+    postNowPlaying();
     restorePlayerOptions();
     setPlayerUIHidden(false);
     hideSidebar();
@@ -2086,6 +2224,8 @@
     windowReady = false;
     sidebarVisible = false;
     activePlaybackContext = null;
+    activeStreamUrl = "";
+    activeStreamRelease = "";
     scrobbleStopSent = false;
     pendingResumePercent = null;
     isReplacingPlayback = false;

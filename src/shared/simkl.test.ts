@@ -47,7 +47,8 @@ const connected = {
     accessToken: "access-token",
     lastError: "",
     retryAt: 0,
-    lastActivityAt: ""
+    lastActivityAt: "",
+    lastSyncAt: ""
 };
 
 interface Call {
@@ -78,7 +79,7 @@ function ok(data: unknown): TraktResponse {
 
 test("parses stored state defensively", () => {
     const empty = {
-        clientId: "", accessToken: "", lastError: "", retryAt: 0, lastActivityAt: ""
+        clientId: "", accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: ""
     };
     expect(parseSimklState(null)).toEqual(empty);
     expect(parseSimklState("nonsense")).toEqual(empty);
@@ -88,13 +89,15 @@ test("parses stored state defensively", () => {
         accessToken: "tok",
         lastError: "boom",
         retryAt: 42,
-        lastActivityAt: "2026-08-13T10:00:00Z"
+        lastActivityAt: "2026-08-13T10:00:00Z",
+        lastSyncAt: "2026-08-13T10:05:00Z"
     })).toEqual({
         clientId: "abc",
         accessToken: "tok",
         lastError: "boom",
         retryAt: 42,
-        lastActivityAt: "2026-08-13T10:00:00Z"
+        lastActivityAt: "2026-08-13T10:00:00Z",
+        lastSyncAt: "2026-08-13T10:05:00Z"
     });
 });
 
@@ -281,7 +284,8 @@ test("never lets a transport rejection carry the url into the error", async () =
 
     const state = await simklScrobble(transport, connected, "start", context, 5);
 
-    expect(state.lastError).toBe("Simkl request failed.");
+    // The reason survives so a failure can be diagnosed; the url it was quoted with does not.
+    expect(state.lastError).toBe("Simkl request failed: connect ECONNREFUSED");
     expect(state.lastError).not.toContain("client-id");
 });
 
@@ -445,4 +449,37 @@ test("reports a sync failure without clearing local history", async () => {
     expect(result.history).toBe(local);
     expect(result.state.retryAt).toBe(1000 + 30_000);
     expect(result.state.accessToken).toBe("access-token");
+});
+
+test("records when a pull last succeeded, including the one that had nothing to fetch", async () => {
+    const changed = recorder([activities, ok({}), ok([])]);
+    const pulled = await syncSimklHistory(changed.transport, connected, [], 1_700_000_000_000);
+    expect(pulled.state.lastSyncAt).toBe("2023-11-14T22:13:20.000Z");
+
+    const unchanged = recorder([activities]);
+    const skipped = await syncSimklHistory(
+        unchanged.transport,
+        { ...connected, lastActivityAt: "2026-08-13T10:00:00Z" },
+        [],
+        1_700_000_000_000
+    );
+    expect(skipped.state.lastSyncAt).toBe("2023-11-14T22:13:20.000Z");
+});
+
+test("keeps why a request was rejected but never its url", async () => {
+    const rejecting = async () => {
+        throw new Error(
+            "A server with the specified hostname could not be found. " +
+            "URL: https://api.simkl.com/oauth/pin?client_id=private-client-id"
+        );
+    };
+
+    const result = await syncSimklHistory(rejecting, connected, []);
+
+    expect(result.state.lastError).toContain("A server with the specified hostname");
+    expect(result.state.lastError).not.toContain("private-client-id");
+    expect(result.state.lastError).not.toContain("api.simkl.com");
+    // A failed pull has not synced, and the cursor must not advance past what was never read.
+    expect(result.state.lastSyncAt).toBe("");
+    expect(result.state.lastActivityAt).toBe("");
 });

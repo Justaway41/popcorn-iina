@@ -3,9 +3,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.4.2",
+    version: "2.5.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 15,
+    ghVersion: 16,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -21,8 +21,8 @@
       addons: [],
       mediaType: "movie",
       episodeOrder: "oldest",
-      preferredAudio: "English",
-      preferredSubtitle: "English",
+      preferredAudio: "",
+      preferredSubtitle: "",
       watchHistory: [],
       trakt: {},
       skipSegments: true,
@@ -51,6 +51,7 @@
   var SPLASH_URL_MARKER = "assets/Popcorn";
   var PLAYBACK_TICK_INTERVAL_MS = 1000;
   var PROGRESS_SAVE_INTERVAL_MS = 30000;
+  var HISTORY_SYNC_INTERVAL_MS = 300000;
   var SLEEP_CAFFEINATE_TIMEOUT_SEC = 30;
   var SLEEP_REFRESH_INTERVAL_SEC = 20;
   var PLUGINS_DIR = "~/Library/Application Support/com.colliderli.iina/plugins";
@@ -414,47 +415,16 @@
   function cacheRank(cached) {
     return cached === true ? 0 : cached === null ? 1 : 2;
   }
-  function pickNextEpisodeStream(streams, options = {}) {
-    const target = qualityHeight(options.previousResolution || "");
-    const preferredAudio = (options.preferredAudio || "").trim().toLowerCase();
-    const preferredSubtitle = (options.preferredSubtitle || "").trim().toLowerCase();
-    let bestStream = null;
-    let bestRank = [];
-    streams.forEach((stream, index) => {
-      const height = qualityHeight(stream.resolution);
-      if (height === null)
-        return;
-      const rank = [
-        cacheRank(stream.cached),
-        languageRank(stream.audioLanguages, preferredAudio),
-        languageRank(stream.subtitleLanguages, preferredSubtitle),
-        target === null ? -height : Math.abs(height - target),
-        -height,
-        index
-      ];
-      if (!bestStream || compareRanks(rank, bestRank) < 0) {
-        bestStream = stream;
-        bestRank = rank;
-      }
-    });
-    return bestStream;
-  }
-  function languageRank(languages, preferred) {
-    if (!preferred)
-      return 0;
-    if (!languages || languages.length === 0)
-      return 1;
-    return languages.some((language) => language.trim().toLowerCase() === preferred) ? 0 : 2;
-  }
-  function compareRanks(a, b) {
-    for (let index = 0;index < a.length; index += 1) {
-      if (a[index] !== b[index])
-        return a[index] - b[index];
-    }
-    return 0;
-  }
   function isImdbId(value) {
     return /^tt\d+$/i.test(value.trim());
+  }
+  function parseReleaseShowTitle(description) {
+    const line = (description.split(`
+`)[0] || "").replace(/[^\x20-\x7E]+/g, " ");
+    const marker = /\bS\d{1,2}(?:-\d{1,2})?\b|\bE\d{1,4}\b|\(\d{4}\)/i.exec(line);
+    if (!marker || marker.index === 0)
+      return "";
+    return line.slice(0, marker.index).trim().replace(/\s+/g, " ");
   }
   function parsePlayableStreams(value) {
     const streams = getRecord3(value)?.streams;
@@ -490,7 +460,8 @@
         audioLanguages: parseAudioLanguages(metadata),
         subtitleLanguages: parseSubtitleLanguages(stream?.subtitles),
         cached: structuredCached ?? parseCacheStatus(metadata),
-        seeders: structuredSeeders ?? parseSeeders(metadata)
+        seeders: structuredSeeders ?? parseSeeders(metadata),
+        showTitle: parseReleaseShowTitle(description)
       }];
     });
   }
@@ -574,12 +545,6 @@
     if (!generic)
       return languages;
     return languages.length === 0 ? [generic] : [...languages, "Other"];
-  }
-  function qualityHeight(quality) {
-    if (/^4k$/i.test(quality))
-      return 2160;
-    const match = quality.match(/^(\d{3,4})p$/i);
-    return match ? Number(match[1]) : null;
   }
   function parseSubtitleLanguages(value) {
     if (!Array.isArray(value))

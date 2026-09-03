@@ -18,6 +18,7 @@ import {
     parseSimklState,
     pollSimklPin,
     requestSimklPin,
+    syncSimklHistory,
     type SimklState
 } from "../shared/simkl";
 import { parseSkipSegments } from "../shared/stremio";
@@ -74,6 +75,7 @@ const traktError = element<HTMLParagraphElement>("trakt-error");
 const externalLinks = [...document.querySelectorAll<HTMLAnchorElement>("[data-external-url]")];
 const simklClientId = element<HTMLInputElement>("simkl-client-id");
 const simklConnect = element<HTMLButtonElement>("simkl-connect");
+const simklSync = element<HTMLButtonElement>("simkl-sync");
 const simklDisconnect = element<HTMLButtonElement>("simkl-disconnect");
 const simklPin = element<HTMLParagraphElement>("simkl-pin");
 const simklStatus = element<HTMLParagraphElement>("simkl-status");
@@ -118,6 +120,7 @@ externalLinks.forEach((link) => link.addEventListener("click", (event) => {
 }));
 
 simklClientId.addEventListener("change", saveSimklClientId);
+simklSync.addEventListener("click", () => void syncSimklNow());
 simklConnect.addEventListener("click", () => void connectSimkl());
 simklDisconnect.addEventListener("click", disconnectSimkl);
 simklLinks.forEach((link) => link.addEventListener("click", (event) => {
@@ -355,9 +358,14 @@ function setSimklError(message: string): void {
 function renderSimkl(): void {
     const connected = simkl.accessToken !== "";
     simklConnect.hidden = connected;
+    simklSync.hidden = !connected;
     simklDisconnect.hidden = !connected;
+    // Scrobbles and syncs share one error field, so the status names a failed request rather
+    // than claiming which of the two it was; the message below says what actually happened.
     simklStatus.textContent = connected
-        ? simkl.lastError ? "Connected · Last scrobble failed" : "Connected"
+        ? simkl.lastError
+            ? "Connected · Last request failed"
+            : `Connected${simkl.lastSyncAt ? ` · Last synced ${new Date(simkl.lastSyncAt).toLocaleString()}` : ""}`
         : "Not connected";
     if (simkl.lastError) setSimklError(simkl.lastError);
 }
@@ -376,7 +384,7 @@ function saveSimklClientId(): void {
     // A different application means the stored token no longer belongs to it.
     simklRevision += 1;
     simklPin.hidden = true;
-    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "" });
+    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
 }
 
 async function connectSimkl(): Promise<void> {
@@ -390,7 +398,7 @@ async function connectSimkl(): Promise<void> {
     const revision = ++simklRevision;
     simklConnect.disabled = true;
     try {
-        saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "" });
+        saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
         simklStatus.textContent = "Requesting a PIN…";
         const pin = await requestSimklPin(browserTransport, simkl);
         if (revision !== simklRevision) return;
@@ -424,7 +432,7 @@ function disconnectSimkl(): void {
     simklPin.hidden = true;
     setSimklError("");
     // Drop the sync cursor too, so reconnecting a different account pulls its full history.
-    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "" });
+    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
 }
 
 function saveTraktCredentials(): void {
@@ -515,6 +523,30 @@ async function copyExternalLink(url: string): Promise<boolean> {
         return true;
     } catch {
         return false;
+    }
+}
+
+async function syncSimklNow(): Promise<void> {
+    if (!simkl.accessToken) return;
+    const state = simkl;
+    const revision = ++simklRevision;
+    simklSync.disabled = true;
+    setSimklError("");
+    try {
+        const local = parseWatchHistory(await getPreference("watchHistory"));
+        if (revision !== simklRevision) return;
+        const result = await syncSimklHistory(browserTransport, state, local);
+        const latest = parseWatchHistory(await getPreference("watchHistory"));
+        if (revision !== simklRevision) return;
+        preferences.set("watchHistory", mergeWatchHistory(result.history, latest));
+        preferences.sync?.();
+        saveSimkl(result.state);
+    } catch (error) {
+        if (revision === simklRevision) {
+            setSimklError(error instanceof Error ? error.message : "Could not sync Simkl.");
+        }
+    } finally {
+        simklSync.disabled = false;
     }
 }
 

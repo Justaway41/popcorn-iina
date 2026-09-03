@@ -21,7 +21,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.4.2`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.5.0`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -39,7 +39,7 @@ Supported behavior:
   history pulled back from both;
 - a Continue Watching strip of what is unfinished, one card per title, each naming the next
   episode that has actually aired;
-- skip intro and the end-credit next-episode control;
+- skip recap, skip intro, skip outro, and the end-of-file next-episode control;
 - a preferred audio and subtitle language (set in preferences) guiding the next-episode
   stream choice;
 - IINA sidebar, overlay, menu shortcut (`Shift+P`), window title, and display-sleep prevention.
@@ -64,6 +64,7 @@ Open the owner file and its test first. Follow imports only when the actual flow
 | IINA-side Trakt transport and serialization | `src/plugin/trakt.ts` | `src/plugin/trakt.test.ts` |
 | IINA preference migration | `src/plugin/preferences.ts` | `src/plugin/preferences.test.ts` |
 | Shared Stremio URLs, metadata, episodes, streams, sorting | `src/shared/stremio.ts` | `src/shared/stremio.test.ts` |
+| Which stream to play and which to show: ranking and show filtering | `src/shared/stream-choice.ts` | `src/shared/stream-choice.test.ts` |
 | Multiple addon parsing, manifests, merged stream loading | `src/shared/addons.ts` | `src/shared/addons.test.ts` |
 | Local watch history and progress | `src/shared/history.ts` | `src/shared/history.test.ts` |
 | Trakt state, OAuth device flow, sync, scrobbling | `src/shared/trakt.ts` | `src/shared/trakt.test.ts` |
@@ -351,8 +352,10 @@ As of 2026-08-27:
   anything watched on another device stayed invisible. `syncSimklHistory` mirrors the Trakt sync and
   stores the `/sync/activities` `all` timestamp as a cursor. Simkl suspends client ids that pull the
   full list every time, so `/sync/activities` runs first and `date_from` is always sent.
-  `extended=full` is deliberately unused: it returns megabytes of per-episode history that the
-  100-item local cap would discard anyway, so each title contributes its `last_watched` position.
+  `extended=full` is unused because the 100-item local cap would discard per-episode history
+  anyway, so each title contributes only its `last_watched` position. The size argument that
+  originally justified this does not hold - a full `extended=full` pull for a 15-title account
+  measured under 10 KB - so per-episode watched marks are a size-independent decision if wanted.
 - `2.3.0` reworks Recently Watched into Continue Watching, hardens skip-segment data against
   intervals that seek out of the episode, keeps the overlay off playback Popcorn did not start, and
   moves the sidebar with the player when Next Episode is used. The skip-intro fix is a guard on the
@@ -407,6 +410,114 @@ As of 2026-08-27:
 - Existing untracked historical plan/spec files under `docs/superpowers/` are user-owned. Do not delete, rewrite, or stage them unless explicitly requested.
 
 Remove or revise current-state entries as soon as they are committed, verified, resolved, or superseded.
+
+- `2.5.0` makes a failed Simkl sync visible and recoverable. Three defects compounded: the only
+  trigger was `iina.window-loaded`, so a window left open never pulled again and a failure waited
+  for the next window; `request` replaced every transport rejection with the fixed string
+  `Simkl request failed.`, and both catch blocks in `simklScrobble` and `syncSimklHistory` did the
+  same, so no reason ever survived; and preferences reported any failure as
+  `Connected · Last scrobble failed` with no last-synced time and no retry. `transportError` now
+  keeps the reason and strips URLs (the pin path carries the client id in its query string),
+  `SimklState.lastSyncAt` records the last successful pull, preferences gained a Simkl Sync Now
+  button, and `syncRemoteHistory` runs on `RequestConfiguration` behind
+  `HISTORY_SYNC_INTERVAL_MS`. Sync Now runs on the webview's `fetch`, not `createIinaTransport`:
+  if it succeeds where startup sync fails, the fault is in the IINA HTTP transport. The underlying
+  cause of the reported failure is still unknown - this change is what makes it reportable.
+  `pickNextEpisodeStream` also stops ranking resolution by absolute distance: with 1080p playing
+  and only 720p and 2160p on offer, the nearest was the lower one, so a higher-quality stream was
+  passed over. It now prefers the resolution already playing and otherwise the highest available.
+  `languageRank` treats the `Dual Audio`/`Multi`/`Other` labels as unnamed rather than as a
+  mismatch, because scoring them below a stream that reports no language at all buried the pick
+  most likely to carry the preferred audio. Cache still outranks language, by request.
+  The overlay gained a fourth action, `credits` / Skip Outro. A credits interval used to mean
+  Next Episode wherever it fell, so an anime ending song at 19:00 of a 24:00 episode offered to
+  leave an episode that still had a scene in it. Credits ending more than `NEXT_EPISODE_TAIL_SEC`
+  before the file ends are now an outro to seek past; only credits reaching the end of the file
+  mean the episode is over. An interval longer than `MAX_SKIP_SEGMENT_SEC` is bad data and is
+  offered as neither. The tail fallback is no longer suppressed by the presence of credits, so an
+  episode that plays on past its outro still offers Next Episode at the end.
+  The next-episode pick now reads `current-tracks/audio/lang` and `current-tracks/sub/lang` and
+  prefers those over the standing preference, which only applies when the file names no language.
+  A setting cannot know that one show is watched subbed and another dubbed, so an anime played in
+  Japanese was followed by an English dub of the next episode. `und` is discarded rather than
+  treated as a preference, since it would rank every stream naming a language as a mismatch.
+  The `preferenceDefaults` for `preferredAudio` and `preferredSubtitle` shipped as `English`,
+  which is what actually caused the report: nobody had chosen it, but it ranked an English dub
+  above a cached Japanese release. They now default to `""` - the "Any language" option the
+  preferences page already offered - so language only re-ranks when the viewer asks for it or
+  the playing file says what it is. An explicit stored choice is untouched by the change.
+  Cache still outranks language, so an uncached stream in the right language can still lose.
+  The wrong-episode report turned out to be a wrong *show*: an addon answers one IMDb id with a
+  show's spin-offs too, and each of them has an episode with the requested number, so nothing in
+  the stream list told them apart. A live query for `tt0988818:1:11` returned 93 streams of which
+  28 were parsed as a different show - `Gintama Mr Ginpachis Zany Class`, `Gintama. Porori-hen` -
+  and every language setting picked one of those. Two signals now guard the pick, both ahead of
+  the older ones. `parseReleaseShowTitle` reads the title the addon parsed from the first line of
+  a stream description (`showTitle` on `PlayableStream`) and compares it with the show being
+  watched; a title is only trusted when a season, episode, or year marker follows it, because
+  description layout is the user's choice of formatter, and an unreadable one leaves every stream
+  equal rather than ranking the list as a mismatch. `releaseTokens` then keeps the next episode in
+  the release already playing, comparing the words of `current-tracks`' filename with each
+  candidate's, numbers dropped so an episode number and a per-file checksum cannot break a match.
+  `behaviorHints.bingeGroup` looks like the field for this but is not: AIOStreams fills it with
+  quality, codec, and group only, so the spin-off and the main series share one.
+  `filterStreamsToShow` applies the same title check to the sidebar list, in `renderStreams` so
+  both the progressive repaint and the final render use it. It removes only titles that are this
+  show's name with words added or removed - the spin-off shape - never an unrelated string, since
+  an addon listing the show as `Attack On Titan` or `L'attacco Dei Giganti` shares no word with
+  `Shingeki no Kyojin` yet is the same show; an early version keyed on exact matches and hid 180
+  of 284 valid streams. A parenthesised alias is dropped before comparing. Filtering engages only
+  when some stream does name the show, so an addon that spells every title differently leaves the
+  list whole. Known cost: a season-qualified variant of the right show (`Shingeki No Kyojin I`) is
+  treated as narrower and hidden - 6 of 284 in the measured case, all duplicated by kept rows.
+  `ConfigurationPayload.nowPlaying` carries the playing episode id and stream URL, so a stream
+  list opened for that episode marks the row it came from (`.srow--playing`) and any other
+  episode marks nothing. The sidebar asks for configuration before every stream list, which is
+  exactly when it needs this, so no separate message or live update is involved. A debrid addon
+  mints a fresh URL for the same file on every request, so `isPlayingStream` matches on the
+  release name as well as the URL; `PlayItemPayload.releaseName` carries it from the row the
+  viewer clicked. Matching on URL alone silently never marked anything.
+  The configuration reply alone was not enough either: a viewer starts a stream from a list that
+  is already on screen and never reloaded, so the value delivered with it always predated the
+  playback it described. A `NowPlaying` message is posted as playback starts, fails, or ends, and
+  `applyPlayingMarks` retoggles the class on the rows in place - rebuilding would discard the open
+  tier and scroll position for a one-class change. Rows carry `data-release` only, never their
+  URL: a stream URL can hold private debrid credentials and must not sit in the DOM.
+- Skip Outro no longer waits on `nextReady`. Seeking past an outro happens inside the file and
+  needs nothing loaded, but it sat behind the same guard as Next Episode, so an episode whose
+  next-episode prefetch had not finished offered neither control.
+- AniSkip is no longer gated on the item looking like anime. Cinemeta reports every series as
+  `series`, so anime opened through it never reached AniSkip and had no outro source at all.
+  `parseAniZipMalId` maps the IMDb id onto a MAL id through ani.zip, and that lookup is itself
+  the anime test: a live-action IMDb id maps to nothing. Verified against `tt2560140`, which maps
+  to MAL 16498 and has both `op` and `ed`. Coverage is partial and always was: Gintama
+  (`tt0988818` -> MAL 918) is in AniSkip but holds no skip times, and IntroDB has its intro but a
+  null outro, which is why that show shows Skip Intro and no Skip Outro. That is missing data,
+  not a logic fault - do not go looking for a bug in `getOverlayAction` for it.
+  AniSkip and IntroDB now run together rather than one after the other. Chained, the added anime
+  id lookup sat in front of IntroDB, so a slow or unreachable ani.zip withheld an intro IntroDB
+  already had and Skip Intro stopped appearing. Each source applies what it found as it arrives
+  and fills only what is still missing, so when both hold the same interval the first to answer
+  wins rather than the more trusted one; that ordering no longer matters because neither can
+  block the other.
+- The overlay's Next Episode transitioned and IINA then died: that session's log ends with no
+  `App will terminate`, and IINA stopped logging ~49s before the process went while mpv kept
+  decoding, so its main thread froze. The cause is NOT established. A first theory blamed the
+  68 GB `Episode 11.mkv` the transition loaded and gated autoplay on file size, then on bitrate;
+  both were wrong and were reverted. The user watches that file by choice as the best version in
+  the list and it plays normally, so size is not the discriminator, and the seek bursts around
+  the transition appear in sessions that exited cleanly too. Do not re-add a size or bitrate
+  ceiling on autoplay without evidence: it discards the best quality on offer to chase an
+  unproven cause. The one real defect found while investigating is the re-entrancy below.
+- `postNowPlaying` is posted from mpv events only. It was called inside `playItem`, which runs
+  inside a sidebar or overlay message callback, so it posted into the webview from within a
+  webview message handler. Do not move it back. The prefetched next episode carries
+  `releaseName` as well: it was set only on the sidebar's own click payload, so an episode the
+  overlay started reported no release and its row could never be marked once the debrid link was
+  reissued for the reloaded list.
+- Chapter names are matched by `INTRO_CHAPTER` and `CREDITS_CHAPTER` rather than an exact list.
+  `Ending Song`, `ED1`, and `NCOP` are ordinary in anime releases and were all missed, leaving
+  files looking unchaptered. Matching stays anchored so `Endcard` and `Introduction` do not match.
 
 ## Handbook Maintenance
 

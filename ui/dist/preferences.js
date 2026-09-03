@@ -481,6 +481,14 @@
       }];
     });
   }
+  function parseReleaseShowTitle(description) {
+    const line = (description.split(`
+`)[0] || "").replace(/[^\x20-\x7E]+/g, " ");
+    const marker = /\bS\d{1,2}(?:-\d{1,2})?\b|\bE\d{1,4}\b|\(\d{4}\)/i.exec(line);
+    if (!marker || marker.index === 0)
+      return "";
+    return line.slice(0, marker.index).trim().replace(/\s+/g, " ");
+  }
   function parsePlayableStreams(value) {
     const streams = getRecord3(value)?.streams;
     if (!Array.isArray(streams)) {
@@ -515,7 +523,8 @@
         audioLanguages: parseAudioLanguages(metadata),
         subtitleLanguages: parseSubtitleLanguages(stream?.subtitles),
         cached: structuredCached ?? parseCacheStatus(metadata),
-        seeders: structuredSeeders ?? parseSeeders(metadata)
+        seeders: structuredSeeders ?? parseSeeders(metadata),
+        showTitle: parseReleaseShowTitle(description)
       }];
     });
   }
@@ -1061,8 +1070,12 @@
       accessToken: getString4(item?.accessToken),
       lastError: getString4(item?.lastError),
       retryAt: getNonNegativeNumber(item?.retryAt),
-      lastActivityAt: getString4(item?.lastActivityAt)
+      lastActivityAt: getString4(item?.lastActivityAt),
+      lastSyncAt: getString4(item?.lastSyncAt)
     };
+  }
+  function isSimklConnected(state) {
+    return state.clientId !== "" && state.accessToken !== "";
   }
   async function requestSimklPin(transport, state, now = Date.now()) {
     const data = await request2(transport, state, "GET", pinPath(state), null, now);
@@ -1105,6 +1118,148 @@
     }
     throw new Error("Simkl pin expired before it was approved.");
   }
+  async function syncSimklHistory(transport, state, local, now = Date.now()) {
+    if (!isSimklConnected(state) || state.retryAt > now)
+      return { state, history: local };
+    try {
+      const activities = getRecord4(await request2(transport, state, "GET", "/sync/activities", null, now));
+      const activityAt = getString4(activities?.all);
+      if (activityAt && activityAt === state.lastActivityAt) {
+        return {
+          state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
+          history: local
+        };
+      }
+      const cursor = state.lastActivityAt ? `?date_from=${encodeURIComponent(state.lastActivityAt)}` : "";
+      const items = await request2(transport, state, "GET", `/sync/all-items/${cursor}`, null, now);
+      const playback = await request2(transport, state, "GET", `/sync/playback${cursor}`, null, now);
+      return {
+        state: {
+          ...state,
+          lastActivityAt: activityAt || state.lastActivityAt,
+          lastSyncAt: new Date(now).toISOString(),
+          lastError: "",
+          retryAt: 0
+        },
+        history: mergeWatchHistory(local, parseSimklHistory(items, playback))
+      };
+    } catch (error) {
+      if (error instanceof SimklError && error.status === 401) {
+        return {
+          state: {
+            ...state,
+            accessToken: "",
+            lastError: "Simkl connection was rejected. Reconnect required.",
+            retryAt: 0
+          },
+          history: local
+        };
+      }
+      return {
+        state: {
+          ...state,
+          lastError: error instanceof Error ? error.message : "Simkl request failed.",
+          retryAt: error instanceof SimklError ? error.retryAt : 0
+        },
+        history: local
+      };
+    }
+  }
+  function parseSimklHistory(items, playback) {
+    const lists = getRecord4(items);
+    const entries = [
+      ...listEntries(lists?.shows),
+      ...listEntries(lists?.anime),
+      ...listEntries(lists?.movies),
+      ...Array.isArray(playback) ? playback.flatMap(parsePlayback) : []
+    ];
+    return mergeWatchHistory([], entries);
+  }
+  function listEntries(value) {
+    return Array.isArray(value) ? value.flatMap(parseListItem) : [];
+  }
+  function parseListItem(value) {
+    const item = getRecord4(value);
+    const playedAt = getString4(item?.last_watched_at);
+    if (!item || !playedAt)
+      return [];
+    const movie = getRecord4(item.movie);
+    if (movie) {
+      const imdbId2 = getString4(getRecord4(movie.ids)?.imdb);
+      const name2 = getString4(movie.title);
+      if (!isImdbId(imdbId2) || !name2)
+        return [];
+      return [{
+        id: imdbId2,
+        media: remoteMedia(imdbId2, "movie", name2, movie.year),
+        lastPlayedAt: playedAt,
+        watched: true,
+        progress: 100
+      }];
+    }
+    const show = getRecord4(item.show);
+    const imdbId = getString4(getRecord4(show?.ids)?.imdb);
+    const name = getString4(show?.title);
+    const position = parseLastWatched(item.last_watched);
+    if (!isImdbId(imdbId) || !name || !position)
+      return [];
+    return [seriesEntry(imdbId, name, show?.year, position, "", playedAt, true, 100)];
+  }
+  function parseLastWatched(value) {
+    const match = /^(?:S(\d+))?E(\d+)$/i.exec(getString4(value).trim());
+    if (!match)
+      return null;
+    return { season: match[1] ? Number(match[1]) : 1, episode: Number(match[2]) };
+  }
+  function parsePlayback(value) {
+    const item = getRecord4(value);
+    const playedAt = getString4(item?.paused_at);
+    const progress = clampProgress(item?.progress);
+    if (!item || !playedAt || progress === null)
+      return [];
+    const movie = getRecord4(item.movie);
+    if (movie) {
+      const imdbId2 = getString4(getRecord4(movie.ids)?.imdb);
+      const name2 = getString4(movie.title);
+      if (!isImdbId(imdbId2) || !name2)
+        return [];
+      return [{
+        id: imdbId2,
+        media: remoteMedia(imdbId2, "movie", name2, movie.year),
+        lastPlayedAt: playedAt,
+        watched: false,
+        progress
+      }];
+    }
+    const show = getRecord4(item.show);
+    const episode = getRecord4(item.episode);
+    const imdbId = getString4(getRecord4(show?.ids)?.imdb);
+    const name = getString4(show?.title);
+    const season = getFiniteNumber(episode?.season);
+    const number = getFiniteNumber(episode?.episode);
+    if (!isImdbId(imdbId) || !name || season === null || number === null)
+      return [];
+    return [seriesEntry(imdbId, name, show?.year, { season, episode: number }, getString4(episode?.title), playedAt, false, progress)];
+  }
+  function seriesEntry(imdbId, name, year, position, episodeName, playedAt, watched, progress) {
+    const id = `${imdbId}:${position.season}:${position.episode}`;
+    return {
+      id,
+      media: remoteMedia(imdbId, "series", name, year),
+      episode: {
+        id,
+        name: episodeName || `Episode ${position.season}x${position.episode}`,
+        season: position.season,
+        episode: position.episode,
+        aired: "",
+        description: "",
+        thumbnail: ""
+      },
+      lastPlayedAt: playedAt,
+      watched,
+      progress
+    };
+  }
   function pinPath(state, userCode = "") {
     const base = userCode ? `/oauth/pin/${encodeURIComponent(userCode)}` : "/oauth/pin";
     return `${base}?client_id=${encodeURIComponent(state.clientId)}`;
@@ -1121,12 +1276,16 @@
     };
   }
   async function request2(transport, state, method, path, body, now) {
-    const response = await transport(method, `${SIMKL_API}${path}`, body, apiHeaders2(state)).catch(() => {
-      throw new Error("Simkl request failed.");
+    const response = await transport(method, `${SIMKL_API}${path}`, body, apiHeaders2(state)).catch((error) => {
+      throw transportError(error);
     });
     if (response.status >= 200 && response.status < 300)
       return response.data;
     throw responseError2(response, now);
+  }
+  function transportError(error) {
+    const reason = (error instanceof Error ? error.message : String(error)).replace(/https?:\/\/\S*/gi, "").replace(/\s+/g, " ").trim();
+    return new Error(reason ? `Simkl request failed: ${reason}` : "Simkl request failed.");
   }
   function responseError2(response, now) {
     const retryAt = response.status === 429 ? now + (retryAfterMs2(response.headers) ?? DEFAULT_RETRY_MS2) : 0;
@@ -1141,9 +1300,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.4.2",
+    version: "2.5.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 15,
+    ghVersion: 16,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1159,8 +1318,8 @@
       addons: [],
       mediaType: "movie",
       episodeOrder: "oldest",
-      preferredAudio: "English",
-      preferredSubtitle: "English",
+      preferredAudio: "",
+      preferredSubtitle: "",
       watchHistory: [],
       trakt: {},
       skipSegments: true,
@@ -1213,6 +1372,7 @@
   var externalLinks = [...document.querySelectorAll("[data-external-url]")];
   var simklClientId = element("simkl-client-id");
   var simklConnect = element("simkl-connect");
+  var simklSync = element("simkl-sync");
   var simklDisconnect = element("simkl-disconnect");
   var simklPin = element("simkl-pin");
   var simklStatus = element("simkl-status");
@@ -1250,6 +1410,7 @@
     });
   }));
   simklClientId.addEventListener("change", saveSimklClientId);
+  simklSync.addEventListener("click", () => void syncSimklNow());
   simklConnect.addEventListener("click", () => void connectSimkl());
   simklDisconnect.addEventListener("click", disconnectSimkl);
   simklLinks.forEach((link) => link.addEventListener("click", (event) => {
@@ -1475,8 +1636,9 @@
   function renderSimkl() {
     const connected = simkl.accessToken !== "";
     simklConnect.hidden = connected;
+    simklSync.hidden = !connected;
     simklDisconnect.hidden = !connected;
-    simklStatus.textContent = connected ? simkl.lastError ? "Connected · Last scrobble failed" : "Connected" : "Not connected";
+    simklStatus.textContent = connected ? simkl.lastError ? "Connected · Last request failed" : `Connected${simkl.lastSyncAt ? ` · Last synced ${new Date(simkl.lastSyncAt).toLocaleString()}` : ""}` : "Not connected";
     if (simkl.lastError)
       setSimklError(simkl.lastError);
   }
@@ -1494,7 +1656,7 @@
       return;
     simklRevision += 1;
     simklPin.hidden = true;
-    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "" });
+    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
   }
   async function connectSimkl() {
     setSimklError("");
@@ -1506,7 +1668,7 @@
     const revision = ++simklRevision;
     simklConnect.disabled = true;
     try {
-      saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "" });
+      saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
       simklStatus.textContent = "Requesting a PIN…";
       const pin = await requestSimklPin(browserTransport, simkl);
       if (revision !== simklRevision)
@@ -1534,7 +1696,7 @@
     simklRevision += 1;
     simklPin.hidden = true;
     setSimklError("");
-    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "" });
+    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
   }
   function saveTraktCredentials() {
     const clientId = traktClientId.value.trim();
@@ -1620,6 +1782,32 @@
       return true;
     } catch {
       return false;
+    }
+  }
+  async function syncSimklNow() {
+    if (!simkl.accessToken)
+      return;
+    const state = simkl;
+    const revision = ++simklRevision;
+    simklSync.disabled = true;
+    setSimklError("");
+    try {
+      const local = parseWatchHistory(await getPreference("watchHistory"));
+      if (revision !== simklRevision)
+        return;
+      const result = await syncSimklHistory(browserTransport, state, local);
+      const latest = parseWatchHistory(await getPreference("watchHistory"));
+      if (revision !== simklRevision)
+        return;
+      preferences.set("watchHistory", mergeWatchHistory(result.history, latest));
+      preferences.sync?.();
+      saveSimkl(result.state);
+    } catch (error) {
+      if (revision === simklRevision) {
+        setSimklError(error instanceof Error ? error.message : "Could not sync Simkl.");
+      }
+    } finally {
+      simklSync.disabled = false;
     }
   }
   async function syncTraktNow() {

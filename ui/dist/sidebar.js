@@ -267,52 +267,9 @@
     SetEpisodeOrder: "setEpisodeOrder",
     HistoryUpdated: "historyUpdated",
     RemoveHistoryEntry: "removeHistoryEntry",
-    ShowNextEpisode: "showNextEpisode"
+    ShowNextEpisode: "showNextEpisode",
+    NowPlaying: "nowPlaying"
   };
-  // Info.json
-  var Info_default = {
-    name: "Popcorn for IINA",
-    identifier: "xyz.brbc.popcorn",
-    version: "2.4.2",
-    ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 15,
-    description: "Discover media and play direct Stremio addon streams in IINA",
-    author: {
-      name: "Justaway41"
-    },
-    entry: "dist/main.js",
-    globalEntry: "dist/global.js",
-    sidebarTab: {
-      name: "Popcorn"
-    },
-    preferencesPage: "ui/preferences.html",
-    preferenceDefaults: {
-      addonManifestUrl: "",
-      addons: [],
-      mediaType: "movie",
-      episodeOrder: "oldest",
-      preferredAudio: "English",
-      preferredSubtitle: "English",
-      watchHistory: [],
-      trakt: {},
-      skipSegments: true,
-      simkl: {}
-    },
-    permissions: [
-      "network-request",
-      "show-osd",
-      "show-alert",
-      "video-overlay",
-      "sidebar",
-      "file-system"
-    ],
-    allowedDomains: [
-      "*"
-    ]
-  };
-
-  // src/shared/version.ts
-  var CLIENT_VERSION = Info_default.version;
 
   // src/shared/stremio.ts
   var CINEMETA_BASE_URL = "https://v3-cinemeta.strem.io";
@@ -503,6 +460,14 @@
       }];
     });
   }
+  function parseReleaseShowTitle(description) {
+    const line = (description.split(`
+`)[0] || "").replace(/[^\x20-\x7E]+/g, " ");
+    const marker = /\bS\d{1,2}(?:-\d{1,2})?\b|\bE\d{1,4}\b|\(\d{4}\)/i.exec(line);
+    if (!marker || marker.index === 0)
+      return "";
+    return line.slice(0, marker.index).trim().replace(/\s+/g, " ");
+  }
   function parsePlayableStreams(value) {
     const streams = getRecord3(value)?.streams;
     if (!Array.isArray(streams)) {
@@ -537,7 +502,8 @@
         audioLanguages: parseAudioLanguages(metadata),
         subtitleLanguages: parseSubtitleLanguages(stream?.subtitles),
         cached: structuredCached ?? parseCacheStatus(metadata),
-        seeders: structuredSeeders ?? parseSeeders(metadata)
+        seeders: structuredSeeders ?? parseSeeders(metadata),
+        showTitle: parseReleaseShowTitle(description)
       }];
     });
   }
@@ -674,12 +640,84 @@
     return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
 
+  // src/shared/stream-choice.ts
+  function filterStreamsToShow(streams, showTitle) {
+    const wanted = titleWords(showTitle);
+    if (wanted.length === 0)
+      return streams;
+    if (!streams.some((stream) => isSameTitle(titleWords(stream.showTitle || ""), wanted))) {
+      return streams;
+    }
+    return streams.filter((stream) => {
+      const title = titleWords(stream.showTitle || "");
+      return title.length === 0 || !isNarrowerTitle(title, wanted);
+    });
+  }
+  function titleWords(value) {
+    return titleKey(value).split(" ").filter(Boolean);
+  }
+  function isSameTitle(a, b) {
+    return a.length === b.length && a.every((word, index) => word === b[index]);
+  }
+  function isNarrowerTitle(a, b) {
+    const [shorter, longer] = a.length < b.length ? [a, b] : [b, a];
+    return shorter.length > 0 && shorter.length < longer.length && shorter.every((word, index) => word === longer[index]);
+  }
+  function titleKey(value) {
+    return value.replace(/\([^)]*\)/g, " ").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  }
+  // Info.json
+  var Info_default = {
+    name: "Popcorn for IINA",
+    identifier: "xyz.brbc.popcorn",
+    version: "2.5.0",
+    ghRepo: "Justaway41/popcorn-iina",
+    ghVersion: 16,
+    description: "Discover media and play direct Stremio addon streams in IINA",
+    author: {
+      name: "Justaway41"
+    },
+    entry: "dist/main.js",
+    globalEntry: "dist/global.js",
+    sidebarTab: {
+      name: "Popcorn"
+    },
+    preferencesPage: "ui/preferences.html",
+    preferenceDefaults: {
+      addonManifestUrl: "",
+      addons: [],
+      mediaType: "movie",
+      episodeOrder: "oldest",
+      preferredAudio: "",
+      preferredSubtitle: "",
+      watchHistory: [],
+      trakt: {},
+      skipSegments: true,
+      simkl: {}
+    },
+    permissions: [
+      "network-request",
+      "show-osd",
+      "show-alert",
+      "video-overlay",
+      "sidebar",
+      "file-system"
+    ],
+    allowedDomains: [
+      "*"
+    ]
+  };
+
+  // src/shared/version.ts
+  var CLIENT_VERSION = Info_default.version;
+
   // src/ui/app.ts
   var ui;
   var mediaType = "movie";
   var pendingMediaType = null;
   var episodeOrder = "oldest";
   var addons = [];
+  var nowPlaying = { videoId: "", url: "", releaseName: "" };
   var watchHistory = [];
   var seriesEpisodes = new Map;
   var homeQuery = "";
@@ -765,6 +803,10 @@
       if (view.kind === "history")
         renderHistory();
     });
+    iina.onMessage(MESSAGE_NAMES.NowPlaying, (data) => {
+      nowPlaying = parseNowPlaying(data);
+      applyPlayingMarks();
+    });
     iina.onMessage(MESSAGE_NAMES.ShowNextEpisode, (data) => {
       const payload = data;
       if (!payload?.media || !payload?.episode || !Array.isArray(payload?.episodes)) {
@@ -828,7 +870,39 @@
     }
     episodeOrder = parseEpisodeOrder(payload?.episodeOrder);
     watchHistory = parseWatchHistory(payload?.history);
+    nowPlaying = parseNowPlaying(payload?.nowPlaying);
     updateTypeButtons();
+  }
+  function parseNowPlaying(value) {
+    const item = value;
+    return {
+      videoId: typeof item?.videoId === "string" ? item.videoId : "",
+      url: typeof item?.url === "string" ? item.url : "",
+      releaseName: typeof item?.releaseName === "string" ? item.releaseName : ""
+    };
+  }
+  function playingStream(playing, videoId) {
+    return videoId !== "" && playing.videoId === videoId ? playing : { videoId: "", url: "", releaseName: "" };
+  }
+  function isPlayingStream(stream, playing) {
+    if (playing.videoId === "")
+      return false;
+    return playing.url !== "" && stream.url === playing.url || playing.releaseName !== "" && stream.rawTitle === playing.releaseName;
+  }
+  function viewVideoId() {
+    return view.kind === "streams" ? view.episode?.id || mediaIdentity(view.media) : "";
+  }
+  function applyPlayingMarks() {
+    const playing = playingStream(nowPlaying, viewVideoId());
+    for (const row of ui.content.querySelectorAll(".srow")) {
+      const release = row.dataset.release || "";
+      const isPlaying = playing.releaseName !== "" && release === playing.releaseName;
+      row.classList.toggle("srow--playing", isPlaying);
+      if (isPlaying)
+        row.setAttribute("aria-current", "true");
+      else
+        row.removeAttribute("aria-current");
+    }
   }
   function refreshConfiguration() {
     return new Promise((resolve) => {
@@ -1420,7 +1494,9 @@
     }
     return button;
   }
-  function renderStreams(media, episode, episodes, streams, failedAddons, subtitlesPending) {
+  function renderStreams(media, episode, episodes, loadedStreams, failedAddons, subtitlesPending) {
+    const streams = filterStreamsToShow(loadedStreams, media.name);
+    const playing = playingStream(nowPlaying, episode?.id || mediaIdentity(media));
     if (streams.length === 0) {
       renderEmpty("No direct HTTP streams. The enabled addons may only return torrent entries.");
       return;
@@ -1432,6 +1508,7 @@
       const resumePercent = getEntryProgress(episode?.id || mediaIdentity(media));
       iina.postMessage(MESSAGE_NAMES.PlayItem, {
         url: stream.url,
+        releaseName: stream.rawTitle,
         title: episode ? formatEpisodeTitle(media, episode) : media.name,
         playbackContext: {
           media,
@@ -1458,7 +1535,7 @@
     const renderList = () => {
       sortButton.textContent = getSizeSortControl(streamSizeOrder).label;
       summaryText.textContent = buildStreamSummary(streams, varying, englishSubtitles);
-      list.replaceChildren(...buildStreamTiers(streams, streamSizeOrder, varying, seriesPrefix, playStream));
+      list.replaceChildren(...buildStreamTiers(streams, streamSizeOrder, varying, seriesPrefix, playStream, playing));
     };
     sortButton.addEventListener("click", () => {
       streamSizeOrder = getSizeSortControl(streamSizeOrder).next;
@@ -1516,7 +1593,7 @@
     const number = String(episode.episode);
     return new RegExp(`^\\s*${escaped}[\\s(]*(?:\\d{4}\\)?)?[\\s\\-–·()]*` + `(?:s0?${season}\\s*[.\\s]?e0?${number}|s0?${season}|0?${season}x0?${number}` + `|season\\s*0?${season})?[\\s\\-–·]*`, "i");
   }
-  function buildStreamTiers(streams, sizeOrder, varying, seriesPrefix, playStream) {
+  function buildStreamTiers(streams, sizeOrder, varying, seriesPrefix, playStream, playing) {
     const tiers = groupStreamsByResolution(streams);
     const openTier = getDefaultTier(tiers);
     return tiers.map(({ resolution, streams: tierStreams }) => {
@@ -1547,7 +1624,7 @@
       const body = document.createElement("div");
       body.className = "tier-body";
       const draw = (limit) => {
-        body.replaceChildren(...ordered.slice(0, limit).map((stream) => streamRow(stream, varying, seriesPrefix, () => playStream(stream))));
+        body.replaceChildren(...ordered.slice(0, limit).map((stream) => streamRow(stream, varying, seriesPrefix, () => playStream(stream), playing)));
         if (limit < ordered.length) {
           const more = document.createElement("button");
           more.type = "button";
@@ -1575,12 +1652,18 @@
       return withReady.resolution;
     return tiers.reduce((best, tier) => tier.streams.length > best.streams.length ? tier : best, tiers[0])?.resolution || "";
   }
-  function streamRow(stream, varying, seriesPrefix, action) {
+  function streamRow(stream, varying, seriesPrefix, action, playing) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "srow";
     button.setAttribute("data-clickable", "");
     button.addEventListener("click", action);
+    if (stream.rawTitle)
+      button.dataset.release = stream.rawTitle;
+    if (isPlayingStream(stream, playing)) {
+      button.classList.add("srow--playing");
+      button.setAttribute("aria-current", "true");
+    }
     if (varying.cache) {
       const dot = document.createElement("span");
       const state = stream.cached === true ? "ok" : stream.cached === false ? "warn" : "unknown";

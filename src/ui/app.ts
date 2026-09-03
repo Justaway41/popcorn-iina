@@ -1,4 +1,4 @@
-import type { ConfigurationPayload, HistoryPayload, ShowNextEpisodePayload } from "../shared/messages";
+import type { ConfigurationPayload, HistoryPayload, NowPlaying, ShowNextEpisodePayload } from "../shared/messages";
 import type { AddonStreamLoadResult, AddonManifest, AddonStream, StremioAddon } from "../shared/addons";
 import type { WatchHistoryEntry } from "../shared/history";
 import type { Episode, EpisodeOrder, Media, MediaType, SizeOrder } from "../shared/stremio";
@@ -6,6 +6,7 @@ import type { Episode, EpisodeOrder, Media, MediaType, SizeOrder } from "../shar
 import { loadEnabledAddonStreams, parseAddonManifest, parseAddons } from "../shared/addons";
 import { getResumePercent, historyTitleId, latestPerTitle, parseWatchHistory } from "../shared/history";
 import { MESSAGE_NAMES } from "../shared/messages";
+import { filterStreamsToShow } from "../shared/stream-choice";
 import { CLIENT_VERSION } from "../shared/version";
 import {
     buildCinemetaPosterUrl,
@@ -59,6 +60,7 @@ let mediaType: MediaType = "movie";
 let pendingMediaType: MediaType | null = null;
 let episodeOrder: EpisodeOrder = "oldest";
 let addons: StremioAddon[] = [];
+let nowPlaying: NowPlaying = { videoId: "", url: "", releaseName: "" };
 let watchHistory: WatchHistoryEntry[] = [];
 const seriesEpisodes = new Map<string, Promise<{ media: Media; episodes: Episode[] } | null>>();
 let homeQuery = "";
@@ -188,6 +190,12 @@ export function initApp(): void {
         watchHistory = parseWatchHistory((data as HistoryPayload)?.history);
         if (view.kind === "history") renderHistory();
     });
+    iina.onMessage(MESSAGE_NAMES.NowPlaying, (data) => {
+        nowPlaying = parseNowPlaying(data);
+        // Repaint the marks in place. Rebuilding the list would throw away the tier the viewer
+        // has open and the position they are scrolled to, for a one-class change.
+        applyPlayingMarks();
+    });
     iina.onMessage(MESSAGE_NAMES.ShowNextEpisode, (data) => {
         const payload = data as ShowNextEpisodePayload;
         if (!payload?.media || !payload?.episode || !Array.isArray(payload?.episodes)) {
@@ -263,7 +271,60 @@ function applyConfiguration(data: unknown): void {
     }
     episodeOrder = parseEpisodeOrder(payload?.episodeOrder);
     watchHistory = parseWatchHistory(payload?.history);
+    nowPlaying = parseNowPlaying(payload?.nowPlaying);
     updateTypeButtons();
+}
+
+/** The player is a separate process; treat what it reports like any other untrusted input. */
+export function parseNowPlaying(value: unknown): NowPlaying {
+    const item = value as Partial<NowPlaying> | undefined;
+    return {
+        videoId: typeof item?.videoId === "string" ? item.videoId : "",
+        url: typeof item?.url === "string" ? item.url : "",
+        releaseName: typeof item?.releaseName === "string" ? item.releaseName : ""
+    };
+}
+
+/** What to mark in a stream list, all empty unless the player is on this very episode. */
+export function playingStream(playing: NowPlaying, videoId: string): NowPlaying {
+    return videoId !== "" && playing.videoId === videoId
+        ? playing
+        : { videoId: "", url: "", releaseName: "" };
+}
+
+/**
+ * A debrid addon mints a new URL for the same file on every request, so a list loaded after
+ * playback started matches on the release name instead.
+ */
+export function isPlayingStream(
+    stream: { url: string; rawTitle: string },
+    playing: NowPlaying
+): boolean {
+    if (playing.videoId === "") return false;
+    return (playing.url !== "" && stream.url === playing.url) ||
+        (playing.releaseName !== "" && stream.rawTitle === playing.releaseName);
+}
+
+/** Video id of the list on screen, empty when the view is not a stream list. */
+function viewVideoId(): string {
+    return view.kind === "streams"
+        ? view.episode?.id || mediaIdentity(view.media)
+        : "";
+}
+
+/**
+ * Rows carry only their release name, never their URL: a stream URL can hold private debrid
+ * credentials and has no business sitting in the DOM.
+ */
+function applyPlayingMarks(): void {
+    const playing = playingStream(nowPlaying, viewVideoId());
+    for (const row of ui.content.querySelectorAll<HTMLElement>(".srow")) {
+        const release = row.dataset.release || "";
+        const isPlaying = playing.releaseName !== "" && release === playing.releaseName;
+        row.classList.toggle("srow--playing", isPlaying);
+        if (isPlaying) row.setAttribute("aria-current", "true");
+        else row.removeAttribute("aria-current");
+    }
 }
 
 function refreshConfiguration(): Promise<void> {
@@ -1035,10 +1096,14 @@ function renderStreams(
     media: Media,
     episode: Episode | undefined,
     episodes: Episode[],
-    streams: AddonStream[],
+    loadedStreams: AddonStream[],
     failedAddons: number,
     subtitlesPending?: Promise<boolean | null> | null
 ): void {
+    // An addon answers an IMDb id with every show sharing it, so a list can be half spin-off
+    // episodes carrying the same episode number as the one actually asked for.
+    const streams = filterStreamsToShow(loadedStreams, media.name);
+    const playing = playingStream(nowPlaying, episode?.id || mediaIdentity(media));
     if (streams.length === 0) {
         renderEmpty("No direct HTTP streams. The enabled addons may only return torrent entries.");
         return;
@@ -1049,6 +1114,7 @@ function renderStreams(
         const resumePercent = getEntryProgress(episode?.id || mediaIdentity(media));
         iina.postMessage(MESSAGE_NAMES.PlayItem, {
             url: stream.url,
+            releaseName: stream.rawTitle,
             title: episode ? formatEpisodeTitle(media, episode) : media.name,
             playbackContext: {
                 media,
@@ -1082,7 +1148,8 @@ function renderStreams(
             streamSizeOrder,
             varying,
             seriesPrefix,
-            playStream
+            playStream,
+            playing
         ));
     };
     sortButton.addEventListener("click", () => {
@@ -1170,7 +1237,8 @@ function buildStreamTiers(
     sizeOrder: SizeOrder,
     varying: { addon: boolean; cache: boolean; source: boolean },
     seriesPrefix: RegExp | null,
-    playStream: (stream: AddonStream) => void
+    playStream: (stream: AddonStream) => void,
+    playing: NowPlaying
 ): HTMLElement[] {
     const tiers = groupStreamsByResolution(streams);
     const openTier = getDefaultTier(tiers);
@@ -1206,7 +1274,7 @@ function buildStreamTiers(
         body.className = "tier-body";
         const draw = (limit: number) => {
             body.replaceChildren(...ordered.slice(0, limit).map((stream) => (
-                streamRow(stream, varying, seriesPrefix, () => playStream(stream))
+                streamRow(stream, varying, seriesPrefix, () => playStream(stream), playing)
             )));
             if (limit < ordered.length) {
                 const more = document.createElement("button");
@@ -1248,13 +1316,21 @@ function streamRow(
     stream: AddonStream,
     varying: { addon: boolean; cache: boolean; source: boolean },
     seriesPrefix: RegExp | null,
-    action: () => void
+    action: () => void,
+    playing: NowPlaying
 ): HTMLButtonElement {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "srow";
     button.setAttribute("data-clickable", "");
     button.addEventListener("click", action);
+    // Kept on the row so the mark can move without rebuilding the list.
+    if (stream.rawTitle) button.dataset.release = stream.rawTitle;
+    // Only ever set on the episode actually playing, so opening a different one marks nothing.
+    if (isPlayingStream(stream, playing)) {
+        button.classList.add("srow--playing");
+        button.setAttribute("aria-current", "true");
+    }
 
     if (varying.cache) {
         const dot = document.createElement("span");
