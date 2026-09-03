@@ -226,6 +226,14 @@
     }
     return next;
   }
+  function pendingSimklUploads(state) {
+    const next = parseEpisodeWatchState(state);
+    return next.local.flatMap((show) => {
+      const known = next.simkl.find((item) => item.id === show.id)?.episodes ?? [];
+      const episodes = show.episodes.filter((episode) => !known.includes(episode));
+      return episodes.length > 0 ? [{ id: show.id, episodes }] : [];
+    });
+  }
   function mergeSimklCours(state, cours) {
     const next = parseEpisodeWatchState(state);
     for (const cour of parseWatchedCours(cours)) {
@@ -1163,9 +1171,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.0",
+    version: "2.6.1",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 17,
+    ghVersion: 18,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1650,6 +1658,15 @@
     const chains = new Map;
     const kitsuMalIds = new Map;
     const series = new Map;
+    let lookupBudget = MAX_CHAIN_LOOKUPS_PER_PASS;
+    async function loadChainWithinBudget(name) {
+      if (chains.has(name))
+        return chains.get(name) ?? null;
+      if (lookupBudget <= 0)
+        return null;
+      lookupBudget -= 1;
+      return loadChain(name);
+    }
     async function loadChain(name) {
       if (chains.has(name))
         return chains.get(name) ?? null;
@@ -1709,20 +1726,14 @@
       const wanted = new Set(cours.map((cour) => cour.malId));
       const owners = new Map;
       const seen = new Set;
-      let lookups = 0;
       for (const candidate of candidates) {
         if (wanted.size === 0)
           break;
         if (!isImdbId(candidate.imdbId) || seen.has(candidate.imdbId))
           continue;
         seen.add(candidate.imdbId);
-        if (!chains.has(candidate.name)) {
-          if (lookups >= MAX_CHAIN_LOOKUPS_PER_PASS)
-            continue;
-          lookups += 1;
-        }
         try {
-          const chain = await loadChain(candidate.name);
+          const chain = await loadChainWithinBudget(candidate.name);
           if (!chain)
             continue;
           for (const cour of chain) {
@@ -1750,6 +1761,7 @@
       },
       async placeWatchedCours(cours, history) {
         const placed = { patches: [], entries: [] };
+        lookupBudget = MAX_CHAIN_LOOKUPS_PER_PASS;
         if (cours.length === 0)
           return placed;
         const owners = await indexCandidates(cours, history);
@@ -1808,6 +1820,33 @@
           }
         }
         return placed;
+      },
+      async uploadEpisodes(media, coordinates) {
+        if (!isImdbId(media.imdbId) || coordinates.length === 0)
+          return [];
+        try {
+          if (!chains.has(media.name) && lookupBudget <= 0)
+            return [];
+          const chain = await loadChainWithinBudget(media.name);
+          if (!chain) {
+            return coordinates.map((at) => ({
+              imdbId: media.imdbId,
+              title: media.name,
+              season: at.season,
+              episode: at.episode
+            }));
+          }
+          const details = await loadSeries(showCandidate(media));
+          if (!details)
+            return [];
+          return coordinates.flatMap((at) => {
+            const cour = mapAnimeEpisode(details.seasons, chain, at.season, at.episode);
+            return cour ? [{ malId: cour.malId, title: media.name, season: 1, episode: cour.episode }] : [];
+          });
+        } catch (error) {
+          logDebug("Popcorn: Anime upload mapping failed:", formatError(error));
+          return [];
+        }
       }
     };
   }
@@ -1833,7 +1872,8 @@
       lastError: getString4(item?.lastError),
       retryAt: getNonNegativeNumber(item?.retryAt),
       lastActivityAt: getString4(item?.lastActivityAt),
-      lastSyncAt: getString4(item?.lastSyncAt)
+      lastSyncAt: getString4(item?.lastSyncAt),
+      lastUploadKey: getString4(item?.lastUploadKey)
     };
   }
   function isSimklConnected(state) {
@@ -1873,6 +1913,53 @@
         retryAt: error instanceof SimklError ? error.retryAt : 0
       };
     }
+  }
+  function buildHistoryUpload(episodes) {
+    const shows = new Map;
+    for (const episode of episodes) {
+      const key = episode.malId ? `mal:${episode.malId}` : `imdb:${episode.imdbId ?? ""}`;
+      if (key === "imdb:")
+        continue;
+      const show = shows.get(key) ?? {
+        title: episode.title,
+        ids: episode.malId ? { mal: episode.malId } : { imdb: episode.imdbId ?? "" },
+        seasons: new Map
+      };
+      shows.set(key, show);
+      const season = show.seasons.get(episode.season) ?? new Set;
+      season.add(episode.episode);
+      show.seasons.set(episode.season, season);
+    }
+    return {
+      shows: [...shows.values()].map((show) => ({
+        title: show.title,
+        ids: show.ids,
+        seasons: [...show.seasons.entries()].sort((a, b) => a[0] - b[0]).map(([number, episodes2]) => ({
+          number,
+          episodes: [...episodes2].sort((a, b) => a - b).map((number2) => ({ number: number2 }))
+        }))
+      }))
+    };
+  }
+  async function uploadSimklHistory(transport, state, episodes, now = Date.now()) {
+    if (!isSimklConnected(state) || state.retryAt > now || episodes.length === 0)
+      return state;
+    const key = uploadKey(episodes);
+    if (key === state.lastUploadKey)
+      return state;
+    try {
+      await request2(transport, state, "POST", "/sync/history", buildHistoryUpload(episodes), now);
+      return { ...state, lastUploadKey: key, lastError: "", retryAt: 0 };
+    } catch (error) {
+      return {
+        ...state,
+        lastError: error instanceof Error ? error.message : "Simkl request failed.",
+        retryAt: error instanceof SimklError ? error.retryAt : 0
+      };
+    }
+  }
+  function uploadKey(episodes) {
+    return episodes.map((episode) => `${episode.malId ?? episode.imdbId ?? ""}:${episode.season}:${episode.episode}`).sort().join(",");
   }
   async function syncSimklHistory(transport, state, local, now = Date.now()) {
     if (!isSimklConnected(state) || state.retryAt > now) {
@@ -2288,6 +2375,18 @@
             return;
           try {
             saveIfCurrent(state, await simklScrobble(transport, state, action, context, progress, cour));
+          } catch (error) {
+            onError(error);
+          }
+        });
+      },
+      upload(episodes) {
+        return enqueue(async () => {
+          const state = read();
+          if (!state.accessToken)
+            return;
+          try {
+            saveIfCurrent(state, await uploadSimklHistory(transport, state, episodes));
           } catch (error) {
             onError(error);
           }
@@ -2878,6 +2977,23 @@
     addonManifests.set(addon.manifestUrl, manifest);
     return manifest;
   }
+  async function uploadLocalHistory(state, history) {
+    const pending = pendingSimklUploads(state);
+    if (pending.length === 0)
+      return;
+    const episodes = [];
+    for (const show of pending) {
+      const media = history.find((entry) => entry.media.imdbId === show.id)?.media;
+      if (!media)
+        continue;
+      const coordinates = show.episodes.flatMap((episode) => {
+        const [season, number] = episode.split(":").map(Number);
+        return Number.isInteger(season) && Number.isInteger(number) ? [{ season, episode: number }] : [];
+      });
+      episodes.push(...await anime.uploadEpisodes(media, coordinates));
+    }
+    await simkl.upload(episodes);
+  }
   function syncRemoteHistory() {
     const now = Date.now();
     if (historySyncInFlight || now - lastHistorySyncAt < HISTORY_SYNC_INTERVAL_MS)
@@ -2900,6 +3016,7 @@
         history,
         episodeWatchState: watchedState
       });
+      await uploadLocalHistory(watchedState, history);
     }).catch((error) => logDebug(`History sync failed: ${formatError(error)}`)).then(() => {
       historySyncInFlight = false;
     });

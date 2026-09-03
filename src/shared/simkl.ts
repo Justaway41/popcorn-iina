@@ -32,6 +32,12 @@ export interface SimklState {
     lastActivityAt: string;
     /** When the last successful pull finished, so preferences can show whether sync still runs. */
     lastSyncAt: string;
+    /**
+     * What the last history upload covered. Scrobbling only ever tells Simkl about episodes
+     * played after Popcorn was connected, so everything watched before that has to be sent
+     * once; this stops it being sent again every five minutes.
+     */
+    lastUploadKey: string;
 }
 
 export interface SimklPin {
@@ -77,7 +83,8 @@ export function parseSimklState(value: unknown): SimklState {
         lastError: getString(item?.lastError),
         retryAt: getNonNegativeNumber(item?.retryAt),
         lastActivityAt: getString(item?.lastActivityAt),
-        lastSyncAt: getString(item?.lastSyncAt)
+        lastSyncAt: getString(item?.lastSyncAt),
+        lastUploadKey: getString(item?.lastUploadKey)
     };
 }
 
@@ -210,6 +217,82 @@ export async function simklScrobble(
             retryAt: error instanceof SimklError ? error.retryAt : 0
         };
     }
+}
+
+/** An episode to add to the Simkl history, in whichever numbering addresses its show. */
+export interface SimklUploadEpisode {
+    /** Anime is addressed by cour: its MAL id with the episode numbered inside that cour. */
+    malId?: string;
+    imdbId?: string;
+    title: string;
+    season: number;
+    episode: number;
+}
+
+/**
+ * Groups episodes into the shape `/sync/history` takes: one entry per show, seasons holding
+ * episode numbers. Anime carries a MAL id and season one, since Simkl numbers each cour from
+ * one; everything else carries its IMDb id and its real season.
+ */
+export function buildHistoryUpload(episodes: SimklUploadEpisode[]): unknown {
+    const shows = new Map<string, { title: string; ids: Record<string, string>; seasons: Map<number, Set<number>> }>();
+    for (const episode of episodes) {
+        const key = episode.malId ? `mal:${episode.malId}` : `imdb:${episode.imdbId ?? ""}`;
+        if (key === "imdb:") continue;
+        const show = shows.get(key) ?? {
+            title: episode.title,
+            ids: episode.malId ? { mal: episode.malId } : { imdb: episode.imdbId ?? "" },
+            seasons: new Map<number, Set<number>>()
+        };
+        shows.set(key, show);
+        const season = show.seasons.get(episode.season) ?? new Set<number>();
+        season.add(episode.episode);
+        show.seasons.set(episode.season, season);
+    }
+    return {
+        shows: [...shows.values()].map((show) => ({
+            title: show.title,
+            ids: show.ids,
+            seasons: [...show.seasons.entries()]
+                .sort((a, b) => a[0] - b[0])
+                .map(([number, episodes]) => ({
+                    number,
+                    episodes: [...episodes].sort((a, b) => a - b).map((number) => ({ number }))
+                }))
+        }))
+    };
+}
+
+/**
+ * Sends episodes Simkl does not have yet. Adding an episode already in the history is a no-op
+ * there, so a repeat costs nothing beyond the request.
+ */
+export async function uploadSimklHistory(
+    transport: HttpTransport,
+    state: SimklState,
+    episodes: SimklUploadEpisode[],
+    now = Date.now()
+): Promise<SimklState> {
+    if (!isSimklConnected(state) || state.retryAt > now || episodes.length === 0) return state;
+    const key = uploadKey(episodes);
+    if (key === state.lastUploadKey) return state;
+    try {
+        await request(transport, state, "POST", "/sync/history", buildHistoryUpload(episodes), now);
+        return { ...state, lastUploadKey: key, lastError: "", retryAt: 0 };
+    } catch (error) {
+        return {
+            ...state,
+            lastError: error instanceof Error ? error.message : "Simkl request failed.",
+            retryAt: error instanceof SimklError ? error.retryAt : 0
+        };
+    }
+}
+
+export function uploadKey(episodes: SimklUploadEpisode[]): string {
+    return episodes
+        .map((episode) => `${episode.malId ?? episode.imdbId ?? ""}:${episode.season}:${episode.episode}`)
+        .sort()
+        .join(",");
 }
 
 export async function syncSimklHistory(

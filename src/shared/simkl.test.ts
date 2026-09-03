@@ -8,12 +8,14 @@ import {
     parseSimklExternalLinkRequest,
     parseSimklState,
     parseSimklHistory,
+    buildHistoryUpload,
     parseSimklWatchedCours,
     parseSimklWatchedPatches,
     pollSimklPin,
     requestSimklPin,
     simklScrobble,
-    syncSimklHistory
+    syncSimklHistory,
+    uploadSimklHistory
 } from "./simkl";
 
 const movie = {
@@ -81,7 +83,7 @@ function ok(data: unknown): TraktResponse {
 
 test("parses stored state defensively", () => {
     const empty = {
-        clientId: "", accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: ""
+        clientId: "", accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: ""
     };
     expect(parseSimklState(null)).toEqual(empty);
     expect(parseSimklState("nonsense")).toEqual(empty);
@@ -92,14 +94,16 @@ test("parses stored state defensively", () => {
         lastError: "boom",
         retryAt: 42,
         lastActivityAt: "2026-08-13T10:00:00Z",
-        lastSyncAt: "2026-08-13T10:05:00Z"
+        lastSyncAt: "2026-08-13T10:05:00Z",
+        lastUploadKey: "tt9:1:1"
     })).toEqual({
         clientId: "abc",
         accessToken: "tok",
         lastError: "boom",
         retryAt: 42,
         lastActivityAt: "2026-08-13T10:00:00Z",
-        lastSyncAt: "2026-08-13T10:05:00Z"
+        lastSyncAt: "2026-08-13T10:05:00Z",
+        lastUploadKey: "tt9:1:1"
     });
 });
 
@@ -596,4 +600,62 @@ test("keeps why a request was rejected but never its url", async () => {
     // A failed pull has not synced, and the cursor must not advance past what was never read.
     expect(result.state.lastSyncAt).toBe("");
     expect(result.state.lastActivityAt).toBe("");
+});
+
+test("groups uploaded episodes by show and season", () => {
+    expect(buildHistoryUpload([
+        { malId: "53998", title: "Bleach", season: 1, episode: 2 },
+        { malId: "53998", title: "Bleach", season: 1, episode: 1 },
+        { malId: "56784", title: "Bleach", season: 1, episode: 6 },
+        { imdbId: "tt0182576", title: "Family Guy", season: 2, episode: 5 },
+        { imdbId: "tt0182576", title: "Family Guy", season: 1, episode: 1 },
+        // Neither id means nothing Simkl could match.
+        { title: "Nowhere", season: 1, episode: 1 }
+    ])).toEqual({
+        shows: [
+            {
+                title: "Bleach",
+                ids: { mal: "53998" },
+                seasons: [{ number: 1, episodes: [{ number: 1 }, { number: 2 }] }]
+            },
+            {
+                title: "Bleach",
+                ids: { mal: "56784" },
+                seasons: [{ number: 1, episodes: [{ number: 6 }] }]
+            },
+            {
+                title: "Family Guy",
+                ids: { imdb: "tt0182576" },
+                seasons: [
+                    { number: 1, episodes: [{ number: 1 }] },
+                    { number: 2, episodes: [{ number: 5 }] }
+                ]
+            }
+        ]
+    });
+});
+
+test("uploads a set once and records it", async () => {
+    const { calls, transport } = recorder([ok(null)]);
+    const episodes = [{ malId: "53998", title: "Bleach", season: 1, episode: 1 }];
+
+    const state = await uploadSimklHistory(transport, connected, episodes);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("POST");
+    expect(calls[0].url).toBe("https://api.simkl.com/sync/history");
+    expect(state.lastUploadKey).toBe("53998:1:1");
+
+    // The same set again is not worth a request; a different one is.
+    expect(await uploadSimklHistory(transport, state, episodes)).toBe(state);
+    expect(calls).toHaveLength(1);
+    await uploadSimklHistory(transport, state, [
+        ...episodes,
+        { malId: "56784", title: "Bleach", season: 1, episode: 6 }
+    ]);
+    expect(calls).toHaveLength(2);
+
+    // Nothing to send, and a disconnected account, both stay quiet.
+    await uploadSimklHistory(transport, connected, []);
+    await uploadSimklHistory(transport, { ...connected, accessToken: "" }, episodes);
+    expect(calls).toHaveLength(2);
 });

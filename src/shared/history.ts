@@ -133,6 +133,20 @@ export function addSimklWatchedEpisodes(
     return next;
 }
 
+/**
+ * Episodes watched locally that Simkl has never been told about. Scrobbling only covers what
+ * was played while connected, so anything watched before that stays invisible to other devices
+ * until it is sent once.
+ */
+export function pendingSimklUploads(state: EpisodeWatchState): WatchedShow[] {
+    const next = parseEpisodeWatchState(state);
+    return next.local.flatMap((show) => {
+        const known = next.simkl.find((item) => item.id === show.id)?.episodes ?? [];
+        const episodes = show.episodes.filter((episode) => !known.includes(episode));
+        return episodes.length > 0 ? [{ id: show.id, episodes }] : [];
+    });
+}
+
 export function clearSimklWatched(state: EpisodeWatchState): EpisodeWatchState {
     return { ...parseEpisodeWatchState(state), simkl: [], simklCours: [] };
 }

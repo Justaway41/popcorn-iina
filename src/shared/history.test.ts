@@ -13,6 +13,7 @@ import {
     mergeSimklCours,
     markEpisodeWatched,
     parseEpisodeWatchState,
+    pendingSimklUploads,
     parseWatchHistory,
     recordPlayback,
     removeHistoryEntry
@@ -323,6 +324,25 @@ test("adds Simkl episodes without dropping the cours a pull left out", () => {
         cour("56784", [6, 7])
     ]);
     expect(clearSimklWatched(held).simklCours).toEqual([]);
+});
+
+test("offers only the locally watched episodes Simkl has not been told about", () => {
+    const state = parseEpisodeWatchState({
+        local: [
+            { id: "tt14986406", episodes: ["1:1", "2:1", "3:6"] },
+            { id: "tt9", episodes: ["1:1"] }
+        ],
+        simkl: [
+            { id: "tt14986406", episodes: ["1:1"] },
+            { id: "tt9", episodes: ["1:1"] }
+        ]
+    });
+    expect(pendingSimklUploads(state)).toEqual([
+        { id: "tt14986406", episodes: ["2:1", "3:6"] }
+    ]);
+    // Nothing local means nothing to send, whatever Simkl holds.
+    expect(pendingSimklUploads(parseEpisodeWatchState({ simkl: [{ id: "tt9", episodes: ["1:1"] }] })))
+        .toEqual([]);
 });
 
 test("checks exact local, Simkl, and legacy episode marks", () => {

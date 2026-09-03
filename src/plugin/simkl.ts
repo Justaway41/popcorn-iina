@@ -4,7 +4,9 @@ import {
     parseSimklState,
     simklScrobble,
     syncSimklHistory,
+    uploadSimklHistory,
     type AnimeCourEpisode,
+    type SimklUploadEpisode,
     type SimklScrobbleAction,
     type SimklState
 } from "../shared/simkl";
@@ -17,6 +19,8 @@ export interface IinaSimklClient {
         progress: number,
         cour: AnimeCourEpisode | null
     ): Promise<void>;
+    /** Sends locally watched episodes Simkl has never been told about. */
+    upload(episodes: SimklUploadEpisode[]): Promise<void>;
     sync(history: WatchHistoryEntry[]): Promise<{
         history: WatchHistoryEntry[];
         watchedPatches: WatchedShowPatch[];
@@ -56,6 +60,17 @@ export function createIinaSimklClient(
                         state,
                         await simklScrobble(transport, state, action, context, progress, cour)
                     );
+                } catch (error) {
+                    onError(error);
+                }
+            });
+        },
+        upload(episodes) {
+            return enqueue(async () => {
+                const state = read();
+                if (!state.accessToken) return;
+                try {
+                    saveIfCurrent(state, await uploadSimklHistory(transport, state, episodes));
                 } catch (error) {
                     onError(error);
                 }

@@ -14,6 +14,9 @@ import {
     addSimklWatchedEpisodes,
     applySimklWatchedPatches,
     mergeSimklCours,
+    pendingSimklUploads,
+    type EpisodeWatchState,
+    type WatchHistoryEntry,
     getHistoryEntry,
     historyContextId,
     markEpisodeWatched,
@@ -53,7 +56,7 @@ import { keepAwakeTick, startKeepAwake, stopKeepAwake } from "./sleep";
 import { createAnimeChainClient } from "./anime";
 import { createJsonClient, safeJson } from "./http";
 import { createIinaSimklClient } from "./simkl";
-import type { AnimeCourEpisode } from "../shared/simkl";
+import type { AnimeCourEpisode, SimklUploadEpisode } from "../shared/simkl";
 import { createIinaTraktClient } from "./trakt";
 import {
     findChapterCredits,
@@ -766,6 +769,33 @@ async function loadAddonManifest(addon: StremioAddon): Promise<AddonManifest> {
  * configuration on load, on every search, and on every stream list, which is a good enough
  * heartbeat once it is rate limited.
  */
+/**
+ * Sends what was watched before Simkl was connected. Scrobbling only ever covers episodes
+ * played since, so without this a device that has watched a show for months tells another
+ * device nothing about it. Runs after the pull so it only sends what Simkl is still missing,
+ * and `uploadSimklHistory` skips a set it has already sent.
+ */
+async function uploadLocalHistory(
+    state: EpisodeWatchState,
+    history: WatchHistoryEntry[]
+): Promise<void> {
+    const pending = pendingSimklUploads(state);
+    if (pending.length === 0) return;
+    const episodes: SimklUploadEpisode[] = [];
+    for (const show of pending) {
+        const media = history.find((entry) => entry.media.imdbId === show.id)?.media;
+        if (!media) continue;
+        const coordinates = show.episodes.flatMap((episode) => {
+            const [season, number] = episode.split(":").map(Number);
+            return Number.isInteger(season) && Number.isInteger(number)
+                ? [{ season, episode: number }]
+                : [];
+        });
+        episodes.push(...await anime.uploadEpisodes(media, coordinates));
+    }
+    await simkl.upload(episodes);
+}
+
 function syncRemoteHistory(): void {
     const now = Date.now();
     if (historySyncInFlight || now - lastHistorySyncAt < HISTORY_SYNC_INTERVAL_MS) return;
@@ -805,6 +835,7 @@ function syncRemoteHistory(): void {
                 history,
                 episodeWatchState: watchedState
             });
+            await uploadLocalHistory(watchedState, history);
         })
         .catch((error) => logDebug(`History sync failed: ${formatError(error)}`))
         .then(() => {

@@ -1,6 +1,6 @@
 import type { WatchedCour, WatchedShowPatch, WatchHistoryEntry } from "../shared/history";
 import type { PlaybackContext } from "../shared/messages";
-import type { AnimeCourEpisode } from "../shared/simkl";
+import type { AnimeCourEpisode, SimklUploadEpisode } from "../shared/simkl";
 import type { Episode, Media } from "../shared/stremio";
 import { buildCinemetaSeriesUrl, isImdbId, parseMediaMetadata } from "../shared/stremio";
 import { createJsonClient, safeJson } from "./http";
@@ -124,6 +124,14 @@ export interface AnimeChainClient {
         cours: WatchedCour[],
         history: WatchHistoryEntry[]
     ): Promise<PlacedCours>;
+    /**
+     * Locally watched episodes in the numbering Simkl accepts for their show: a cour's MAL id
+     * for anime, the IMDb id otherwise. Episodes the chain cannot place are left out.
+     */
+    uploadEpisodes(
+        media: Media,
+        coordinates: Coordinate[]
+    ): Promise<SimklUploadEpisode[]>;
 }
 
 export function createAnimeChainClient(http: IINA.API.HTTP): AnimeChainClient {
@@ -131,6 +139,16 @@ export function createAnimeChainClient(http: IINA.API.HTTP): AnimeChainClient {
     const chains = new Map<string, AnimeEntry[] | null>();
     const kitsuMalIds = new Map<string, string>();
     const series = new Map<string, SeriesDetails | null>();
+    // Shared by placement and uploads so one sync cannot burst through AniList's rate limit
+    // between them. Reset when a pass begins; a title already looked up never spends from it.
+    let lookupBudget = MAX_CHAIN_LOOKUPS_PER_PASS;
+
+    async function loadChainWithinBudget(name: string): Promise<AnimeEntry[] | null> {
+        if (chains.has(name)) return chains.get(name) ?? null;
+        if (lookupBudget <= 0) return null;
+        lookupBudget -= 1;
+        return loadChain(name);
+    }
 
     /**
      * The franchise's cours in airing order, found from the title. One request finds the first
@@ -224,20 +242,12 @@ export function createAnimeChainClient(http: IINA.API.HTTP): AnimeChainClient {
         const wanted = new Set(cours.map((cour) => cour.malId));
         const owners = new Map<string, ShowCandidate>();
         const seen = new Set<string>();
-        let lookups = 0;
         for (const candidate of candidates) {
             if (wanted.size === 0) break;
             if (!isImdbId(candidate.imdbId) || seen.has(candidate.imdbId)) continue;
             seen.add(candidate.imdbId);
-            // AniList allows 90 requests a minute and a chain costs one per cour, so a history
-            // full of titles it has never heard of is walked over several syncs rather than in
-            // one burst. Titles already looked up cost nothing and do not count.
-            if (!chains.has(candidate.name)) {
-                if (lookups >= MAX_CHAIN_LOOKUPS_PER_PASS) continue;
-                lookups += 1;
-            }
             try {
-                const chain = await loadChain(candidate.name);
+                const chain = await loadChainWithinBudget(candidate.name);
                 if (!chain) continue;
                 for (const cour of chain) {
                     if (!wanted.has(cour.malId) || owners.has(cour.malId)) continue;
@@ -270,6 +280,7 @@ export function createAnimeChainClient(http: IINA.API.HTTP): AnimeChainClient {
 
         async placeWatchedCours(cours, history) {
             const placed: PlacedCours = { patches: [], entries: [] };
+            lookupBudget = MAX_CHAIN_LOOKUPS_PER_PASS;
             if (cours.length === 0) return placed;
             const owners = await indexCandidates(cours, history);
             const shows = new Map<string, ShowPlacement>();
@@ -336,6 +347,38 @@ export function createAnimeChainClient(http: IINA.API.HTTP): AnimeChainClient {
                 }
             }
             return placed;
+        },
+
+        async uploadEpisodes(media, coordinates) {
+            if (!isImdbId(media.imdbId) || coordinates.length === 0) return [];
+            try {
+                // Without a chain the show cannot be confirmed as anime, and sending it under
+                // its IMDb id would be the very mistake this module exists to avoid. A title
+                // the budget did not reach is left for the next sync instead.
+                if (!chains.has(media.name) && lookupBudget <= 0) return [];
+                const chain = await loadChainWithinBudget(media.name);
+                if (!chain) {
+                    return coordinates.map((at) => ({
+                        imdbId: media.imdbId,
+                        title: media.name,
+                        season: at.season,
+                        episode: at.episode
+                    }));
+                }
+                const details = await loadSeries(showCandidate(media));
+                if (!details) return [];
+                return coordinates.flatMap((at) => {
+                    const cour = mapAnimeEpisode(details.seasons, chain, at.season, at.episode);
+                    // Simkl numbers every cour from one, so a placed episode is always season
+                    // one of the show its MAL id names.
+                    return cour
+                        ? [{ malId: cour.malId, title: media.name, season: 1, episode: cour.episode }]
+                        : [];
+                });
+            } catch (error) {
+                logDebug("Popcorn: Anime upload mapping failed:", formatError(error));
+                return [];
+            }
         }
     };
 }

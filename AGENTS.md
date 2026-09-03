@@ -31,7 +31,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.0`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.1`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -278,6 +278,19 @@ marks and the Continue Watching card - comes from cour state stored raw in
 which has no way to look up a chain. Placement merges rather than replaces: one Popcorn show spans
 several Simkl cours and an incremental pull carries only the ones that changed. A show's own entry
 does return its full episode list even under `date_from`, so `shows[]` patches still replace.
+
+Scrobbling only ever tells Simkl about episodes played while it was connected, so
+`uploadLocalHistory` sends the rest once: `pendingSimklUploads` diffs `episodeWatchState.local`
+against what Simkl has, `uploadEpisodes` converts the difference into the numbering that
+addresses each show, and `POST /sync/history` takes it. Without this a device that watched a
+show for months tells another device nothing about it - a live account had Bleach seasons 2 and
+3 locally and Simkl held only season 1. `lastUploadKey` stops the same set being resent every
+five minutes. A show whose chain has not been looked up yet is left for a later sync rather than
+sent under its IMDb id, which is the mistake this module exists to avoid.
+
+Chain lookups share one budget across placement and uploads within a sync, reset at the start of
+`placeWatchedCours`. Without it a first run walks the whole history at once and AniList answers
+429, which used to throw straight out of the upload path and abandon the sync.
 
 Placement tries the sequel chain of a show already in the local history first, then the chain of
 the cour's own IMDb id. When neither can place it, one fallback remains: `ownsImdb` records

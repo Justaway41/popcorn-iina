@@ -1217,7 +1217,8 @@
       lastError: getString4(item?.lastError),
       retryAt: getNonNegativeNumber(item?.retryAt),
       lastActivityAt: getString4(item?.lastActivityAt),
-      lastSyncAt: getString4(item?.lastSyncAt)
+      lastSyncAt: getString4(item?.lastSyncAt),
+      lastUploadKey: getString4(item?.lastUploadKey)
     };
   }
   function isSimklConnected(state) {
@@ -1593,9 +1594,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.0",
+    version: "2.6.1",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 17,
+    ghVersion: 18,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1951,7 +1952,7 @@
       return;
     simklRevision += 1;
     simklPin.hidden = true;
-    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
+    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "" });
     clearStoredSimklWatched();
   }
   async function connectSimkl() {
@@ -1964,7 +1965,7 @@
     const revision = ++simklRevision;
     simklConnect.disabled = true;
     try {
-      saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
+      saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "" });
       await clearStoredSimklWatched();
       if (revision !== simklRevision)
         return;
@@ -2000,7 +2001,7 @@
     simklRevision += 1;
     simklPin.hidden = true;
     setSimklError("");
-    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "" });
+    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "" });
     clearStoredSimklWatched();
   }
   function saveTraktCredentials() {
