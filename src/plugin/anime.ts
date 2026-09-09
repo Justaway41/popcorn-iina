@@ -1,6 +1,6 @@
 import type { WatchedCour, WatchedShowPatch, WatchHistoryEntry } from "../shared/history";
 import type { PlaybackContext } from "../shared/messages";
-import type { AnimeCourEpisode, SimklUploadEpisode } from "../shared/simkl";
+import type { AnimeCourEpisode, SimklCourChain, SimklUploadEpisode } from "../shared/simkl";
 import type { Episode, Media } from "../shared/stremio";
 import { buildCinemetaSeriesUrl, isImdbId, parseMediaMetadata } from "../shared/stremio";
 import { createJsonClient, safeJson } from "./http";
@@ -73,6 +73,23 @@ function parseStoredChains(value: unknown): Record<string, AnimeEntry[]> {
     return chains;
 }
 
+/**
+ * Whether a chain describes the same run of episodes the seasons do. Simkl's relations follow
+ * the franchise, which can open with material Cinemeta gives no season at all - Slime's chain
+ * starts with a five-episode entry against a twenty-four episode first season - and laying that
+ * against the seasons shifts every later cour. A chain that does not start where season one
+ * starts is not the one being drawn.
+ */
+function alignsWithSeasons(chain: AnimeEntry[], seasons: SeasonCounts): boolean {
+    const first = chain[0]?.episodes;
+    const season = seasons[0]?.count;
+    if (first == null || season === undefined) return false;
+    return Math.abs(first - season) <= SEASON_ALIGNMENT_TOLERANCE;
+}
+
+/** One cour give or take a special still describes that season. */
+const SEASON_ALIGNMENT_TOLERANCE = 2;
+
 function showCandidate(media: Media): ShowCandidate {
     return { imdbId: media.imdbId, name: media.name, preview: media };
 }
@@ -142,7 +159,8 @@ export interface AnimeChainClient {
      */
     placeWatchedCours(
         cours: WatchedCour[],
-        history: WatchHistoryEntry[]
+        history: WatchHistoryEntry[],
+        simklChains: SimklCourChain[]
     ): Promise<PlacedCours>;
     /**
      * Locally watched episodes in the numbering Simkl accepts for their show: a cour's MAL id
@@ -327,18 +345,51 @@ export function createAnimeChainClient(
             );
         },
 
-        async placeWatchedCours(cours, history) {
+        async placeWatchedCours(cours, history, simklChains) {
             const placed: PlacedCours = { patches: [], entries: [] };
             lookupBudget = MAX_CHAIN_LOOKUPS_PER_PASS;
             if (cours.length === 0) return placed;
-            const owners = await indexCandidates(cours, history);
+            // Simkl's own relations name the airing order without a second service having to be
+            // reachable, so they are taken first and AniList only fills what they left.
+            const fromSimkl = new Map<string, { candidate: ShowCandidate; chain: AnimeEntry[] }>();
+            for (const simklChain of simklChains) {
+                const chain = simklChain.entries.map((entry, index) => ({
+                    anilistId: index,
+                    malId: entry.malId,
+                    episodes: entry.episodes
+                }));
+                const named = history.find((entry) => entry.media.imdbId === simklChain.imdbId);
+                const candidate = named
+                    ? showCandidate(named.media)
+                    : {
+                        imdbId: simklChain.imdbId,
+                        name: "",
+                        preview: {
+                            id: simklChain.imdbId,
+                            imdbId: simklChain.imdbId,
+                            type: "series" as const,
+                            name: "",
+                            releaseInfo: "",
+                            poster: ""
+                        }
+                    };
+                for (const entry of chain) fromSimkl.set(entry.malId, { candidate, chain });
+            }
+            const remaining = cours.filter((cour) => !fromSimkl.has(cour.malId));
+            const owners = await indexCandidates(remaining, history);
             const shows = new Map<string, ShowPlacement>();
             for (const cour of cours) {
                 try {
-                    const owner = owners.get(cour.malId);
+                    const known = fromSimkl.get(cour.malId);
+                    const owner = known?.candidate ?? owners.get(cour.malId);
                     let candidate = owner ?? null;
                     let details = owner ? await loadSeries(owner) : null;
-                    let chain = owner && details ? await loadChain(owner.name) : null;
+                    let chain = null;
+                    if (owner && details) {
+                        chain = known && alignsWithSeasons(known.chain, details.seasons)
+                            ? known.chain
+                            : await loadChain(owner.name);
+                    }
                     // A cour AniList cannot chain, or whose show Cinemeta has never seen because
                     // the season was given its own IMDb entry, still has one honest reading:
                     // when the id leads back to this cour, the cour is the show's first and its

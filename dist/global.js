@@ -3,9 +3,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.3",
+    version: "2.6.4",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 20,
+    ghVersion: 21,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"

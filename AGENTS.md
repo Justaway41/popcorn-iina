@@ -31,7 +31,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.3`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.4`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -295,7 +295,16 @@ another device knowing an episode was reached but not where in it. `lastResumeKe
 replayed. `mergeWatchHistory` already keeps only the newest unfinished episode per title across
 both devices, so the positions sent back are either new to Simkl or a repeat of what it reported.
 
-Resolved chains are persisted in the `animeChains` preference and reloaded at startup. AniList is
+Placement takes the airing order from Simkl's own `relations` first: each anime record carries
+`prequel`/`sequel` links with `is_direct`, so `resolveSimklCourChains` climbs to the first cour and
+walks back down without a second service having to be reachable. Simkl is where the watched data
+came from, so it is always available when there is anything to place - AniList is not, and answered
+403 for a day. A Simkl chain is used only when it starts where Cinemeta's first season does
+(`alignsWithSeasons`): the relations follow the whole franchise and can open with material Cinemeta
+gives no season, as Slime's does with a five-episode entry against a twenty-four episode season,
+which would shift every later cour. AniList fills whatever the relations did not.
+
+Resolved AniList chains are persisted in the `animeChains` preference and reloaded at startup. AniList is
 the single point of failure for every anime feature here and it answered `403 The AniList API has
 been temporarily disabled` for a day in September 2026; without the cache a restart during an
 outage places nothing, which is exactly how a second device came up showing none of the seasons it

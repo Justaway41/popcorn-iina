@@ -16,7 +16,8 @@ import {
     simklScrobble,
     syncSimklHistory,
     uploadSimklHistory,
-    uploadSimklResume
+    uploadSimklResume,
+    resolveSimklCourChains
 } from "./simkl";
 
 const movie = {
@@ -755,4 +756,59 @@ test("keeps sending resume positions after one is refused", async () => {
     // The refusal is reported and the set stays unsent, so the next sync tries again.
     expect(state.lastError).toBe("Simkl request failed: locked");
     expect(state.lastResumeKey).toBe("");
+});
+
+test("reads a franchise's airing order from Simkl's own relations", async () => {
+    const node = (
+        simkl: number,
+        mal: string,
+        total: number,
+        imdb: string,
+        prequel: number | null,
+        sequel: number | null
+    ) => ok({
+        title: `cour ${mal}`,
+        total_episodes: total,
+        ids: { simkl, mal, imdb },
+        relations: [
+            // Indirect links point at side stories and must not be followed.
+            { relation_type: "side story", is_direct: false, ids: { simkl: 999 } },
+            ...(prequel === null ? [] : [{ relation_type: "prequel", is_direct: true, ids: { simkl: prequel } }]),
+            ...(sequel === null ? [] : [{ relation_type: "sequel", is_direct: true, ids: { simkl: sequel } }])
+        ]
+    });
+    const responses: Record<string, ReturnType<typeof node>> = {
+        "1300367": node(1300367, "41467", 13, "tt14986406", null, 2056522),
+        "2056522": node(2056522, "53998", 13, "tt0434665", 1300367, 2268810),
+        "2268810": node(2268810, "56784", 14, "tt0434665", 2056522, null)
+    };
+    const calls: string[] = [];
+    const transport = async (_method: string, url: string) => {
+        const id = /\/anime\/(\d+)/.exec(url)?.[1] ?? "";
+        calls.push(id);
+        return responses[id];
+    };
+
+    // Only the cour whose own id does not lead back to it needs placing; the walk starts there,
+    // climbs to the first cour, and comes back down in airing order.
+    const chains = await resolveSimklCourChains(
+        transport as never,
+        connected,
+        [
+            { malId: "41467", imdbId: "tt14986406", name: "", year: "", ownsImdb: true, simklId: "1300367", episodes: [1], lastWatchedAt: "" },
+            { malId: "56784", imdbId: "tt0434665", name: "", year: "", ownsImdb: false, simklId: "2268810", episodes: [6], lastWatchedAt: "" }
+        ],
+        new Map()
+    );
+
+    expect(chains).toEqual([{
+        imdbId: "tt14986406",
+        entries: [
+            { malId: "41467", episodes: 13 },
+            { malId: "53998", episodes: 13 },
+            { malId: "56784", episodes: 14 }
+        ]
+    }]);
+    // Each cour is read once, however many times it appears in the walk.
+    expect(new Set(calls).size).toBe(calls.length);
 });

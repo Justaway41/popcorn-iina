@@ -1174,9 +1174,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.3",
+    version: "2.6.4",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 20,
+    ghVersion: 21,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1635,6 +1635,14 @@
     }
     return chains;
   }
+  function alignsWithSeasons(chain, seasons) {
+    const first = chain[0]?.episodes;
+    const season = seasons[0]?.count;
+    if (first == null || season === undefined)
+      return false;
+    return Math.abs(first - season) <= SEASON_ALIGNMENT_TOLERANCE;
+  }
+  var SEASON_ALIGNMENT_TOLERANCE = 2;
   function showCandidate(media) {
     return { imdbId: media.imdbId, name: media.name, preview: media };
   }
@@ -1795,19 +1803,47 @@
           return null;
         return mapAnimeEpisode(seasonEpisodeCounts(context.episodes), chain, episode.season, episode.episode);
       },
-      async placeWatchedCours(cours, history) {
+      async placeWatchedCours(cours, history, simklChains) {
         const placed = { patches: [], entries: [] };
         lookupBudget = MAX_CHAIN_LOOKUPS_PER_PASS;
         if (cours.length === 0)
           return placed;
-        const owners = await indexCandidates(cours, history);
+        const fromSimkl = new Map;
+        for (const simklChain of simklChains) {
+          const chain = simklChain.entries.map((entry, index) => ({
+            anilistId: index,
+            malId: entry.malId,
+            episodes: entry.episodes
+          }));
+          const named = history.find((entry) => entry.media.imdbId === simklChain.imdbId);
+          const candidate = named ? showCandidate(named.media) : {
+            imdbId: simklChain.imdbId,
+            name: "",
+            preview: {
+              id: simklChain.imdbId,
+              imdbId: simklChain.imdbId,
+              type: "series",
+              name: "",
+              releaseInfo: "",
+              poster: ""
+            }
+          };
+          for (const entry of chain)
+            fromSimkl.set(entry.malId, { candidate, chain });
+        }
+        const remaining = cours.filter((cour) => !fromSimkl.has(cour.malId));
+        const owners = await indexCandidates(remaining, history);
         const shows = new Map;
         for (const cour of cours) {
           try {
-            const owner = owners.get(cour.malId);
+            const known = fromSimkl.get(cour.malId);
+            const owner = known?.candidate ?? owners.get(cour.malId);
             let candidate = owner ?? null;
             let details = owner ? await loadSeries(owner) : null;
-            let chain = owner && details ? await loadChain(owner.name) : null;
+            let chain = null;
+            if (owner && details) {
+              chain = known && alignsWithSeasons(known.chain, details.seasons) ? known.chain : await loadChain(owner.name);
+            }
             if (!details && cour.ownsImdb && isImdbId(cour.imdbId)) {
               candidate = courCandidate(cour);
               details = await loadSeries(candidate) ?? { media: candidate.preview, episodes: [], seasons: [] };
@@ -2029,6 +2065,84 @@
     };
   }
   var MAX_RESUME_UPLOADS = 8;
+  async function resolveSimklCourChains(transport, state, cours, nodes, now = Date.now()) {
+    if (!isSimklConnected(state) || state.retryAt > now)
+      return [];
+    const read = async (simklId) => {
+      const cached = nodes.get(simklId);
+      if (cached !== undefined)
+        return cached;
+      let node = null;
+      try {
+        node = parseAnimeNode(await request2(transport, state, "GET", `/anime/${encodeURIComponent(simklId)}?extended=full`, null, now));
+      } catch {
+        return null;
+      }
+      nodes.set(simklId, node);
+      return node;
+    };
+    const chains = [];
+    const roots = new Set;
+    for (const cour of cours) {
+      if (cour.ownsImdb || !cour.simklId)
+        continue;
+      let root = await read(cour.simklId);
+      if (!root)
+        continue;
+      for (let hop = 0;hop < MAX_COUR_HOPS && root.prequel; hop += 1) {
+        const previous = await read(root.prequel);
+        if (!previous || previous.simklId === root.simklId)
+          break;
+        root = previous;
+      }
+      if (!isImdbId(root.imdbId) || roots.has(root.simklId))
+        continue;
+      roots.add(root.simklId);
+      const entries = [{ malId: root.malId, episodes: root.episodes }];
+      let current = root;
+      for (let hop = 0;hop < MAX_COUR_HOPS && current.sequel; hop += 1) {
+        const next = await read(current.sequel);
+        if (!next || entries.some((entry) => entry.malId === next.malId))
+          break;
+        entries.push({ malId: next.malId, episodes: next.episodes });
+        current = next;
+      }
+      if (entries.length > 1)
+        chains.push({ imdbId: root.imdbId, entries });
+    }
+    return chains;
+  }
+  var MAX_COUR_HOPS = 16;
+  function parseAnimeNode(value) {
+    const item = getRecord4(value);
+    const ids = getRecord4(item?.ids);
+    const simklId = String(ids?.simkl ?? "");
+    const malId = getString4(ids?.mal);
+    if (!simklId || !malId)
+      return null;
+    const relations = Array.isArray(item?.relations) ? item.relations : [];
+    const direct = (type) => {
+      for (const value2 of relations) {
+        const relation = getRecord4(value2);
+        if (relation?.is_direct !== true)
+          continue;
+        if (getString4(relation.relation_type) !== type)
+          continue;
+        const id = String(getRecord4(relation.ids)?.simkl ?? "");
+        if (id)
+          return id;
+      }
+      return "";
+    };
+    return {
+      simklId,
+      malId,
+      imdbId: getString4(ids?.imdb),
+      episodes: getFiniteNumber(item?.total_episodes),
+      prequel: direct("prequel"),
+      sequel: direct("sequel")
+    };
+  }
   async function syncSimklHistory(transport, state, local, now = Date.now()) {
     if (!isSimklConnected(state) || state.retryAt > now) {
       return { state, history: local, watchedPatches: [], watchedCours: [] };
@@ -2454,6 +2568,7 @@
       preferences.sync();
       return true;
     };
+    const animeNodes = new Map;
     let pending = Promise.resolve();
     const enqueue = (operation) => {
       const result = pending.then(operation);
@@ -2494,6 +2609,19 @@
             saveIfCurrent(state, await uploadSimklResume(transport, state, points));
           } catch (error) {
             onError(error);
+          }
+        });
+      },
+      courChains(cours) {
+        return enqueue(async () => {
+          const state = read();
+          if (!state.accessToken)
+            return [];
+          try {
+            return await resolveSimklCourChains(transport, state, cours, animeNodes);
+          } catch (error) {
+            onError(error);
+            return [];
           }
         });
       },
@@ -3127,7 +3255,8 @@
       const latestHistory = parseWatchHistory(preferences.get("watchHistory"));
       const merged = mergeWatchHistory(latestHistory, synced.history);
       const stored = mergeSimklCours(applySimklWatchedPatches(parseEpisodeWatchState(preferences.get("episodeWatchState"), merged), synced.watchedPatches), synced.watchedCours);
-      const placed = await anime.placeWatchedCours(stored.simklCours, merged);
+      const simklChains = await simkl.courChains(stored.simklCours);
+      const placed = await anime.placeWatchedCours(stored.simklCours, merged, simklChains);
       const watchedState = addSimklWatchedEpisodes(stored, placed.patches);
       const history = mergeWatchHistory(merged, placed.entries);
       watchHistory = history;

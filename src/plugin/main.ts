@@ -857,7 +857,8 @@ function syncRemoteHistory(): void {
             // the cours that changed, and a show's other cours must keep their marks. Anime
             // reaches the history only through here, since the IMDb id Simkl files a later cour
             // under names the series it continues rather than the one Popcorn shows.
-            const placed = await anime.placeWatchedCours(stored.simklCours, merged);
+            const simklChains = await simkl.courChains(stored.simklCours);
+            const placed = await anime.placeWatchedCours(stored.simklCours, merged, simklChains);
             const watchedState = addSimklWatchedEpisodes(stored, placed.patches);
             const history = mergeWatchHistory(merged, placed.entries);
             watchHistory = history;

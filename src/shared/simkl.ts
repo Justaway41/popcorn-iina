@@ -360,6 +360,117 @@ export async function uploadSimklResume(
 /** Enough to carry what is actually being watched without a burst of scrobble operations. */
 const MAX_RESUME_UPLOADS = 8;
 
+/**
+ * A franchise's cours in airing order, taken from Simkl's own `relations`. AniList is the other
+ * source for this and it is a single point of failure - it answered 403 for a day - while Simkl
+ * is the service the watched data came from in the first place, so it is always reachable when
+ * there is anything to place. `imdbId` is the root cour's, which is the show Popcorn displays.
+ */
+export interface SimklCourChain {
+    imdbId: string;
+    entries: Array<{ malId: string; episodes: number | null }>;
+}
+
+export interface SimklAnimeNode {
+    simklId: string;
+    malId: string;
+    imdbId: string;
+    episodes: number | null;
+    prequel: string;
+    sequel: string;
+}
+
+/**
+ * Builds a chain for every cour whose own id does not lead back to it, which are the ones that
+ * cannot be placed without knowing where they sit. Walks direct prequels to the first cour, then
+ * direct sequels forward, so the result is ordered the way the seasons aired.
+ */
+export async function resolveSimklCourChains(
+    transport: HttpTransport,
+    state: SimklState,
+    cours: WatchedCour[],
+    nodes: Map<string, SimklAnimeNode | null>,
+    now = Date.now()
+): Promise<SimklCourChain[]> {
+    if (!isSimklConnected(state) || state.retryAt > now) return [];
+    const read = async (simklId: string): Promise<SimklAnimeNode | null> => {
+        const cached = nodes.get(simklId);
+        if (cached !== undefined) return cached;
+        let node: SimklAnimeNode | null = null;
+        try {
+            node = parseAnimeNode(await request(
+                transport,
+                state,
+                "GET",
+                `/anime/${encodeURIComponent(simklId)}?extended=full`,
+                null,
+                now
+            ));
+        } catch {
+            // A chain that cannot be read is left to the other source rather than half built.
+            return null;
+        }
+        nodes.set(simklId, node);
+        return node;
+    };
+
+    const chains: SimklCourChain[] = [];
+    const roots = new Set<string>();
+    for (const cour of cours) {
+        if (cour.ownsImdb || !cour.simklId) continue;
+        let root = await read(cour.simklId);
+        if (!root) continue;
+        for (let hop = 0; hop < MAX_COUR_HOPS && root.prequel; hop += 1) {
+            const previous = await read(root.prequel);
+            if (!previous || previous.simklId === root.simklId) break;
+            root = previous;
+        }
+        if (!isImdbId(root.imdbId) || roots.has(root.simklId)) continue;
+        roots.add(root.simklId);
+
+        const entries = [{ malId: root.malId, episodes: root.episodes }];
+        let current = root;
+        for (let hop = 0; hop < MAX_COUR_HOPS && current.sequel; hop += 1) {
+            const next = await read(current.sequel);
+            if (!next || entries.some((entry) => entry.malId === next.malId)) break;
+            entries.push({ malId: next.malId, episodes: next.episodes });
+            current = next;
+        }
+        if (entries.length > 1) chains.push({ imdbId: root.imdbId, entries });
+    }
+    return chains;
+}
+
+/** Long franchises exist, but past this a chain is more likely a loop in the relation data. */
+const MAX_COUR_HOPS = 16;
+
+function parseAnimeNode(value: unknown): SimklAnimeNode | null {
+    const item = getRecord(value);
+    const ids = getRecord(item?.ids);
+    const simklId = String(ids?.simkl ?? "");
+    const malId = getString(ids?.mal);
+    if (!simklId || !malId) return null;
+    const relations = Array.isArray(item?.relations) ? item.relations : [];
+    const direct = (type: string): string => {
+        for (const value of relations) {
+            const relation = getRecord(value);
+            if (relation?.is_direct !== true) continue;
+            if (getString(relation.relation_type) !== type) continue;
+            const id = String(getRecord(relation.ids)?.simkl ?? "");
+            if (id) return id;
+        }
+        return "";
+    };
+    return {
+        simklId,
+        malId,
+        imdbId: getString(ids?.imdb),
+        episodes: getFiniteNumber(item?.total_episodes),
+        prequel: direct("prequel"),
+        sequel: direct("sequel")
+    };
+}
+
 export async function syncSimklHistory(
     transport: HttpTransport,
     state: SimklState,

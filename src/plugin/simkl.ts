@@ -5,8 +5,11 @@ import {
     simklScrobble,
     syncSimklHistory,
     uploadSimklHistory,
+    resolveSimklCourChains,
     uploadSimklResume,
     type AnimeCourEpisode,
+    type SimklAnimeNode,
+    type SimklCourChain,
     type SimklResumePoint,
     type SimklUploadEpisode,
     type SimklScrobbleAction,
@@ -25,6 +28,8 @@ export interface IinaSimklClient {
     upload(episodes: SimklUploadEpisode[]): Promise<void>;
     /** Sends where playback was left for anything still unfinished. */
     uploadResume(points: SimklResumePoint[]): Promise<void>;
+    /** The airing order of each franchise a cour belongs to, read from Simkl's own relations. */
+    courChains(cours: WatchedCour[]): Promise<SimklCourChain[]>;
     sync(history: WatchHistoryEntry[]): Promise<{
         history: WatchHistoryEntry[];
         watchedPatches: WatchedShowPatch[];
@@ -47,6 +52,8 @@ export function createIinaSimklClient(
         preferences.sync();
         return true;
     };
+    // Franchise shapes do not change within a session.
+    const animeNodes = new Map<string, SimklAnimeNode | null>();
     let pending = Promise.resolve();
     const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
         const result = pending.then(operation);
@@ -88,6 +95,18 @@ export function createIinaSimklClient(
                     saveIfCurrent(state, await uploadSimklResume(transport, state, points));
                 } catch (error) {
                     onError(error);
+                }
+            });
+        },
+        courChains(cours) {
+            return enqueue(async () => {
+                const state = read();
+                if (!state.accessToken) return [];
+                try {
+                    return await resolveSimklCourChains(transport, state, cours, animeNodes);
+                } catch (error) {
+                    onError(error);
+                    return [];
                 }
             });
         },
