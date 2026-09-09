@@ -213,6 +213,24 @@ function readString(value: unknown): string {
     return typeof value === "string" ? value : "";
 }
 
+/**
+ * Finishes entries the watched marks say are done. A device stops recording progress at the
+ * moment playback ends, so an episode watched to the end elsewhere can still be held here as
+ * part-watched - and being the most recent, it takes the one unfinished slot a title gets and
+ * hides where another device actually is.
+ */
+export function applyWatchedMarks(
+    entries: WatchHistoryEntry[],
+    state: EpisodeWatchState
+): WatchHistoryEntry[] {
+    return entries.map((entry) => {
+        if (entry.watched || !entry.episode) return entry;
+        return isEpisodeWatched(state, entry.media, entry.episode)
+            ? { ...entry, watched: true, progress: 100 }
+            : entry;
+    });
+}
+
 export function isEpisodeWatched(
     state: EpisodeWatchState,
     media: Media,

@@ -2,9 +2,12 @@ import { expect, test } from "bun:test";
 
 import type { PlaybackContext } from "./messages";
 
+import { mergeWatchHistory } from "./trakt";
+
 import {
     addSimklWatchedEpisodes,
     applySimklWatchedPatches,
+    applyWatchedMarks,
     clearSimklWatched,
     getHistoryEntry,
     getResumePercent,
@@ -324,6 +327,36 @@ test("adds Simkl episodes without dropping the cours a pull left out", () => {
         cour("56784", [6, 7])
     ]);
     expect(clearSimklWatched(held).simklCours).toEqual([]);
+});
+
+test("a locally part-watched episode another device finished stops holding the slot", () => {
+    // The exact shape that hid a second device's position: episode 7 left at 54% here and
+    // finished elsewhere, while that device is 41% into episode 12.
+    const state = parseEpisodeWatchState({ simkl: [{ id: "tt9", episodes: ["1:7"] }] });
+    const entry = (number: number, watched: boolean, progress: number, at: string) => ({
+        id: `tt9:1:${number}`,
+        media: show,
+        episode: episode(1, number),
+        lastPlayedAt: at,
+        watched,
+        progress
+    });
+    const local = entry(7, false, 54, "2026-09-09T05:24:35Z");
+    const remote = entry(12, false, 41, "2026-09-05T16:10:52Z");
+
+    // Untouched, the newer unfinished episode wins the title's single slot and hides the other.
+    expect(mergeWatchHistory([local], [remote]).map((item) => item.id))
+        .toEqual(["tt9:1:7"]);
+
+    const applied = applyWatchedMarks([local], state);
+    expect(applied[0].watched).toBe(true);
+    expect(applied[0].progress).toBe(100);
+    // Both survive now: the finished episode no longer displaces the other device's position.
+    expect(mergeWatchHistory(applied, [remote]).map((item) => item.id).sort())
+        .toEqual(["tt9:1:12", "tt9:1:7"]);
+
+    // An episode nothing has marked keeps its progress.
+    expect(applyWatchedMarks([remote], state)[0]).toBe(remote);
 });
 
 test("a cour carrying only a paused session keeps the episodes already known", () => {

@@ -31,7 +31,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.5`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.6`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -294,6 +294,12 @@ for every unfinished title. Watched marks and resume positions are separate chan
 another device knowing an episode was reached but not where in it. `lastResumeKey` stops it being
 replayed. `mergeWatchHistory` already keeps only the newest unfinished episode per title across
 both devices, so the positions sent back are either new to Simkl or a repeat of what it reported.
+
+`applyWatchedMarks` finishes history entries the marks say are done, before the merge that keeps
+one unfinished episode per title. A device stops recording progress the moment playback ends, so
+an episode watched to the end elsewhere stays here as part-watched, and being the most recent it
+took that slot and hid where the other device actually was - Bleach sat at episode 7 of 54% while
+the marks showed 11 watched and another device was 41% into episode 12.
 
 A cour merged into stored state keeps the episodes already known when the incoming one carries
 none. `/sync/all-items` lists the shows whose watched state changed, while `/sync/playback`

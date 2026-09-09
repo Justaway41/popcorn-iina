@@ -3,9 +3,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.5",
+    version: "2.6.6",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 22,
+    ghVersion: 23,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -375,6 +375,20 @@
   }
   function readString(value) {
     return typeof value === "string" ? value : "";
+  }
+  function applyWatchedMarks(entries, state) {
+    return entries.map((entry) => {
+      if (entry.watched || !entry.episode)
+        return entry;
+      return isEpisodeWatched(state, entry.media, entry.episode) ? { ...entry, watched: true, progress: 100 } : entry;
+    });
+  }
+  function isEpisodeWatched(state, media, episode, legacyHistory = []) {
+    const titleId = mediaTitleId(media);
+    const coordinate = episodeCoordinate(episode);
+    if ([...state.local, ...state.simkl].some((show) => show.id === titleId && show.episodes.includes(coordinate)))
+      return true;
+    return legacyHistory.some((entry) => entry.watched && entry.episode != null && historyTitleId(entry) === titleId && episodeCoordinate(entry.episode) === coordinate);
   }
   function recordPlayback(entries, context, percent, playedAt) {
     if (!Number.isFinite(percent) || percent < 5)

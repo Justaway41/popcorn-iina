@@ -12,6 +12,7 @@ import { MESSAGE_NAMES } from "../shared/messages";
 import { loadEnabledAddonStreams, parseAddonManifest, parseAddons } from "../shared/addons";
 import {
     addSimklWatchedEpisodes,
+    applyWatchedMarks,
     applySimklWatchedPatches,
     mergeSimklCours,
     getResumePercent,
@@ -860,7 +861,12 @@ function syncRemoteHistory(): void {
             const simklChains = await simkl.courChains(stored.simklCours);
             const placed = await anime.placeWatchedCours(stored.simklCours, merged, simklChains);
             const watchedState = addSimklWatchedEpisodes(stored, placed.patches);
-            const history = mergeWatchHistory(merged, placed.entries);
+            // Marks are applied before the merge so a locally part-watched episode that another
+            // device finished stops occupying the one unfinished slot its title gets.
+            const history = mergeWatchHistory(
+                applyWatchedMarks(merged, watchedState),
+                placed.entries
+            );
             watchHistory = history;
             episodeWatchState = watchedState;
             preferences.set("watchHistory", history);
