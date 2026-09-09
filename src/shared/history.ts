@@ -158,8 +158,16 @@ export function mergeSimklCours(
 ): EpisodeWatchState {
     const next = parseEpisodeWatchState(state);
     for (const cour of parseWatchedCours(cours)) {
+        const existing = next.simklCours.find((item) => item.malId === cour.malId);
         next.simklCours = next.simklCours.filter((item) => item.malId !== cour.malId);
-        next.simklCours.push(cour);
+        next.simklCours.push({
+            ...cour,
+            // A cour can arrive carrying only a paused session: an incremental pull lists the
+            // shows whose watched state changed, while a playback session is reported whether
+            // or not it did. Absence there is not "nothing watched", so the episodes already
+            // known are kept - overwriting them erased whole seasons that were never re-sent.
+            episodes: cour.episodes.length > 0 ? cour.episodes : existing?.episodes ?? []
+        });
     }
     return next;
 }

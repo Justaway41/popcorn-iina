@@ -40,6 +40,12 @@ export interface SimklState {
     lastUploadKey: string;
     /** What the last resume-position upload covered, so it is not replayed every sync. */
     lastResumeKey: string;
+    /**
+     * Whether the cours held locally have been rebuilt since paused-only pulls could erase
+     * them. Cleared state forces one full pull, because the episodes an incremental pull
+     * dropped are never sent again on their own.
+     */
+    repairedCours: boolean;
 }
 
 export interface SimklPin {
@@ -87,7 +93,8 @@ export function parseSimklState(value: unknown): SimklState {
         lastActivityAt: getString(item?.lastActivityAt),
         lastSyncAt: getString(item?.lastSyncAt),
         lastUploadKey: getString(item?.lastUploadKey),
-        lastResumeKey: getString(item?.lastResumeKey)
+        lastResumeKey: getString(item?.lastResumeKey),
+        repairedCours: item?.repairedCours === true
     };
 }
 
@@ -486,7 +493,7 @@ export async function syncSimklHistory(
         );
         const activityAt = getString(activities?.all);
         // Nothing changed since the last pull, so skip the expensive lists entirely.
-        if (activityAt && activityAt === state.lastActivityAt) {
+        if (activityAt && activityAt === state.lastActivityAt && state.repairedCours) {
             return {
                 state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
                 history: local,
@@ -496,16 +503,15 @@ export async function syncSimklHistory(
         }
 
         // Without a cursor this is the documented first full sync; after that it stays small.
-        const cursor = state.lastActivityAt
-            ? `?date_from=${encodeURIComponent(state.lastActivityAt)}`
-            : "";
+        // A state that has never been repaired pulls in full once: the episodes an incremental
+        // pull dropped are never re-sent on their own.
+        const from = state.repairedCours ? state.lastActivityAt : "";
+        const cursor = from ? `?date_from=${encodeURIComponent(from)}` : "";
         const query = [
             "extended=full_anime_seasons",
             "episode_watched_at=yes",
             "include_all_episodes=yes",
-            ...(state.lastActivityAt
-                ? [`date_from=${encodeURIComponent(state.lastActivityAt)}`]
-                : [])
+            ...(from ? [`date_from=${encodeURIComponent(from)}`] : [])
         ].join("&");
         const items = await request(transport, state, "GET", `/sync/all-items/?${query}`, null, now);
         const playback = await request(transport, state, "GET", `/sync/playback${cursor}`, null, now);
@@ -518,6 +524,7 @@ export async function syncSimklHistory(
                 ...state,
                 lastActivityAt: activityAt || state.lastActivityAt,
                 lastSyncAt: new Date(now).toISOString(),
+                repairedCours: true,
                 lastError: "",
                 retryAt: 0
             },

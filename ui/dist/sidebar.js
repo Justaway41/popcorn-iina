@@ -204,8 +204,12 @@
   function mergeSimklCours(state, cours) {
     const next = parseEpisodeWatchState(state);
     for (const cour of parseWatchedCours(cours)) {
+      const existing = next.simklCours.find((item) => item.malId === cour.malId);
       next.simklCours = next.simklCours.filter((item) => item.malId !== cour.malId);
-      next.simklCours.push(cour);
+      next.simklCours.push({
+        ...cour,
+        episodes: cour.episodes.length > 0 ? cour.episodes : existing?.episodes ?? []
+      });
     }
     return next;
   }
@@ -807,9 +811,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.4",
+    version: "2.6.5",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 21,
+    ghVersion: 22,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"

@@ -238,8 +238,12 @@
   function mergeSimklCours(state, cours) {
     const next = parseEpisodeWatchState(state);
     for (const cour of parseWatchedCours(cours)) {
+      const existing = next.simklCours.find((item) => item.malId === cour.malId);
       next.simklCours = next.simklCours.filter((item) => item.malId !== cour.malId);
-      next.simklCours.push(cour);
+      next.simklCours.push({
+        ...cour,
+        episodes: cour.episodes.length > 0 ? cour.episodes : existing?.episodes ?? []
+      });
     }
     return next;
   }
@@ -1219,7 +1223,8 @@
       lastActivityAt: getString4(item?.lastActivityAt),
       lastSyncAt: getString4(item?.lastSyncAt),
       lastUploadKey: getString4(item?.lastUploadKey),
-      lastResumeKey: getString4(item?.lastResumeKey)
+      lastResumeKey: getString4(item?.lastResumeKey),
+      repairedCours: item?.repairedCours === true
     };
   }
   function isSimklConnected(state) {
@@ -1273,7 +1278,7 @@
     try {
       const activities = getRecord4(await request2(transport, state, "GET", "/sync/activities", null, now));
       const activityAt = getString4(activities?.all);
-      if (activityAt && activityAt === state.lastActivityAt) {
+      if (activityAt && activityAt === state.lastActivityAt && state.repairedCours) {
         return {
           state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
           history: local,
@@ -1281,12 +1286,13 @@
           watchedCours: []
         };
       }
-      const cursor = state.lastActivityAt ? `?date_from=${encodeURIComponent(state.lastActivityAt)}` : "";
+      const from = state.repairedCours ? state.lastActivityAt : "";
+      const cursor = from ? `?date_from=${encodeURIComponent(from)}` : "";
       const query = [
         "extended=full_anime_seasons",
         "episode_watched_at=yes",
         "include_all_episodes=yes",
-        ...state.lastActivityAt ? [`date_from=${encodeURIComponent(state.lastActivityAt)}`] : []
+        ...from ? [`date_from=${encodeURIComponent(from)}`] : []
       ].join("&");
       const items = await request2(transport, state, "GET", `/sync/all-items/?${query}`, null, now);
       const playback = await request2(transport, state, "GET", `/sync/playback${cursor}`, null, now);
@@ -1297,6 +1303,7 @@
           ...state,
           lastActivityAt: activityAt || state.lastActivityAt,
           lastSyncAt: new Date(now).toISOString(),
+          repairedCours: true,
           lastError: "",
           retryAt: 0
         },
@@ -1620,9 +1627,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.4",
+    version: "2.6.5",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 21,
+    ghVersion: 22,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1979,7 +1986,7 @@
       return;
     simklRevision += 1;
     simklPin.hidden = true;
-    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "", lastResumeKey: "" });
+    saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "", lastResumeKey: "", repairedCours: true });
     clearStoredSimklWatched();
   }
   async function connectSimkl() {
@@ -1992,7 +1999,7 @@
     const revision = ++simklRevision;
     simklConnect.disabled = true;
     try {
-      saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "", lastResumeKey: "" });
+      saveSimkl({ clientId, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "", lastResumeKey: "", repairedCours: true });
       await clearStoredSimklWatched();
       if (revision !== simklRevision)
         return;
@@ -2028,7 +2035,7 @@
     simklRevision += 1;
     simklPin.hidden = true;
     setSimklError("");
-    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "", lastResumeKey: "" });
+    saveSimkl({ ...simkl, accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "", lastResumeKey: "", repairedCours: true });
     clearStoredSimklWatched();
   }
   function saveTraktCredentials() {

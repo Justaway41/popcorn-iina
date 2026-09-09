@@ -326,6 +326,31 @@ test("adds Simkl episodes without dropping the cours a pull left out", () => {
     expect(clearSimklWatched(held).simklCours).toEqual([]);
 });
 
+test("a cour carrying only a paused session keeps the episodes already known", () => {
+    // An incremental pull lists the shows whose watched state changed, while a playback session
+    // is reported whether or not it did. Treating that as "nothing watched" erased seasons that
+    // were never sent again.
+    const full = {
+        malId: "56784",
+        imdbId: "tt0434665",
+        name: "Bleach",
+        year: "2024",
+        ownsImdb: false,
+        simklId: "2268810",
+        episodes: [1, 2, 3, 4, 5, 6],
+        lastWatchedAt: "a"
+    };
+    const known = mergeSimklCours(parseEpisodeWatchState({}), [full]);
+    const pausedOnly = { ...full, episodes: [], paused: { episode: 12, at: "b", progress: 41 } };
+
+    const merged = mergeSimklCours(known, [pausedOnly]);
+    expect(merged.simklCours).toEqual([{ ...full, paused: { episode: 12, at: "b", progress: 41 } }]);
+
+    // A pull that does carry episodes still replaces them.
+    expect(mergeSimklCours(merged, [{ ...full, episodes: [1, 2] }]).simklCours[0].episodes)
+        .toEqual([1, 2]);
+});
+
 test("offers only the locally watched episodes Simkl has not been told about", () => {
     const state = parseEpisodeWatchState({
         local: [

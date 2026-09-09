@@ -31,7 +31,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.4`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.5`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -294,6 +294,13 @@ for every unfinished title. Watched marks and resume positions are separate chan
 another device knowing an episode was reached but not where in it. `lastResumeKey` stops it being
 replayed. `mergeWatchHistory` already keeps only the newest unfinished episode per title across
 both devices, so the positions sent back are either new to Simkl or a repeat of what it reported.
+
+A cour merged into stored state keeps the episodes already known when the incoming one carries
+none. `/sync/all-items` lists the shows whose watched state changed, while `/sync/playback`
+reports a paused session whether or not it did, so an incremental pull can deliver a cour that
+holds only a position. Reading that as "nothing watched" erased whole seasons that were never
+re-sent - a live account lost Bleach's third cour down to the six episodes an older pull had
+placed. `repairedCours` forces one full pull on state written before this was fixed.
 
 Placement takes the airing order from Simkl's own `relations` first: each anime record carries
 `prequel`/`sequel` links with `is_direct`, so `resolveSimklCourChains` climbs to the first cour and
