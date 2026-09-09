@@ -24,7 +24,7 @@ const ANILIST_SEQUEL_QUERY = "query ($id: Int) { Media(id: $id) { relations { ed
 /** Longer runs exist, but past this a chain is more likely a loop in the relation data. */
 const MAX_SEQUEL_HOPS = 12;
 /** New titles looked up per sync, so a first run cannot burst through AniList's rate limit. */
-const MAX_CHAIN_LOOKUPS_PER_PASS = 6;
+const MAX_CHAIN_LOOKUPS_PER_PASS = 10;
 
 type SeasonCounts = Array<{ season: number; count: number }>;
 type Coordinate = { season: number; episode: number };
@@ -51,6 +51,26 @@ interface ShowPlacement {
     episodes: Set<string>;
     watched?: { at: Coordinate; playedAt: string };
     paused?: { at: Coordinate; playedAt: string; progress: number };
+}
+
+function parseStoredChains(value: unknown): Record<string, AnimeEntry[]> {
+    const record = value && typeof value === "object" && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {};
+    const chains: Record<string, AnimeEntry[]> = {};
+    for (const [name, stored] of Object.entries(record)) {
+        if (!Array.isArray(stored)) continue;
+        const chain = stored.flatMap((item) => {
+            const entry = item && typeof item === "object" ? item as Record<string, unknown> : null;
+            const anilistId = typeof entry?.anilistId === "number" ? entry.anilistId : null;
+            const malId = typeof entry?.malId === "string" ? entry.malId : "";
+            if (anilistId === null || !malId) return [];
+            const episodes = typeof entry?.episodes === "number" ? entry.episodes : null;
+            return [{ anilistId, malId, episodes }];
+        });
+        if (chain.length > 0) chains[name] = chain;
+    }
+    return chains;
 }
 
 function showCandidate(media: Media): ShowCandidate {
@@ -134,9 +154,17 @@ export interface AnimeChainClient {
     ): Promise<SimklUploadEpisode[]>;
 }
 
-export function createAnimeChainClient(http: IINA.API.HTTP): AnimeChainClient {
+export function createAnimeChainClient(
+    http: IINA.API.HTTP,
+    preferences: IINA.API.Preferences
+): AnimeChainClient {
     const json = createJsonClient(http);
-    const chains = new Map<string, AnimeEntry[] | null>();
+    // Chains are franchise facts that only change when a new cour airs, and AniList is a single
+    // point of failure for every anime feature here - it answered 403 for a day in September
+    // 2026. Keeping them means a restart during an outage still places what it placed before.
+    const chains = new Map<string, AnimeEntry[] | null>(
+        Object.entries(parseStoredChains(preferences.get("animeChains")))
+    );
     const kitsuMalIds = new Map<string, string>();
     const series = new Map<string, SeriesDetails | null>();
     // Shared by placement and uploads so one sync cannot burst through AniList's rate limit
@@ -179,7 +207,17 @@ export function createAnimeChainClient(http: IINA.API.HTTP): AnimeChainClient {
             chain.push(next);
         }
         chains.set(name, chain);
+        saveChains();
         return chain;
+    }
+
+    function saveChains(): void {
+        const stored: Record<string, AnimeEntry[]> = {};
+        for (const [name, chain] of chains) {
+            // A missing chain is not stored: it may be nothing more than today's outage.
+            if (chain) stored[name] = chain;
+        }
+        preferences.set("animeChains", stored);
     }
 
     async function loadKitsuMalId(providerId: string): Promise<string> {
@@ -239,25 +277,36 @@ export function createAnimeChainClient(http: IINA.API.HTTP): AnimeChainClient {
             ...cours.flatMap((cour) => cour.imdbId ? [courCandidate(cour)] : [])
         ];
 
-        const wanted = new Set(cours.map((cour) => cour.malId));
         const owners = new Map<string, ShowCandidate>();
         const seen = new Set<string>();
-        for (const candidate of candidates) {
-            if (wanted.size === 0) break;
-            if (!isImdbId(candidate.imdbId) || seen.has(candidate.imdbId)) continue;
-            seen.add(candidate.imdbId);
-            try {
-                const chain = await loadChainWithinBudget(candidate.name);
-                if (!chain) continue;
-                for (const cour of chain) {
-                    if (!wanted.has(cour.malId) || owners.has(cour.malId)) continue;
-                    owners.set(cour.malId, candidate);
-                    wanted.delete(cour.malId);
+        const scan = async (wanted: Set<string>): Promise<void> => {
+            for (const candidate of candidates) {
+                if (wanted.size === 0) break;
+                if (!isImdbId(candidate.imdbId) || seen.has(candidate.imdbId)) continue;
+                seen.add(candidate.imdbId);
+                try {
+                    const chain = await loadChainWithinBudget(candidate.name);
+                    if (!chain) continue;
+                    for (const cour of chain) {
+                        if (owners.has(cour.malId)) continue;
+                        owners.set(cour.malId, candidate);
+                        wanted.delete(cour.malId);
+                    }
+                } catch (error) {
+                    logDebug("Popcorn: Anime chain lookup failed:", formatError(error));
                 }
-            } catch (error) {
-                logDebug("Popcorn: Anime chain lookup failed:", formatError(error));
             }
-        }
+        };
+
+        // A cour whose own id leads back to it can be read without a chain, so the budget goes
+        // first to the ones that cannot: a later cour is filed under the series it continues and
+        // is invisible until some show's chain claims it. Scanning for every cour at once spent
+        // the budget on titles that never needed one, and Bleach's second and third cours stayed
+        // unplaced behind them.
+        await scan(new Set(cours
+            .filter((cour) => !cour.ownsImdb || !isImdbId(cour.imdbId))
+            .map((cour) => cour.malId)));
+        await scan(new Set(cours.map((cour) => cour.malId).filter((malId) => !owners.has(malId))));
         return owners;
     }
 

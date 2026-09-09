@@ -1174,9 +1174,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.2",
+    version: "2.6.3",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 19,
+    ghVersion: 20,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1196,6 +1196,7 @@
       preferredSubtitle: "",
       watchHistory: [],
       episodeWatchState: { local: [], simkl: [], simklCours: [] },
+      animeChains: {},
       trakt: {},
       skipSegments: true,
       simkl: {}
@@ -1613,7 +1614,27 @@
   var ANILIST_ROOT_QUERY = "query ($search: String) { Page(perPage: 25) { media(search: $search, " + "type: ANIME, sort: SEARCH_MATCH) { id idMal format episodes startDate { year month } " + "synonyms title { romaji english } } } }";
   var ANILIST_SEQUEL_QUERY = "query ($id: Int) { Media(id: $id) { relations { edges { relationType " + "node { id idMal format episodes startDate { year month } } } } } }";
   var MAX_SEQUEL_HOPS = 12;
-  var MAX_CHAIN_LOOKUPS_PER_PASS = 6;
+  var MAX_CHAIN_LOOKUPS_PER_PASS = 10;
+  function parseStoredChains(value) {
+    const record2 = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    const chains = {};
+    for (const [name, stored] of Object.entries(record2)) {
+      if (!Array.isArray(stored))
+        continue;
+      const chain = stored.flatMap((item) => {
+        const entry = item && typeof item === "object" ? item : null;
+        const anilistId = typeof entry?.anilistId === "number" ? entry.anilistId : null;
+        const malId = typeof entry?.malId === "string" ? entry.malId : "";
+        if (anilistId === null || !malId)
+          return [];
+        const episodes = typeof entry?.episodes === "number" ? entry.episodes : null;
+        return [{ anilistId, malId, episodes }];
+      });
+      if (chain.length > 0)
+        chains[name] = chain;
+    }
+    return chains;
+  }
   function showCandidate(media) {
     return { imdbId: media.imdbId, name: media.name, preview: media };
   }
@@ -1656,9 +1677,9 @@
       progress
     };
   }
-  function createAnimeChainClient(http) {
+  function createAnimeChainClient(http, preferences) {
     const json = createJsonClient(http);
-    const chains = new Map;
+    const chains = new Map(Object.entries(parseStoredChains(preferences.get("animeChains"))));
     const kitsuMalIds = new Map;
     const series = new Map;
     let lookupBudget = MAX_CHAIN_LOOKUPS_PER_PASS;
@@ -1692,7 +1713,16 @@
         chain.push(next);
       }
       chains.set(name, chain);
+      saveChains();
       return chain;
+    }
+    function saveChains() {
+      const stored = {};
+      for (const [name, chain] of chains) {
+        if (chain)
+          stored[name] = chain;
+      }
+      preferences.set("animeChains", stored);
     }
     async function loadKitsuMalId(providerId) {
       const kitsuId = providerId.match(/^kitsu:(\d+)$/i)?.[1] || "";
@@ -1726,29 +1756,32 @@
         ...known.filter((candidate) => !named.has(candidate.imdbId)),
         ...cours.flatMap((cour) => cour.imdbId ? [courCandidate(cour)] : [])
       ];
-      const wanted = new Set(cours.map((cour) => cour.malId));
       const owners = new Map;
       const seen = new Set;
-      for (const candidate of candidates) {
-        if (wanted.size === 0)
-          break;
-        if (!isImdbId(candidate.imdbId) || seen.has(candidate.imdbId))
-          continue;
-        seen.add(candidate.imdbId);
-        try {
-          const chain = await loadChainWithinBudget(candidate.name);
-          if (!chain)
+      const scan = async (wanted) => {
+        for (const candidate of candidates) {
+          if (wanted.size === 0)
+            break;
+          if (!isImdbId(candidate.imdbId) || seen.has(candidate.imdbId))
             continue;
-          for (const cour of chain) {
-            if (!wanted.has(cour.malId) || owners.has(cour.malId))
+          seen.add(candidate.imdbId);
+          try {
+            const chain = await loadChainWithinBudget(candidate.name);
+            if (!chain)
               continue;
-            owners.set(cour.malId, candidate);
-            wanted.delete(cour.malId);
+            for (const cour of chain) {
+              if (owners.has(cour.malId))
+                continue;
+              owners.set(cour.malId, candidate);
+              wanted.delete(cour.malId);
+            }
+          } catch (error) {
+            logDebug("Popcorn: Anime chain lookup failed:", formatError(error));
           }
-        } catch (error) {
-          logDebug("Popcorn: Anime chain lookup failed:", formatError(error));
         }
-      }
+      };
+      await scan(new Set(cours.filter((cour) => !cour.ownsImdb || !isImdbId(cour.imdbId)).map((cour) => cour.malId)));
+      await scan(new Set(cours.map((cour) => cour.malId).filter((malId) => !owners.has(malId))));
       return owners;
     }
     return {
@@ -1979,19 +2012,23 @@
     const key = resumeKey(points);
     if (key === state.lastResumeKey)
       return state;
-    try {
-      for (const point of points) {
+    let failure = null;
+    for (const point of points.slice(0, MAX_RESUME_UPLOADS)) {
+      try {
         await request2(transport, state, "POST", "/scrobble/pause", buildSimklScrobblePayload(point.context, point.progress, point.cour), now);
+      } catch (error) {
+        failure = error;
       }
-      return { ...state, lastResumeKey: key, lastError: "", retryAt: 0 };
-    } catch (error) {
-      return {
-        ...state,
-        lastError: error instanceof Error ? error.message : "Simkl request failed.",
-        retryAt: error instanceof SimklError ? error.retryAt : 0
-      };
     }
+    if (!failure)
+      return { ...state, lastResumeKey: key, lastError: "", retryAt: 0 };
+    return {
+      ...state,
+      lastError: failure instanceof Error ? failure.message : "Simkl request failed.",
+      retryAt: failure instanceof SimklError ? failure.retryAt : 0
+    };
   }
+  var MAX_RESUME_UPLOADS = 8;
   async function syncSimklHistory(transport, state, local, now = Date.now()) {
     if (!isSimklConnected(state) || state.retryAt > now) {
       return { state, history: local, watchedPatches: [], watchedCours: [] };
@@ -2298,8 +2335,33 @@
     throw responseError2(response, now);
   }
   function transportError(error) {
-    const reason = (error instanceof Error ? error.message : String(error)).replace(/https?:\/\/\S*/gi, "").replace(/\s+/g, " ").trim();
+    const reason = describeRejection(error).replace(/https?:\/\/\S*/gi, "").replace(/\s+/g, " ").trim();
     return new Error(reason ? `Simkl request failed: ${reason}` : "Simkl request failed.");
+  }
+  function describeRejection(error) {
+    if (error instanceof Error)
+      return error.message;
+    if (typeof error === "string")
+      return error;
+    const record2 = getRecord4(error);
+    if (!record2)
+      return String(error);
+    const described = ["message", "error", "reason", "description", "localizedDescription"].map((key) => getString4(record2[key])).find((value) => value !== "");
+    const status = getFiniteNumber(record2.statusCode) ?? getFiniteNumber(record2.status);
+    const code = getString4(record2.code) || (getFiniteNumber(record2.code) ?? "");
+    const parts = [
+      described ?? "",
+      status === null ? "" : `status ${status}`,
+      code === "" ? "" : `code ${code}`
+    ].filter((part) => part !== "");
+    if (parts.length > 0)
+      return parts.join(", ");
+    try {
+      const json = JSON.stringify(error);
+      return json && json !== "{}" ? json.slice(0, 200) : "no reason given";
+    } catch {
+      return "no reason given";
+    }
   }
   function responseError2(response, now) {
     const retryAt = response.status === 429 ? now + (retryAfterMs2(response.headers) ?? DEFAULT_RETRY_MS2) : 0;
@@ -2491,7 +2553,7 @@
   // src/plugin/main.ts
   var { core, event, global, http, mpv, overlay, preferences, sidebar, utils } = iina;
   var json = createJsonClient(http);
-  var anime = createAnimeChainClient(http);
+  var anime = createAnimeChainClient(http, preferences);
   var trakt = createIinaTraktClient(http, preferences, (error) => {
     logDebug("Popcorn: Trakt request failed:", formatError(error));
   });
@@ -3020,7 +3082,7 @@
     addonManifests.set(addon.manifestUrl, manifest);
     return manifest;
   }
-  async function uploadLocalHistory(state, history) {
+  async function uploadLocalHistory(state, history, remote) {
     const pending = pendingSimklUploads(state);
     const episodes = [];
     for (const show of pending) {
@@ -3035,13 +3097,16 @@
     }
     if (episodes.length > 0)
       await simkl.upload(episodes);
-    await uploadLocalResume(history);
+    await uploadLocalResume(history, remote);
   }
-  async function uploadLocalResume(history) {
+  async function uploadLocalResume(history, remote) {
+    const known = new Set(remote.filter((entry) => !entry.watched).map((entry) => `${entry.id}:${Math.round(entry.progress ?? 0)}`));
     const points = [];
     for (const entry of history) {
       const progress = getResumePercent(entry.progress, entry.watched);
       if (progress === null || !isImdbId(entry.media.imdbId))
+        continue;
+      if (known.has(`${entry.id}:${Math.round(progress)}`))
         continue;
       const cour = entry.episode ? (await anime.uploadEpisodes(entry.media, [entry.episode])).flatMap((episode) => episode.malId ? [{ malId: episode.malId, episode: episode.episode }] : [])[0] ?? null : null;
       points.push({
@@ -3074,7 +3139,10 @@
         history,
         episodeWatchState: watchedState
       });
-      await uploadLocalHistory(watchedState, history);
+      await uploadLocalHistory(watchedState, history, [
+        ...synced.history,
+        ...placed.entries
+      ]);
     }).catch((error) => logDebug(`History sync failed: ${formatError(error)}`)).then(() => {
       historySyncInFlight = false;
     });

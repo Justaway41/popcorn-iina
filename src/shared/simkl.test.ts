@@ -53,7 +53,9 @@ const connected = {
     lastError: "",
     retryAt: 0,
     lastActivityAt: "",
-    lastSyncAt: ""
+    lastSyncAt: "",
+    lastUploadKey: "",
+    lastResumeKey: ""
 };
 
 interface Call {
@@ -700,4 +702,57 @@ test("sends each resume position once, addressed the way its show is", async () 
     // Moving on in the episode is new information.
     await uploadSimklResume(transport, state, [{ ...points[0], progress: 30 }, points[1]]);
     expect(calls).toHaveLength(4);
+});
+
+test("describes a rejection that is not an Error", async () => {
+    // IINA rejects with a plain object, and `String` on it reads "[object Object]", which was
+    // the whole diagnosis a user was shown.
+    const rejecting = (reason: unknown) => async () => { throw reason; };
+    const reasonOf = async (thrown: unknown) => {
+        const state = await simklScrobble(
+            rejecting(thrown) as never,
+            connected,
+            "start",
+            { media: movie, episodes: [] },
+            10
+        );
+        return state.lastError;
+    };
+
+    expect(await reasonOf({ message: "The request timed out." }))
+        .toBe("Simkl request failed: The request timed out.");
+    expect(await reasonOf({ statusCode: 502 })).toBe("Simkl request failed: status 502");
+    expect(await reasonOf({ error: "bad token", code: "auth" }))
+        .toBe("Simkl request failed: bad token, code auth");
+    expect(await reasonOf({ unexpected: 1 })).toBe('Simkl request failed: {"unexpected":1}');
+    expect(await reasonOf({})).toBe("Simkl request failed: no reason given");
+    expect(await reasonOf(new Error("boom"))).toBe("Simkl request failed: boom");
+    // A reason carrying a URL still must not leak the client id in a pin path.
+    expect(await reasonOf({ message: "failed for https://simkl.com/pin?client_id=secret" }))
+        .toBe("Simkl request failed: failed for");
+});
+
+test("keeps sending resume positions after one is refused", async () => {
+    let call = 0;
+    const transport = async () => {
+        call += 1;
+        if (call === 1) throw new Error("locked");
+        return ok(null);
+    };
+    const point = (id: string, progress: number) => ({
+        context: { media: { ...movie, imdbId: id, id }, episodes: [] },
+        progress,
+        cour: null
+    });
+
+    const state = await uploadSimklResume(transport as never, connected, [
+        point("tt0000001", 10),
+        point("tt0000002", 20),
+        point("tt0000003", 30)
+    ]);
+
+    expect(call).toBe(3);
+    // The refusal is reported and the set stays unsent, so the next sync tries again.
+    expect(state.lastError).toBe("Simkl request failed: locked");
+    expect(state.lastResumeKey).toBe("");
 });

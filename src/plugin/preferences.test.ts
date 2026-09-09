@@ -7,13 +7,15 @@ const info = await Bun.file(
 const preferenceWriters = await Promise.all([
     "../ui/preferences.ts",
     "./main.ts",
-    "./trakt.ts"
+    "./trakt.ts",
+    "./anime.ts"
 ].map((path) => Bun.file(new URL(path, import.meta.url)).text()));
 
 test("stores composite preferences as structured values for IINA's webview bridge", () => {
     expect(info.preferenceDefaults.addons).toEqual([]);
     expect(info.preferenceDefaults.watchHistory).toEqual([]);
     expect(info.preferenceDefaults.episodeWatchState).toEqual({ local: [], simkl: [], simklCours: [] });
+    expect(info.preferenceDefaults.animeChains).toEqual({});
     expect(info.preferenceDefaults.trakt).toEqual({});
     expect(preferenceWriters.join("\n")).not.toMatch(
         /preferences\.set\("(?:addons|watchHistory|trakt)", JSON\.stringify/
@@ -84,4 +86,12 @@ test("reads a language preference as trimmed text and nothing else", () => {
     expect(parseLanguagePreference(42)).toBe("");
     expect(parseLanguagePreference(undefined)).toBe("");
     expect(parseLanguagePreference(null)).toBe("");
+});
+
+test("keeps resolved anime chains across restarts", () => {
+    // AniList is the single point of failure for every anime feature here, and it has answered
+    // 403 for a whole day. A restart during an outage must still place what it placed before.
+    const source = preferenceWriters[3];
+    expect(source).toContain('preferences.get("animeChains")');
+    expect(source).toContain('preferences.set("animeChains"');
 });

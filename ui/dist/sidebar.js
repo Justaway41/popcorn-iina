@@ -807,9 +807,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.2",
+    version: "2.6.3",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 19,
+    ghVersion: 20,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -829,6 +829,7 @@
       preferredSubtitle: "",
       watchHistory: [],
       episodeWatchState: { local: [], simkl: [], simklCours: [] },
+      animeChains: {},
       trakt: {},
       skipSegments: true,
       simkl: {}

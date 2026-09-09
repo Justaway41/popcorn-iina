@@ -31,7 +31,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.2`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.3`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -294,6 +294,17 @@ for every unfinished title. Watched marks and resume positions are separate chan
 another device knowing an episode was reached but not where in it. `lastResumeKey` stops it being
 replayed. `mergeWatchHistory` already keeps only the newest unfinished episode per title across
 both devices, so the positions sent back are either new to Simkl or a repeat of what it reported.
+
+Resolved chains are persisted in the `animeChains` preference and reloaded at startup. AniList is
+the single point of failure for every anime feature here and it answered `403 The AniList API has
+been temporarily disabled` for a day in September 2026; without the cache a restart during an
+outage places nothing, which is exactly how a second device came up showing none of the seasons it
+had already been told about. Only resolved chains are stored - a missing one may be nothing more
+than that day's outage.
+
+Placement seeks chain owners for the cours that cannot fall back on `ownsImdb` first, then for the
+rest with whatever budget is left. Scanning for every cour at once never reached the break, so the
+budget went on titles that never needed a chain while the ones that did stayed unplaced.
 
 Chain lookups share one budget across placement and uploads within a sync, reset at the start of
 `placeWatchedCours`. Without it a first run walks the whole history at once and AniList answers

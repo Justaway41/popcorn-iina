@@ -1579,8 +1579,33 @@
     throw responseError2(response, now);
   }
   function transportError(error) {
-    const reason = (error instanceof Error ? error.message : String(error)).replace(/https?:\/\/\S*/gi, "").replace(/\s+/g, " ").trim();
+    const reason = describeRejection(error).replace(/https?:\/\/\S*/gi, "").replace(/\s+/g, " ").trim();
     return new Error(reason ? `Simkl request failed: ${reason}` : "Simkl request failed.");
+  }
+  function describeRejection(error) {
+    if (error instanceof Error)
+      return error.message;
+    if (typeof error === "string")
+      return error;
+    const record = getRecord4(error);
+    if (!record)
+      return String(error);
+    const described = ["message", "error", "reason", "description", "localizedDescription"].map((key) => getString4(record[key])).find((value) => value !== "");
+    const status = getFiniteNumber(record.statusCode) ?? getFiniteNumber(record.status);
+    const code = getString4(record.code) || (getFiniteNumber(record.code) ?? "");
+    const parts = [
+      described ?? "",
+      status === null ? "" : `status ${status}`,
+      code === "" ? "" : `code ${code}`
+    ].filter((part) => part !== "");
+    if (parts.length > 0)
+      return parts.join(", ");
+    try {
+      const json = JSON.stringify(error);
+      return json && json !== "{}" ? json.slice(0, 200) : "no reason given";
+    } catch {
+      return "no reason given";
+    }
   }
   function responseError2(response, now) {
     const retryAt = response.status === 429 ? now + (retryAfterMs2(response.headers) ?? DEFAULT_RETRY_MS2) : 0;
@@ -1595,9 +1620,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.2",
+    version: "2.6.3",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 19,
+    ghVersion: 20,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1617,6 +1642,7 @@
       preferredSubtitle: "",
       watchHistory: [],
       episodeWatchState: { local: [], simkl: [], simklCours: [] },
+      animeChains: {},
       trakt: {},
       skipSegments: true,
       simkl: {}

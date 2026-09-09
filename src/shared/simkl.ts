@@ -332,8 +332,11 @@ export async function uploadSimklResume(
     if (!isSimklConnected(state) || state.retryAt > now || points.length === 0) return state;
     const key = resumeKey(points);
     if (key === state.lastResumeKey) return state;
-    try {
-        for (const point of points) {
+    let failure: unknown = null;
+    // Simkl allows one scrobble operation per account at a time, so these go one after another
+    // and a single refusal is recorded rather than abandoning the positions behind it.
+    for (const point of points.slice(0, MAX_RESUME_UPLOADS)) {
+        try {
             await request(
                 transport,
                 state,
@@ -342,16 +345,20 @@ export async function uploadSimklResume(
                 buildSimklScrobblePayload(point.context, point.progress, point.cour),
                 now
             );
+        } catch (error) {
+            failure = error;
         }
-        return { ...state, lastResumeKey: key, lastError: "", retryAt: 0 };
-    } catch (error) {
-        return {
-            ...state,
-            lastError: error instanceof Error ? error.message : "Simkl request failed.",
-            retryAt: error instanceof SimklError ? error.retryAt : 0
-        };
     }
+    if (!failure) return { ...state, lastResumeKey: key, lastError: "", retryAt: 0 };
+    return {
+        ...state,
+        lastError: failure instanceof Error ? failure.message : "Simkl request failed.",
+        retryAt: failure instanceof SimklError ? failure.retryAt : 0
+    };
 }
+
+/** Enough to carry what is actually being watched without a burst of scrobble operations. */
+const MAX_RESUME_UPLOADS = 8;
 
 export async function syncSimklHistory(
     transport: HttpTransport,
@@ -759,11 +766,40 @@ async function request(
  * carries the client id in its query string.
  */
 function transportError(error: unknown): Error {
-    const reason = (error instanceof Error ? error.message : String(error))
+    const reason = describeRejection(error)
         .replace(/https?:\/\/\S*/gi, "")
         .replace(/\s+/g, " ")
         .trim();
     return new Error(reason ? `Simkl request failed: ${reason}` : "Simkl request failed.");
+}
+
+/**
+ * IINA rejects a failed request with a plain object, not an Error, and `String` turns that into
+ * "[object Object]" - which was the entire diagnosis a user got. Read the fields such an object
+ * actually carries, and fall back to its JSON rather than its type name.
+ */
+function describeRejection(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    if (typeof error === "string") return error;
+    const record = getRecord(error);
+    if (!record) return String(error);
+    const described = ["message", "error", "reason", "description", "localizedDescription"]
+        .map((key) => getString(record[key]))
+        .find((value) => value !== "");
+    const status = getFiniteNumber(record.statusCode) ?? getFiniteNumber(record.status);
+    const code = getString(record.code) || (getFiniteNumber(record.code) ?? "");
+    const parts = [
+        described ?? "",
+        status === null ? "" : `status ${status}`,
+        code === "" ? "" : `code ${code}`
+    ].filter((part) => part !== "");
+    if (parts.length > 0) return parts.join(", ");
+    try {
+        const json = JSON.stringify(error);
+        return json && json !== "{}" ? json.slice(0, 200) : "no reason given";
+    } catch {
+        return "no reason given";
+    }
 }
 
 function responseError(response: HttpResponse, now: number): SimklError {

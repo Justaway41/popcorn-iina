@@ -75,7 +75,7 @@ import { formatError, isHttpUrl, logDebug, sanitizeMediaTitle } from "./utils";
 
 const { core, event, global, http, mpv, overlay, preferences, sidebar, utils } = iina;
 const json = createJsonClient(http);
-const anime = createAnimeChainClient(http);
+const anime = createAnimeChainClient(http, preferences);
 const trakt = createIinaTraktClient(http, preferences, (error) => {
     logDebug("Popcorn: Trakt request failed:", formatError(error));
 });
@@ -778,7 +778,8 @@ async function loadAddonManifest(addon: StremioAddon): Promise<AddonManifest> {
  */
 async function uploadLocalHistory(
     state: EpisodeWatchState,
-    history: WatchHistoryEntry[]
+    history: WatchHistoryEntry[],
+    remote: WatchHistoryEntry[]
 ): Promise<void> {
     const pending = pendingSimklUploads(state);
     const episodes: SimklUploadEpisode[] = [];
@@ -794,19 +795,26 @@ async function uploadLocalHistory(
         episodes.push(...await anime.uploadEpisodes(media, coordinates));
     }
     if (episodes.length > 0) await simkl.upload(episodes);
-    await uploadLocalResume(history);
+    await uploadLocalResume(history, remote);
 }
 
 /**
- * Where playback was left, for anything still unfinished. `mergeWatchHistory` already keeps
- * only the newest unfinished episode per title across both devices, so sending those back is
- * either new information for Simkl or a repeat of what it just reported.
+ * Where playback was left, for anything still unfinished. Positions Simkl just reported are
+ * left alone: sending one back is at best a wasted scrobble, and at worst it overwrites a
+ * position another device has since moved past with the older one held here.
  */
-async function uploadLocalResume(history: WatchHistoryEntry[]): Promise<void> {
+async function uploadLocalResume(
+    history: WatchHistoryEntry[],
+    remote: WatchHistoryEntry[]
+): Promise<void> {
+    const known = new Set(remote
+        .filter((entry) => !entry.watched)
+        .map((entry) => `${entry.id}:${Math.round(entry.progress ?? 0)}`));
     const points: SimklResumePoint[] = [];
     for (const entry of history) {
         const progress = getResumePercent(entry.progress, entry.watched);
         if (progress === null || !isImdbId(entry.media.imdbId)) continue;
+        if (known.has(`${entry.id}:${Math.round(progress)}`)) continue;
         const cour = entry.episode
             ? (await anime.uploadEpisodes(entry.media, [entry.episode]))
                 .flatMap((episode) => episode.malId
@@ -861,7 +869,10 @@ function syncRemoteHistory(): void {
                 history,
                 episodeWatchState: watchedState
             });
-            await uploadLocalHistory(watchedState, history);
+            await uploadLocalHistory(watchedState, history, [
+                ...synced.history,
+                ...placed.entries
+            ]);
         })
         .catch((error) => logDebug(`History sync failed: ${formatError(error)}`))
         .then(() => {
