@@ -1,3 +1,4 @@
+import { POPCORN_PLAYER_LABEL, POPCORN_WINDOW_OPEN } from "./constants";
 import { applySplashIcon, formatError, getSplashUrl, logDebug } from "./utils";
 import { migrateStructuredPreferences } from "./preferences";
 
@@ -5,31 +6,29 @@ const { console, global, menu, preferences } = iina;
 
 migrateStructuredPreferences(preferences);
 applySplashIcon();
-let activePlayerId: number | string | null = null;
+// Only the id of a window this entry created can be addressed on IINA 1.4.4.
+let popcornPlayerId: number | null = null;
+// A window left over from a previous run is gone; never trust a flag it could not clear.
+preferences.set(POPCORN_WINDOW_OPEN, false);
 
-function playerIdsMatch(a: number | string, b: number | string): boolean {
-    return String(a).split("-")[0] === String(b).split("-")[0];
-}
-
-global.onMessage("playerReady", (_data, playerId) => {
-    if (playerId != null) activePlayerId = playerId;
-});
-
-global.onMessage("playerClosed", (_data, playerId) => {
-    if (playerId != null && activePlayerId !== null && playerIdsMatch(playerId, activePlayerId)) {
-        activePlayerId = null;
-    }
-});
-
+/**
+ * The global entry registers no message listeners. On IINA 1.4.4 under macOS 27 a
+ * `global.onMessage` callback here runs outside the context it was written in: it cannot see a
+ * function declared beside it, and when it declares the sender-id parameter the next garbage
+ * collection aborts IINA in `SymbolTable::destroy` about eleven seconds after launch. Posting to
+ * a window by its label is not delivered either. So this entry keeps the id `createPlayerInstance`
+ * returns, and the window reports whether it is still open through a shared preference.
+ */
 async function showPopcorn(): Promise<void> {
-    if (activePlayerId !== null) {
-        global.postMessage(activePlayerId, "showPopcornSidebar", {});
+    if (popcornPlayerId !== null && preferences.get(POPCORN_WINDOW_OPEN) === true) {
+        global.postMessage(popcornPlayerId, "showPopcornSidebar", {});
         return;
     }
-    activePlayerId = global.createPlayerInstance({
+    popcornPlayerId = global.createPlayerInstance({
         url: getSplashUrl(),
         enablePlugins: true,
-        disableUI: true
+        disableUI: true,
+        label: POPCORN_PLAYER_LABEL
     });
 }
 

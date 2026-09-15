@@ -43,6 +43,8 @@ import { mergeWatchHistory, type TraktScrobbleAction } from "../shared/trakt";
 import {
     HISTORY_SYNC_INTERVAL_MS,
     PLAYBACK_TICK_INTERVAL_MS,
+    POPCORN_PLAYER_LABEL,
+    POPCORN_WINDOW_OPEN,
     PROGRESS_SAVE_INTERVAL_MS,
     SHOW_SIDEBAR_DELAY_MS,
     SPLASH_URL_MARKER
@@ -887,6 +889,13 @@ function syncRemoteHistory(): void {
         });
 }
 
+/** Tells the global entry whether its window is open, without a message it cannot receive. */
+function markPopcornWindowOpen(open: boolean): void {
+    if (global.getLabel() !== POPCORN_PLAYER_LABEL) return;
+    preferences.set(POPCORN_WINDOW_OPEN, open);
+    preferences.sync();
+}
+
 prepareSplash();
 global.onMessage("showPopcornSidebar", toggleSidebar);
 
@@ -944,7 +953,7 @@ event.on("iina.window-loaded", () => {
         syncRemoteHistory();
     });
     windowReady = true;
-    global.postMessage("playerReady", {});
+    markPopcornWindowOpen(true);
     syncRemoteHistory();
     if (pendingShowSidebar) {
         pendingShowSidebar = false;
@@ -1011,7 +1020,7 @@ event.on("iina.window-will-close", () => {
     pendingResumePercent = null;
     isReplacingPlayback = false;
     reachedNaturalEof = false;
-    global.postMessage("playerClosed", {});
+    markPopcornWindowOpen(false);
 });
 
 logDebug("Popcorn: Main entry loaded");

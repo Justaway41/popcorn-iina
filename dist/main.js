@@ -1192,9 +1192,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.6",
+    version: "2.6.7",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 23,
+    ghVersion: 24,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1215,6 +1215,7 @@
       watchHistory: [],
       episodeWatchState: { local: [], simkl: [], simklCours: [] },
       animeChains: {},
+      popcornWindowOpen: false,
       trakt: {},
       skipSegments: true,
       simkl: {}
@@ -1250,6 +1251,8 @@
     `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin/assets/Popcorn`,
     `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin-dev/assets/Popcorn`
   ];
+  var POPCORN_PLAYER_LABEL = "popcorn";
+  var POPCORN_WINDOW_OPEN = "popcornWindowOpen";
 
   // src/plugin/playback.ts
   function shouldOfferNextEpisode(isReplacingPlayback, reachedNaturalEof) {
@@ -3297,6 +3300,12 @@
       historySyncInFlight = false;
     });
   }
+  function markPopcornWindowOpen(open) {
+    if (global.getLabel() !== POPCORN_PLAYER_LABEL)
+      return;
+    preferences.set(POPCORN_WINDOW_OPEN, open);
+    preferences.sync();
+  }
   prepareSplash();
   global.onMessage("showPopcornSidebar", toggleSidebar);
   event.on("iina.window-loaded", () => {
@@ -3339,7 +3348,7 @@
       syncRemoteHistory();
     });
     windowReady = true;
-    global.postMessage("playerReady", {});
+    markPopcornWindowOpen(true);
     syncRemoteHistory();
     if (pendingShowSidebar) {
       pendingShowSidebar = false;
@@ -3407,7 +3416,7 @@
     pendingResumePercent = null;
     isReplacingPlayback = false;
     reachedNaturalEof = false;
-    global.postMessage("playerClosed", {});
+    markPopcornWindowOpen(false);
   });
   logDebug("Popcorn: Main entry loaded");
 })();

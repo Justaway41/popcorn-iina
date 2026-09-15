@@ -31,7 +31,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.6`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.7`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -379,6 +379,17 @@ episodes while retaining its selected season and scroll position.
 - The preference webview exposes an asynchronous `window.iina.preferences` bridge, not the plugin runtime's full `iina` APIs.
 - The sidebar and overlay must be loaded after `iina.window-loaded`.
 - Plugin-created players are managed by the global API and are shut down when the plugin unloads.
+- The global entry registers no `global.onMessage` listeners. On IINA 1.4.4 under macOS 27.0 (26A428)
+  such a callback runs outside the context it was written in - it throws `ReferenceError` on a
+  function declared beside it - and when it declares the sender-id second parameter, the next
+  garbage collection aborts IINA in `JSC::SymbolTable::destroy` about eleven seconds after launch,
+  every time. Bisected in September 2026: `(data, playerId) => {}` with an empty body crashes,
+  `(data) => {}` does not, and copying the id or holding it on an object does not help. Posting to
+  a window by label is not delivered either; by id and to all players is. So `global.ts` keeps the
+  id `createPlayerInstance` returns, and the Popcorn window (created with
+  `label: POPCORN_PLAYER_LABEL`) reports whether it is open through the `popcornWindowOpen`
+  preference. Player-side listeners are unaffected but still take one parameter.
+  `global.test.ts` enforces all of this.
 - The root `Info.json`, entry bundles, preferences page, and declared assets must remain directly installable by IINA.
 
 ## Security and Privacy

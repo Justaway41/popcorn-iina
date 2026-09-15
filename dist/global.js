@@ -3,9 +3,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.6",
+    version: "2.6.7",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 23,
+    ghVersion: 24,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -26,6 +26,7 @@
       watchHistory: [],
       episodeWatchState: { local: [], simkl: [], simklCours: [] },
       animeChains: {},
+      popcornWindowOpen: false,
       trakt: {},
       skipSegments: true,
       simkl: {}
@@ -61,6 +62,8 @@
     `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin/assets/Popcorn`,
     `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin-dev/assets/Popcorn`
   ];
+  var POPCORN_PLAYER_LABEL = "popcorn";
+  var POPCORN_WINDOW_OPEN = "popcornWindowOpen";
 
   // src/plugin/utils.ts
   var { console } = iina;
@@ -1232,28 +1235,18 @@
   var { console: console2, global, menu, preferences } = iina;
   migrateStructuredPreferences(preferences);
   applySplashIcon();
-  var activePlayerId = null;
-  function playerIdsMatch(a, b) {
-    return String(a).split("-")[0] === String(b).split("-")[0];
-  }
-  global.onMessage("playerReady", (_data, playerId) => {
-    if (playerId != null)
-      activePlayerId = playerId;
-  });
-  global.onMessage("playerClosed", (_data, playerId) => {
-    if (playerId != null && activePlayerId !== null && playerIdsMatch(playerId, activePlayerId)) {
-      activePlayerId = null;
-    }
-  });
+  var popcornPlayerId = null;
+  preferences.set(POPCORN_WINDOW_OPEN, false);
   async function showPopcorn() {
-    if (activePlayerId !== null) {
-      global.postMessage(activePlayerId, "showPopcornSidebar", {});
+    if (popcornPlayerId !== null && preferences.get(POPCORN_WINDOW_OPEN) === true) {
+      global.postMessage(popcornPlayerId, "showPopcornSidebar", {});
       return;
     }
-    activePlayerId = global.createPlayerInstance({
+    popcornPlayerId = global.createPlayerInstance({
       url: getSplashUrl(),
       enablePlugins: true,
-      disableUI: true
+      disableUI: true,
+      label: POPCORN_PLAYER_LABEL
     });
   }
   menu.addItem(menu.item("Popcorn", () => {
