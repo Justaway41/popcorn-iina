@@ -41,12 +41,18 @@ export interface SimklState {
     /** What the last resume-position upload covered, so it is not replayed every sync. */
     lastResumeKey: string;
     /**
-     * Whether the cours held locally have been rebuilt since paused-only pulls could erase
-     * them. Cleared state forces one full pull, because the episodes an incremental pull
-     * dropped are never sent again on their own.
+     * Which repair of locally held state has run. A state below `FULL_PULL_VERSION` ignores its
+     * cursor and pulls everything once, because what an earlier fault dropped is never re-sent by
+     * an incremental pull. Raise the constant whenever a fix needs that.
      */
-    repairedCours: boolean;
+    fullPullVersion: number;
 }
+
+/**
+ * 1: an incremental pull could erase a cour's episodes (2.6.5).
+ * 2: the cursor was saved before the pulled episodes, so an interrupted sync skipped them (2.6.8).
+ */
+export const FULL_PULL_VERSION = 2;
 
 export interface SimklPin {
     userCode: string;
@@ -94,7 +100,7 @@ export function parseSimklState(value: unknown): SimklState {
         lastSyncAt: getString(item?.lastSyncAt),
         lastUploadKey: getString(item?.lastUploadKey),
         lastResumeKey: getString(item?.lastResumeKey),
-        repairedCours: item?.repairedCours === true
+        fullPullVersion: getFiniteNumber(item?.fullPullVersion) ?? (item?.repairedCours === true ? 1 : 0)
     };
 }
 
@@ -493,7 +499,7 @@ export async function syncSimklHistory(
         );
         const activityAt = getString(activities?.all);
         // Nothing changed since the last pull, so skip the expensive lists entirely.
-        if (activityAt && activityAt === state.lastActivityAt && state.repairedCours) {
+        if (activityAt && activityAt === state.lastActivityAt && state.fullPullVersion >= FULL_PULL_VERSION) {
             return {
                 state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
                 history: local,
@@ -505,7 +511,7 @@ export async function syncSimklHistory(
         // Without a cursor this is the documented first full sync; after that it stays small.
         // A state that has never been repaired pulls in full once: the episodes an incremental
         // pull dropped are never re-sent on their own.
-        const from = state.repairedCours ? state.lastActivityAt : "";
+        const from = state.fullPullVersion >= FULL_PULL_VERSION ? state.lastActivityAt : "";
         const cursor = from ? `?date_from=${encodeURIComponent(from)}` : "";
         const query = [
             "extended=full_anime_seasons",
@@ -524,7 +530,7 @@ export async function syncSimklHistory(
                 ...state,
                 lastActivityAt: activityAt || state.lastActivityAt,
                 lastSyncAt: new Date(now).toISOString(),
-                repairedCours: true,
+                fullPullVersion: FULL_PULL_VERSION,
                 lastError: "",
                 retryAt: 0
             },

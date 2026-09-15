@@ -1192,9 +1192,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.7",
+    version: "2.6.8",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 24,
+    ghVersion: 25,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1945,6 +1945,8 @@
   }
 
   // src/shared/simkl.ts
+  var FULL_PULL_VERSION = 2;
+
   class SimklError extends Error {
     status;
     retryAt;
@@ -1968,7 +1970,7 @@
       lastSyncAt: getString4(item?.lastSyncAt),
       lastUploadKey: getString4(item?.lastUploadKey),
       lastResumeKey: getString4(item?.lastResumeKey),
-      repairedCours: item?.repairedCours === true
+      fullPullVersion: getFiniteNumber(item?.fullPullVersion) ?? (item?.repairedCours === true ? 1 : 0)
     };
   }
   function isSimklConnected(state) {
@@ -2172,7 +2174,7 @@
     try {
       const activities = getRecord4(await request2(transport, state, "GET", "/sync/activities", null, now));
       const activityAt = getString4(activities?.all);
-      if (activityAt && activityAt === state.lastActivityAt && state.repairedCours) {
+      if (activityAt && activityAt === state.lastActivityAt && state.fullPullVersion >= FULL_PULL_VERSION) {
         return {
           state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
           history: local,
@@ -2180,7 +2182,7 @@
           watchedCours: []
         };
       }
-      const from = state.repairedCours ? state.lastActivityAt : "";
+      const from = state.fullPullVersion >= FULL_PULL_VERSION ? state.lastActivityAt : "";
       const cursor = from ? `?date_from=${encodeURIComponent(from)}` : "";
       const query = [
         "extended=full_anime_seasons",
@@ -2197,7 +2199,7 @@
           ...state,
           lastActivityAt: activityAt || state.lastActivityAt,
           lastSyncAt: new Date(now).toISOString(),
-          repairedCours: true,
+          fullPullVersion: FULL_PULL_VERSION,
           lastError: "",
           retryAt: 0
         },
@@ -2652,17 +2654,35 @@
       sync(history) {
         return enqueue(async () => {
           const state = read();
-          const empty = { history, watchedPatches: [], watchedCours: [] };
+          const empty = { history, watchedPatches: [], watchedCours: [], commit: () => {} };
           if (!state.accessToken)
             return empty;
           try {
             const result = await syncSimklHistory(transport, state, history);
-            if (!saveIfCurrent(state, result.state))
+            if (result.state.lastError || !result.state.accessToken) {
+              saveIfCurrent(state, result.state);
+              return empty;
+            }
+            if (!sameConnection2(read(), state))
               return empty;
             return {
               history: result.history,
               watchedPatches: result.watchedPatches,
-              watchedCours: result.watchedCours
+              watchedCours: result.watchedCours,
+              commit: () => {
+                const current = read();
+                if (!sameConnection2(current, state))
+                  return;
+                preferences.set("simkl", {
+                  ...current,
+                  lastActivityAt: result.state.lastActivityAt,
+                  lastSyncAt: result.state.lastSyncAt,
+                  fullPullVersion: result.state.fullPullVersion,
+                  lastError: "",
+                  retryAt: 0
+                });
+                preferences.sync();
+              }
             };
           } catch (error) {
             onError(error);
@@ -3288,6 +3308,7 @@
       preferences.set("watchHistory", history);
       preferences.set("episodeWatchState", watchedState);
       preferences.sync();
+      synced.commit();
       sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, {
         history,
         episodeWatchState: watchedState

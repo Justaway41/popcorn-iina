@@ -874,6 +874,8 @@ function syncRemoteHistory(): void {
             preferences.set("watchHistory", history);
             preferences.set("episodeWatchState", watchedState);
             preferences.sync();
+            // Only now that what was pulled is stored does the cursor move past it.
+            synced.commit();
             sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, {
                 history,
                 episodeWatchState: watchedState

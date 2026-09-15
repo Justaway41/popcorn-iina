@@ -31,7 +31,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.7`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.8`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -301,12 +301,23 @@ an episode watched to the end elsewhere stays here as part-watched, and being th
 took that slot and hid where the other device actually was - Bleach sat at episode 7 of 54% while
 the marks showed 11 watched and another device was 41% into episode 12.
 
+The Simkl cursor moves only after what a pull returned is stored. `IinaSimklClient.sync` hands
+back a `commit` that `syncRemoteHistory` calls after writing `watchHistory` and
+`episodeWatchState`; a failed pull still records its error at once. Saving the cursor inside the
+client, before the slower season placement, meant anything that stopped the sync in between -
+IINA crashing eleven seconds after launch on macOS 27 did exactly this - moved the cursor past
+changes that were never stored, and every later incremental pull asked for nothing. A live
+account lost Bleach season 3 episodes 12-14 and all of season 4 that way. `commit` re-reads the
+stored state and writes only the fields the pull owns, so a scrobble or upload saved meanwhile
+survives. `FULL_PULL_VERSION` makes older state pull everything once; raise it whenever a fix
+has to recover what an earlier fault dropped.
+
 A cour merged into stored state keeps the episodes already known when the incoming one carries
 none. `/sync/all-items` lists the shows whose watched state changed, while `/sync/playback`
 reports a paused session whether or not it did, so an incremental pull can deliver a cour that
 holds only a position. Reading that as "nothing watched" erased whole seasons that were never
 re-sent - a live account lost Bleach's third cour down to the six episodes an older pull had
-placed. `repairedCours` forces one full pull on state written before this was fixed.
+placed. `FULL_PULL_VERSION` 1 forced one full pull on state written before this was fixed.
 
 Placement takes the airing order from Simkl's own `relations` first: each anime record carries
 `prequel`/`sequel` links with `is_direct`, so `resolveSimklCourChains` climbs to the first cour and

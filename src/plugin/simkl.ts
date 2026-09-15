@@ -30,10 +30,16 @@ export interface IinaSimklClient {
     uploadResume(points: SimklResumePoint[]): Promise<void>;
     /** The airing order of each franchise a cour belongs to, read from Simkl's own relations. */
     courChains(cours: WatchedCour[]): Promise<SimklCourChain[]>;
+    /**
+     * Pulls what changed on Simkl. The cursor does not move until `commit` is called, which the
+     * caller does only after storing what came back: saved first, an interrupted sync skipped
+     * those changes for good, since an incremental pull never sends them again.
+     */
     sync(history: WatchHistoryEntry[]): Promise<{
         history: WatchHistoryEntry[];
         watchedPatches: WatchedShowPatch[];
         watchedCours: WatchedCour[];
+        commit(): void;
     }>;
 }
 
@@ -113,15 +119,35 @@ export function createIinaSimklClient(
         sync(history) {
             return enqueue(async () => {
                 const state = read();
-                const empty = { history, watchedPatches: [], watchedCours: [] };
+                const empty = { history, watchedPatches: [], watchedCours: [], commit: () => {} };
                 if (!state.accessToken) return empty;
                 try {
                     const result = await syncSimklHistory(transport, state, history);
-                    if (!saveIfCurrent(state, result.state)) return empty;
+                    // A failed pull records its error, retry window, or cleared token at once.
+                    if (result.state.lastError || !result.state.accessToken) {
+                        saveIfCurrent(state, result.state);
+                        return empty;
+                    }
+                    if (!sameConnection(read(), state)) return empty;
                     return {
                         history: result.history,
                         watchedPatches: result.watchedPatches,
-                        watchedCours: result.watchedCours
+                        watchedCours: result.watchedCours,
+                        commit: () => {
+                            // Re-read so a scrobble or upload saved meanwhile keeps its fields;
+                            // only what this pull owns is written.
+                            const current = read();
+                            if (!sameConnection(current, state)) return;
+                            preferences.set("simkl", {
+                                ...current,
+                                lastActivityAt: result.state.lastActivityAt,
+                                lastSyncAt: result.state.lastSyncAt,
+                                fullPullVersion: result.state.fullPullVersion,
+                                lastError: "",
+                                retryAt: 0
+                            });
+                            preferences.sync();
+                        }
                     };
                 } catch (error) {
                     onError(error);

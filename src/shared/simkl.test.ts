@@ -57,7 +57,7 @@ const connected = {
     lastSyncAt: "",
     lastUploadKey: "",
     lastResumeKey: "",
-    repairedCours: true
+    fullPullVersion: 2
 };
 
 interface Call {
@@ -89,7 +89,7 @@ function ok(data: unknown): TraktResponse {
 test("parses stored state defensively", () => {
     // Unknown state has never been repaired, which is what forces the one full pull.
     const empty = {
-        clientId: "", accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "", lastResumeKey: "", repairedCours: false
+        clientId: "", accessToken: "", lastError: "", retryAt: 0, lastActivityAt: "", lastSyncAt: "", lastUploadKey: "", lastResumeKey: "", fullPullVersion: 0
     };
     expect(parseSimklState(null)).toEqual(empty);
     expect(parseSimklState("nonsense")).toEqual(empty);
@@ -109,7 +109,7 @@ test("parses stored state defensively", () => {
         retryAt: 42,
         lastActivityAt: "2026-08-13T10:00:00Z",
         lastSyncAt: "2026-08-13T10:05:00Z",
-        lastUploadKey: "tt9:1:1", lastResumeKey: "tt9:1:2:40", repairedCours: true
+        lastUploadKey: "tt9:1:1", lastResumeKey: "tt9:1:2:40", fullPullVersion: 1
     });
 });
 
