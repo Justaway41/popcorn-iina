@@ -1,11 +1,10 @@
 import { POPCORN_PLAYER_LABEL, POPCORN_WINDOW_OPEN } from "./constants";
-import { applySplashIcon, formatError, getSplashUrl, logDebug } from "./utils";
+import { formatError, getSplashUrl, logDebug } from "./utils";
 import { migrateStructuredPreferences } from "./preferences";
 
 const { console, global, menu, preferences } = iina;
 
 migrateStructuredPreferences(preferences);
-applySplashIcon();
 // Only the id of a window this entry created can be addressed on IINA 1.4.4.
 let popcornPlayerId: number | null = null;
 // A window left over from a previous run is gone; never trust a flag it could not clear.

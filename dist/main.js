@@ -1192,9 +1192,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.8",
+    version: "2.6.9",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 25,
+    ghVersion: 26,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1283,20 +1283,6 @@
       }
     }
     return POPCORN_SPLASH_CANDIDATES[0];
-  }
-  function applySplashIcon() {
-    const splashPath = getSplashUrl();
-    const iconPath = splashPath.replace("/assets/Popcorn", "/ui/assets/popcorn-icon.png");
-    const lines = [
-      'use framework "AppKit"',
-      `set iconPath to (current application's NSString's stringWithString:"${iconPath}")'s stringByExpandingTildeInPath()`,
-      `set filePath to (current application's NSString's stringWithString:"${splashPath}")'s stringByExpandingTildeInPath()`,
-      "set img to current application's NSImage's alloc()'s initWithContentsOfFile:iconPath",
-      "current application's NSWorkspace's sharedWorkspace()'s setIcon:img forFile:filePath options:0"
-    ];
-    const args = ["-l", "AppleScript"];
-    lines.forEach((line) => args.push("-e", line));
-    iina.utils.exec("/usr/bin/osascript", args).catch((error) => logDebug("Popcorn: Icon setup failed:", error));
   }
   function isHttpUrl2(value) {
     const normalized = value.trim().toLowerCase();

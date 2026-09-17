@@ -13,21 +13,6 @@ export function getSplashUrl(): string {
     return POPCORN_SPLASH_CANDIDATES[0];
 }
 
-export function applySplashIcon(): void {
-    const splashPath = getSplashUrl();
-    const iconPath = splashPath.replace("/assets/Popcorn", "/ui/assets/popcorn-icon.png");
-    const lines = [
-        'use framework "AppKit"',
-        `set iconPath to (current application's NSString's stringWithString:"${iconPath}")'s stringByExpandingTildeInPath()`,
-        `set filePath to (current application's NSString's stringWithString:"${splashPath}")'s stringByExpandingTildeInPath()`,
-        "set img to current application's NSImage's alloc()'s initWithContentsOfFile:iconPath",
-        "current application's NSWorkspace's sharedWorkspace()'s setIcon:img forFile:filePath options:0"
-    ];
-    const args = ["-l", "AppleScript"];
-    lines.forEach((line) => args.push("-e", line));
-    iina.utils.exec("/usr/bin/osascript", args).catch((error) => logDebug("Popcorn: Icon setup failed:", error));
-}
-
 export function isHttpUrl(value: string): boolean {
     const normalized = value.trim().toLowerCase();
     return normalized.startsWith("https://") || normalized.startsWith("http://");

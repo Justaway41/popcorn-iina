@@ -31,7 +31,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.8`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.9`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -386,6 +386,7 @@ episodes while retaining its selected season and scroll position.
 
 - Global and player plugin instances have different APIs and lifecycles. `global.ts` owns menu/player creation; `main.ts` owns player APIs.
 - Do not add repeating JavaScript timers (`setInterval`) to plugin runtime entries. IINA 1.4.4 can retain the timer while unloading its weak plugin instance, causing a native crash when the callback calls an IINA API. Prefer IINA/mpv events.
+- Do not set the splash file icon at runtime. On macOS 27, `NSWorkspace.setIcon` through `osascript` faults inside IconServices and can take IINA down with it.
 - A short player-side `setTimeout` currently delays sidebar display by 300 ms. Do not expand timer usage without verifying uninstall behavior.
 - The preference webview exposes an asynchronous `window.iina.preferences` bridge, not the plugin runtime's full `iina` APIs.
 - The sidebar and overlay must be loaded after `iina.window-loaded`.

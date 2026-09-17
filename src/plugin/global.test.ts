@@ -1,6 +1,46 @@
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 
+test("loading the global entry does not execute external processes", async () => {
+    const executed: string[] = [];
+
+    (globalThis as { iina?: unknown }).iina = {
+        console,
+        file: {
+            exists() {
+                return true;
+            }
+        },
+        global: {
+            createPlayerInstance() {
+                return 1;
+            },
+            postMessage() {}
+        },
+        menu: {
+            addItem() {},
+            item() {
+                return {};
+            }
+        },
+        preferences: {
+            get() {},
+            set() {},
+            sync() {}
+        },
+        utils: {
+            exec(path: string) {
+                executed.push(path);
+                return Promise.resolve({ status: 0, stdout: "", stderr: "" });
+            }
+        }
+    };
+
+    await import("./global");
+
+    expect(executed).toEqual([]);
+});
+
 test("global entry avoids the missing undefined identifier", () => {
     const source = readFileSync(new URL("./global.ts", import.meta.url), "utf8");
     expect(source).not.toMatch(/\bundefined\b/);
