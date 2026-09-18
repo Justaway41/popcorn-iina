@@ -1,3 +1,4 @@
+import { describeRejection } from "../shared/errors";
 import { DEBUG_LOGS, POPCORN_SPLASH_CANDIDATES } from "./constants";
 
 const { console } = iina;
@@ -22,8 +23,9 @@ export function sanitizeMediaTitle(title: string): string {
     return String(title).replace(/[\n\r,=]/g, " ");
 }
 
+/** Every rejection this plugin logs, in words: IINA's are plain objects, not Errors. */
 export function formatError(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
+    return describeRejection(error);
 }
 
 export function logDebug(...args: unknown[]): void {

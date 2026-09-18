@@ -18,6 +18,7 @@ import {
     parseSkipSegments,
     parsePlayableStreams,
     parseSeriesEpisodes,
+    serialEpisodes,
     sortEpisodes,
     sortStreamsBySize,
     sortStreamsForPlayback,
@@ -396,6 +397,59 @@ test("skips unreleased episodes when finding the next episode", () => {
     ];
 
     expect(findNextEpisode(episodes, episodes[0], now)).toBeNull();
+});
+
+test("does not offer the current episode again when it is listed twice", () => {
+    // One IMDb id can answer with several ids for one episode, and an addon can repeat an id
+    // outright. Taking the row after a duplicate handed back what had only just finished.
+    const repeated = [
+        episode("tt1:1:1", 1, 1),
+        episode("tt1:1:1", 1, 1),
+        episode("tt1:1:2", 1, 2)
+    ];
+    expect(findNextEpisode(repeated, episode("tt1:1:1", 1, 1))?.id).toBe("tt1:1:2");
+
+    const aliased = [
+        episode("kitsu:1:1", 1, 1),
+        episode("tt1:1:1", 1, 1),
+        episode("tt1:1:2", 1, 2)
+    ];
+    expect(findNextEpisode(aliased, episode("tt1:1:1", 1, 1))?.id).toBe("tt1:1:2");
+    // The coordinate identifies the episode, so an id the list does not carry still resolves.
+    expect(findNextEpisode(aliased, episode("other:1:1", 1, 1))?.id).toBe("tt1:1:2");
+});
+
+test("does not step over an episode that has not aired yet", () => {
+    // Filtering by availability first turned "the next episode" into "the first later row that
+    // happens to be playable", which offered E3 while E2 was still a week away.
+    const now = new Date("2026-07-06T12:00:00Z");
+    const episodes = [
+        { ...episode("tt1:1:1", 1, 1), aired: "2026-07-01T12:00:00Z" },
+        { ...episode("tt1:1:2", 1, 2), aired: "2026-07-10T12:00:00Z" },
+        { ...episode("tt1:1:3", 1, 3), aired: "" }
+    ];
+
+    expect(findNextEpisode(episodes, episodes[0], now)).toBeNull();
+});
+
+test("keeps specials out of a normal run and normal episodes out of the specials", () => {
+    const episodes = [
+        episode("tt1:0:1", 0, 1),
+        episode("tt1:0:2", 0, 2),
+        episode("tt1:1:1", 1, 1),
+        episode("tt1:1:2", 1, 2)
+    ];
+
+    // The last special does not run into episode one.
+    expect(findNextEpisode(episodes, episode("tt1:0:2", 0, 2))).toBeNull();
+    expect(findNextEpisode(episodes, episode("tt1:0:1", 0, 1))?.id).toBe("tt1:0:2");
+    // And a normal run never lands on one.
+    expect(findNextEpisode(episodes, episode("tt1:1:1", 1, 1))?.id).toBe("tt1:1:2");
+    expect(serialEpisodes(episodes, null).map((item) => item.id))
+        .toEqual(["tt1:1:1", "tt1:1:2"]);
+    // A show Cinemeta files entirely under season zero still has a run to walk.
+    const onlySpecials = [episode("tt2:0:1", 0, 1), episode("tt2:0:2", 0, 2)];
+    expect(serialEpisodes(onlySpecials, null)).toEqual(onlySpecials);
 });
 
 test("restores only supported media type preferences", () => {

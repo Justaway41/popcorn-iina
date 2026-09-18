@@ -116,6 +116,25 @@ function isLater(candidate: Coordinate, current: Coordinate | undefined): boolea
         : candidate.episode > current.episode;
 }
 
+/**
+ * Which of two paused sessions is the one to resume. The newest checkpoint wins, which is the
+ * cross-device rule: comparing coordinates instead let a session abandoned in season two
+ * outrank one paused last night in season one. Coordinates decide only when neither session
+ * carries a usable timestamp.
+ */
+function isNewerCheckpoint(
+    candidate: { at: Coordinate; playedAt: string },
+    current: { at: Coordinate; playedAt: string } | undefined
+): boolean {
+    if (!current) return true;
+    const left = Date.parse(candidate.playedAt);
+    const right = Date.parse(current.playedAt);
+    if (Number.isFinite(left) && Number.isFinite(right)) return left > right;
+    if (Number.isFinite(left)) return true;
+    if (Number.isFinite(right)) return false;
+    return isLater(candidate.at, current.at);
+}
+
 function buildEntry(
     details: SeriesDetails,
     at: Coordinate,
@@ -322,7 +341,7 @@ export function createAnimeChainClient(
         // the budget on titles that never needed one, and Bleach's second and third cours stayed
         // unplaced behind them.
         await scan(new Set(cours
-            .filter((cour) => !cour.ownsImdb || !isImdbId(cour.imdbId))
+            .filter((cour) => cour.ownership !== "owner" || !isImdbId(cour.imdbId))
             .map((cour) => cour.malId)));
         await scan(new Set(cours.map((cour) => cour.malId).filter((malId) => !owners.has(malId))));
         return owners;
@@ -351,31 +370,25 @@ export function createAnimeChainClient(
             if (cours.length === 0) return placed;
             // Simkl's own relations name the airing order without a second service having to be
             // reachable, so they are taken first and AniList only fills what they left.
-            const fromSimkl = new Map<string, { candidate: ShowCandidate; chain: AnimeEntry[] }>();
+            const fromSimkl = new Map<string, { candidate: ShowCandidate | null; chain: AnimeEntry[] }>();
             for (const simklChain of simklChains) {
                 const chain = simklChain.entries.map((entry, index) => ({
                     anilistId: index,
                     malId: entry.malId,
                     episodes: entry.episodes
                 }));
+                // The chain's own id names the series its first cour continues, not the show
+                // Popcorn draws: Simkl roots Bleach's Thousand-Year Blood War cours at the 2004
+                // series. Taking it as the show claimed every cour for a title this device has
+                // never played, and they stopped being placed at all. The chain is kept for the
+                // order it gives; naming the show is left to the history.
                 const named = history.find((entry) => entry.media.imdbId === simklChain.imdbId);
-                const candidate = named
-                    ? showCandidate(named.media)
-                    : {
-                        imdbId: simklChain.imdbId,
-                        name: "",
-                        preview: {
-                            id: simklChain.imdbId,
-                            imdbId: simklChain.imdbId,
-                            type: "series" as const,
-                            name: "",
-                            releaseInfo: "",
-                            poster: ""
-                        }
-                    };
+                const candidate = named ? showCandidate(named.media) : null;
                 for (const entry of chain) fromSimkl.set(entry.malId, { candidate, chain });
             }
-            const remaining = cours.filter((cour) => !fromSimkl.has(cour.malId));
+            // A cour whose chain named no show this device knows still needs an owner found for
+            // it the usual way.
+            const remaining = cours.filter((cour) => !fromSimkl.get(cour.malId)?.candidate);
             const owners = await indexCandidates(remaining, history);
             const shows = new Map<string, ShowPlacement>();
             for (const cour of cours) {
@@ -386,22 +399,38 @@ export function createAnimeChainClient(
                     let details = owner ? await loadSeries(owner) : null;
                     let chain = null;
                     if (owner && details) {
+                        // Cinemeta names the show; a candidate built from a Simkl relation alone
+                        // carries no title, and searching AniList for "" returned nothing, which
+                        // left the placement to fall back on a guess.
+                        const name = owner.name || details.media.name;
+                        // Within the budget: this fallback used to search AniList for every
+                        // show a pass touched, and a store of thirteen cours answered 429 for
+                        // six of them, which left those cours unplaced.
                         chain = known && alignsWithSeasons(known.chain, details.seasons)
                             ? known.chain
-                            : await loadChain(owner.name);
+                            : name
+                                ? await loadChainWithinBudget(name)
+                                : null;
                     }
                     // A cour AniList cannot chain, or whose show Cinemeta has never seen because
                     // the season was given its own IMDb entry, still has one honest reading:
                     // when the id leads back to this cour, the cour is the show's first and its
                     // numbering is the show's season one. Anything else is left out rather than
                     // placed on a show it does not belong to.
-                    if (!details && cour.ownsImdb && isImdbId(cour.imdbId)) {
+                    if (!details && cour.ownership === "owner" && isImdbId(cour.imdbId)) {
                         candidate = courCandidate(cour);
-                        details = await loadSeries(candidate) ??
-                            { media: candidate.preview, episodes: [], seasons: [] };
+                        // Only a show Cinemeta can describe. Inventing one from the cour itself
+                        // built a title with no poster and no episode list, which reached the
+                        // sidebar as a blank card that could name nothing to play.
+                        details = await loadSeries(candidate);
                         chain = null;
                     }
                     if (!candidate || !details) continue;
+                    // Reading the cour's numbering as the show's own is only honest when Simkl
+                    // confirmed this cour owns the id being placed into. Without that, a device
+                    // with no local history mapped a later cour's episode six onto season one of
+                    // the root show.
+                    const direct = cour.ownership === "owner" && candidate.imdbId === cour.imdbId;
                     const show = shows.get(candidate.imdbId) ?? { details, episodes: new Set<string>() };
                     shows.set(candidate.imdbId, show);
                     const place = (number: number): Coordinate | null => {
@@ -409,6 +438,7 @@ export function createAnimeChainClient(
                             ? mapCourEpisode(details.seasons, chain, cour.malId, number)
                             : null;
                         if (at || chain) return at;
+                        if (!direct) return null;
                         const first = details.seasons[0];
                         // With no seasons to check against, the cour's own numbering is all
                         // there is; with seasons, a number past the first is a later one the
@@ -426,8 +456,13 @@ export function createAnimeChainClient(
                     }
                     const session = cour.paused;
                     const pausedAt = session ? place(session.episode) : null;
-                    if (session && pausedAt && isLater(pausedAt, show.paused?.at)) {
-                        show.paused = { at: pausedAt, playedAt: session.at, progress: session.progress };
+                    if (session && pausedAt) {
+                        const checkpoint = {
+                            at: pausedAt,
+                            playedAt: session.at,
+                            progress: session.progress
+                        };
+                        if (isNewerCheckpoint(checkpoint, show.paused)) show.paused = checkpoint;
                     }
                 } catch (error) {
                     logDebug("Popcorn: Anime cour placement failed:", formatError(error));
@@ -440,6 +475,13 @@ export function createAnimeChainClient(
                 if (show.watched) {
                     placed.entries.push(buildEntry(show.details, show.watched.at, show.watched.playedAt, true, 100));
                 }
+                // A session Simkl still reports for an episode this pass marks watched is a
+                // checkpoint nobody will resume: the episode was finished elsewhere and the
+                // paused position was never cleared. Offering it painted a half-finished bar
+                // over an episode that is done.
+                if (show.paused && show.episodes.has(`${show.paused.at.season}:${show.paused.at.episode}`)) {
+                    show.paused = undefined;
+                }
                 if (show.paused) {
                     placed.entries.push(
                         buildEntry(show.details, show.paused.at, show.paused.playedAt, false, show.paused.progress)
@@ -450,7 +492,18 @@ export function createAnimeChainClient(
         },
 
         async uploadEpisodes(media, coordinates) {
-            if (!isImdbId(media.imdbId) || coordinates.length === 0) return [];
+            if (coordinates.length === 0) return [];
+            // A catalogue id that is already per cour addresses Simkl directly, whether or not
+            // the provider carried IMDb metadata with it.
+            if (media.malId) {
+                return coordinates.map((at) => ({
+                    malId: media.malId,
+                    title: media.name,
+                    season: 1,
+                    episode: at.episode
+                }));
+            }
+            if (!isImdbId(media.imdbId)) return [];
             try {
                 // Without a chain the show cannot be confirmed as anime, and sending it under
                 // its IMDb id would be the very mistake this module exists to avoid. A title

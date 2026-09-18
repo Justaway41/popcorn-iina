@@ -372,20 +372,54 @@ export function isEpisodeAvailable(episode: Episode, now = new Date()): boolean 
     return !Number.isFinite(aired) || aired <= now.getTime();
 }
 
-export function findNextEpisode(episodes: Episode[], current: Episode, now = new Date()): Episode | null {
-    const sorted = episodes.filter((episode) => isEpisodeAvailable(episode, now)).sort((a, b) => {
+/**
+ * Normal playback stays within the real seasons, and specials navigate among themselves. An
+ * addon lists season zero alongside the rest, so a shared walk ran the last special into
+ * episode one and offered an unwatched special as the next thing to watch.
+ */
+export function serialEpisodes(episodes: Episode[], current: Episode | null): Episode[] {
+    const specials = current?.season === 0;
+    const scoped = episodes.filter((episode) => (episode.season === 0) === specials);
+    // A show listed entirely under season zero has no other run to walk.
+    return scoped.length > 0 ? scoped : episodes;
+}
+
+/**
+ * One row per season and episode, in airing order. An addon can answer with several ids for one
+ * episode - and with the same id twice - and the row after a duplicate is the same episode
+ * again, so Next handed back what had only just finished.
+ */
+export function uniqueEpisodes(episodes: Episode[]): Episode[] {
+    const sorted = [...episodes].sort((a, b) => {
         if (a.season !== b.season) return a.season - b.season;
         if (a.episode !== b.episode) return a.episode - b.episode;
         return a.id.localeCompare(b.id);
     });
-    const index = sorted.findIndex((episode) => episode.id === current.id);
-    if (index !== -1) {
-        return sorted[index + 1] || null;
-    }
-    return sorted.find((episode) => (
-        episode.season > current.season ||
-        (episode.season === current.season && episode.episode > current.episode)
-    )) || null;
+    return sorted.filter((episode, index) => {
+        const previous = sorted[index - 1];
+        return !previous || previous.season !== episode.season || previous.episode !== episode.episode;
+    });
+}
+
+/**
+ * The serial successor, if it can be played. Availability is checked on that one episode and
+ * never used to choose it: filtering first turned "the next episode" into "the first later row
+ * that happens to be playable", which stepped over an episode airing next week to offer one
+ * whose date the addon had not filled in.
+ */
+export function findNextEpisode(episodes: Episode[], current: Episode, now = new Date()): Episode | null {
+    const ordered = uniqueEpisodes(serialEpisodes(episodes, current));
+    const index = ordered.findIndex((episode) => (
+        episode.id === current.id ||
+        (episode.season === current.season && episode.episode === current.episode)
+    ));
+    const next = index !== -1
+        ? ordered[index + 1]
+        : ordered.find((episode) => (
+            episode.season > current.season ||
+            (episode.season === current.season && episode.episode > current.episode)
+        ));
+    return next && isEpisodeAvailable(next, now) ? next : null;
 }
 
 function isHttpUrl(value: string): boolean {

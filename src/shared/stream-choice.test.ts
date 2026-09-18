@@ -22,7 +22,11 @@ test("recommends the resolution being played, then the highest available", () =>
     expect(pickNextEpisodeStream(streams, { ...options, previousResolution: "1440p" })?.title).toBe("4K");
     expect(pickNextEpisodeStream(streams, { ...options, previousResolution: "900p" })?.title).toBe("4K");
     expect(pickNextEpisodeStream(streams, options)?.title).toBe("4K");
-    expect(pickNextEpisodeStream([{ ...streams[4] }], { previousResolution: "1080p" })).toBeNull();
+    // An unknown resolution is the last thing picked, but it is still playable: dropping it
+    // left the overlay with no next episode for providers that name no resolution.
+    expect(pickNextEpisodeStream([{ ...streams[4] }], { previousResolution: "1080p" })?.title)
+        .toBe("Unknown");
+    expect(pickNextEpisodeStream([], { previousResolution: "1080p" })).toBeNull();
 });
 
 test("next-episode pick prefers cache, then audio, then subtitles, then resolution", () => {

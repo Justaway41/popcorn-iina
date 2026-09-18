@@ -4,6 +4,7 @@ import type { PlaybackContext } from "./messages";
 import type { TraktResponse } from "./trakt";
 
 import {
+    FULL_PULL_VERSION,
     isSimklConnected,
     parseSimklExternalLinkRequest,
     parseSimklState,
@@ -57,7 +58,8 @@ const connected = {
     lastSyncAt: "",
     lastUploadKey: "",
     lastResumeKey: "",
-    fullPullVersion: 2
+    // A state that has already had every repair, so a pull is incremental unless a test says so.
+    fullPullVersion: 3
 };
 
 interface Call {
@@ -429,7 +431,7 @@ test("reads anime watched episodes as cour numbers keyed by MAL id", () => {
         imdbId: "tt14986406",
         name: "Bleach",
         year: "",
-        ownsImdb: true,
+        ownership: "unknown",
         simklId: "",
         episodes: [1, 2],
         lastWatchedAt: ""
@@ -448,7 +450,7 @@ test("reads anime watched episodes as cour numbers keyed by MAL id", () => {
         imdbId: "tt2560140",
         name: "Attack on Titan",
         year: "2013",
-        ownsImdb: true,
+        ownership: "unknown",
         simklId: "",
         episodes: [],
         lastWatchedAt: "",
@@ -702,9 +704,14 @@ test("sends each resume position once, addressed the way its show is", async () 
     expect(await uploadSimklResume(transport, state, points)).toBe(state);
     expect(calls).toHaveLength(2);
 
-    // Moving on in the episode is new information.
+    // Moving on in the episode is new information - and only that position is sent again.
     await uploadSimklResume(transport, state, [{ ...points[0], progress: 30 }, points[1]]);
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(3);
+    expect(calls[2].body).toEqual({
+        progress: 30,
+        anime: { ids: { mal: "56784" } },
+        episode: { season: 1, number: 6 }
+    });
 });
 
 test("describes a rejection that is not an Error", async () => {
@@ -755,9 +762,19 @@ test("keeps sending resume positions after one is refused", async () => {
     ]);
 
     expect(call).toBe(3);
-    // The refusal is reported and the set stays unsent, so the next sync tries again.
+    // The refusal is reported, and only the position it refused stays pending: recording the
+    // whole set marked positions delivered that were never sent.
     expect(state.lastError).toBe("Simkl request failed: locked");
-    expect(state.lastResumeKey).toBe("");
+    expect(state.lastResumeKey.split(",").sort()).toEqual(["tt0000002::20", "tt0000003::30"]);
+
+    const retried = await uploadSimklResume(transport as never, state, [
+        point("tt0000001", 10),
+        point("tt0000002", 20),
+        point("tt0000003", 30)
+    ]);
+    expect(call).toBe(4);
+    expect(retried.lastResumeKey.split(",").sort())
+        .toEqual(["tt0000001::10", "tt0000002::20", "tt0000003::30"]);
 });
 
 test("reads a franchise's airing order from Simkl's own relations", async () => {
@@ -797,8 +814,8 @@ test("reads a franchise's airing order from Simkl's own relations", async () => 
         transport as never,
         connected,
         [
-            { malId: "41467", imdbId: "tt14986406", name: "", year: "", ownsImdb: true, simklId: "1300367", episodes: [1], lastWatchedAt: "" },
-            { malId: "56784", imdbId: "tt0434665", name: "", year: "", ownsImdb: false, simklId: "2268810", episodes: [6], lastWatchedAt: "" }
+            { malId: "41467", imdbId: "tt14986406", name: "", year: "", ownership: "owner", simklId: "1300367", episodes: [1], lastWatchedAt: "" },
+            { malId: "56784", imdbId: "tt0434665", name: "", year: "", ownership: "other", simklId: "2268810", episodes: [6], lastWatchedAt: "" }
         ],
         new Map()
     );
@@ -813,4 +830,159 @@ test("reads a franchise's airing order from Simkl's own relations", async () => 
     }]);
     // Each cour is read once, however many times it appears in the walk.
     expect(new Set(calls).size).toBe(calls.length);
+});
+
+test("reports what Simkl sent apart from the merged history", async () => {
+    // The merged history was passed back as though it were Simkl's own, so every local position
+    // read as one Simkl already had and nothing was ever backfilled from this device.
+    const local = [{
+        id: "tt0145487",
+        media: movie,
+        episode: null,
+        lastPlayedAt: "2026-09-01T00:00:00Z",
+        watched: false,
+        progress: 42
+    }];
+    const { transport } = recorder([
+        ok({ all: "2026-09-02T00:00:00Z" }),
+        ok({ movies: [], shows: [], anime: [] }),
+        ok([])
+    ]);
+
+    const result = await syncSimklHistory(transport as never, connected, local);
+
+    expect(result.history).toEqual(local);
+    expect(result.remoteHistory).toEqual([]);
+});
+
+test("sends every resume position, not only the first batch", async () => {
+    const { calls, transport } = recorder([ok(null)]);
+    const point = (index: number) => ({
+        context: { media: { ...movie, imdbId: `tt000000${index}`, id: `tt000000${index}` }, episodes: [] },
+        progress: 10 + index,
+        cour: null
+    });
+    // One more than a pass carries: the key described all nine while eight were sent, so the
+    // ninth was recorded as delivered without a request and never sent again.
+    const points = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(point);
+
+    const first = await uploadSimklResume(transport as never, connected, points);
+    expect(calls).toHaveLength(8);
+
+    const second = await uploadSimklResume(transport as never, first, points);
+    expect(calls).toHaveLength(9);
+    expect(calls[8].body).toEqual({ movie: { ids: { imdb: "tt0000009" } }, progress: 19 });
+
+    // And once every position has been sent, another pass costs nothing.
+    expect(await uploadSimklResume(transport as never, second, points)).toBe(second);
+    expect(calls).toHaveLength(9);
+});
+
+test("scrobbles anime addressed only by its cour", async () => {
+    // A provider catalogue can carry a MAL id and no IMDb metadata at all, which the payload
+    // builder has always supported; the guard rejected it before the cour was ever consulted.
+    const { calls, transport } = recorder([ok(null)]);
+    const media = {
+        id: "kitsu:7442",
+        imdbId: "",
+        type: "series" as const,
+        name: "Bleach",
+        releaseInfo: "2022",
+        poster: ""
+    };
+
+    const state = await simklScrobble(
+        transport as never,
+        connected,
+        "stop",
+        { media, episode: { ...episode, season: 3, episode: 6 }, episodes: [] },
+        96,
+        { malId: "56784", episode: 6 }
+    );
+
+    expect(state.lastError).toBe("");
+    expect(calls[0].url).toBe("https://api.simkl.com/scrobble/stop");
+    expect(calls[0].body).toEqual({
+        progress: 96,
+        anime: { ids: { mal: "56784" } },
+        episode: { season: 1, number: 6 }
+    });
+
+    // Without a cour there is still nothing to address an IMDb-less show by.
+    expect(await simklScrobble(
+        transport as never,
+        connected,
+        "stop",
+        { media, episode, episodes: [] },
+        96
+    )).toBe(connected);
+    expect(calls).toHaveLength(1);
+});
+
+test("does not retire an upload Simkl could not match", async () => {
+    // A 2xx answer can still report items Simkl found nothing for. Recording the key for one
+    // retired the set, so those episodes could never be sent again.
+    const episodes = [{ imdbId: "tt5753856", title: "Dark", season: 3, episode: 4 }];
+    const { calls, transport } = recorder([
+        { status: 201, data: { added: { episodes: 0 }, not_found: { shows: [{ ids: { imdb: "tt5753856" } }] } }, headers: {} },
+        { status: 201, data: { added: { episodes: 1 }, not_found: { shows: [] } }, headers: {} }
+    ]);
+
+    const rejected = await uploadSimklHistory(transport as never, connected, episodes);
+    expect(rejected.lastUploadKey).toBe("");
+    expect(rejected.lastError).toBe("");
+
+    const accepted = await uploadSimklHistory(transport as never, rejected, episodes);
+    expect(calls).toHaveLength(2);
+    expect(accepted.lastUploadKey).toBe("tt5753856:3:4");
+});
+
+test("a failed ownership lookup leaves the cour unverified", async () => {
+    // Swallowing the failure and keeping the cour trusted let a later cour be placed directly
+    // on the series it merely continues.
+    const { transport } = recorder([
+        ok({ all: "2026-09-02T00:00:00Z" }),
+        ok({
+            anime: [{
+                show: { title: "Bleach", year: 2022, ids: { mal: "56784", imdb: "tt0434665", simkl: "2268810" } },
+                seasons: [{ number: 1, episodes: [{ number: 6, watched_at: "2026-09-01T00:00:00Z" }] }],
+                last_watched_at: "2026-09-01T00:00:00Z"
+            }]
+        }),
+        ok([]),
+        { status: 500, data: null, headers: {} }
+    ]);
+
+    const result = await syncSimklHistory(transport as never, connected, []);
+
+    expect(result.watchedCours).toHaveLength(1);
+    expect(result.watchedCours[0].ownership).toBe("unknown");
+    // The pull itself still succeeded, so the rest of it is stored.
+    expect(result.state.lastError).toBe("");
+});
+
+test("a state behind the repair version pulls everything and says so", async () => {
+    // What a full pull reports is the whole truth, so the caller can rebuild held state from it
+    // instead of keeping marks that an older, wrong placement left behind forever.
+    const stale = { ...connected, lastActivityAt: "2026-08-01T00:00:00Z", fullPullVersion: 2 };
+    const { calls, transport } = recorder([
+        ok({ all: "2026-09-18T00:00:00Z" }),
+        ok({ movies: [], shows: [], anime: [] }),
+        ok([])
+    ]);
+
+    const repaired = await syncSimklHistory(transport as never, stale, []);
+    expect(repaired.fullPull).toBe(true);
+    expect(calls[1].url).not.toContain("date_from");
+    expect(repaired.state.fullPullVersion).toBe(FULL_PULL_VERSION);
+
+    // Once repaired, the cursor is used again and the pull is only what changed.
+    const { calls: later, transport: again } = recorder([
+        ok({ all: "2026-09-19T00:00:00Z" }),
+        ok({ movies: [], shows: [], anime: [] }),
+        ok([])
+    ]);
+    const incremental = await syncSimklHistory(again as never, repaired.state, []);
+    expect(incremental.fullPull).toBe(false);
+    expect(later[1].url).toContain("date_from=2026-09-18T00%3A00%3A00Z");
 });

@@ -26,7 +26,6 @@ import {
     getSearchableCatalogs,
     isCompatibleSubtitleId,
     isImdbId,
-    findNextEpisode,
     isEpisodeAvailable,
     parseEnglishSubtitleAvailability,
     parseEpisodeOrder,
@@ -34,7 +33,9 @@ import {
     parseMediaMetadata,
     parseMediaTypePreference,
     parsePlayableStreams,
+    serialEpisodes,
     sortEpisodes,
+    uniqueEpisodes,
     sortStreamsForPlayback,
     groupStreamsByResolution,
     mergeMediaResults
@@ -70,7 +71,15 @@ let addons: StremioAddon[] = [];
 let nowPlaying: NowPlaying = { videoId: "", url: "", releaseName: "" };
 let watchHistory: WatchHistoryEntry[] = [];
 let episodeWatchState: EpisodeWatchState = parseEpisodeWatchState(null);
-const seriesEpisodes = new Map<string, Promise<{ media: Media; episodes: Episode[] } | null>>();
+const seriesEpisodes = new Map<string, {
+    at: number;
+    details: Promise<{ media: Media; episodes: Episode[] } | null>;
+}>();
+/**
+ * An episode list does not move often, but it does move: an episode airing today, or a date an
+ * addon has since corrected, could not reach navigation until the sidebar was reloaded.
+ */
+const SERIES_EPISODES_TTL_MS = 10 * 60 * 1000;
 let homeQuery = "";
 let view: View = { kind: "home", query: "" };
 let retryAction: (() => Promise<void>) | null = null;
@@ -748,6 +757,32 @@ function historySlot(entry: WatchHistoryEntry, upNext: boolean): HTMLElement {
 }
 
 /**
+ * What a Continue Watching card should offer. An unfinished checkpoint resumes its own episode;
+ * otherwise the target is the first available episode the watched set does not hold, which is
+ * the boundary the episode view already lands on. Asking for "the episode after the one history
+ * happens to carry" instead moved the card backwards when an older episode was rewatched, and
+ * answered E4 for a title watched up to E3 with E2 still missing.
+ */
+export function resolveUpNextEpisode(
+    entry: WatchHistoryEntry,
+    episodes: Episode[],
+    watched: (episode: Episode) => boolean,
+    available: (episode: Episode) => boolean = isEpisodeAvailable
+): { episode: Episode; resume: boolean } | null {
+    const current = entry.episode;
+    if (!current) return null;
+    const ordered = uniqueEpisodes(serialEpisodes(episodes, current));
+    if (getResumePercent(entry.progress, entry.watched) !== null) {
+        const same = ordered.find(
+            (episode) => episode.season === current.season && episode.episode === current.episode
+        );
+        if (same && !watched(same)) return { episode: same, resume: true };
+    }
+    const next = ordered.find((episode) => available(episode) && !watched(episode));
+    return next ? { episode: next, resume: false } : null;
+}
+
+/**
  * A card offering the next episode has to mean it, and history carries no episode list to check
  * against. So the strip paints first, then each up-next card names the episode that actually
  * exists and has aired - or drops out, because the show has nothing left to watch right now.
@@ -757,20 +792,35 @@ async function resolveUpNext(entry: WatchHistoryEntry, slot: HTMLElement): Promi
     const current = entry.episode;
     if (!current) return;
     const details = await loadSeriesEpisodes(entry.media);
-    if (!details || details.episodes.length === 0 || !slot.isConnected) return;
-    const next = findNextEpisode(details.episodes, current);
-    if (!next) {
+    // A lookup that failed says nothing about the show, so the card stays as it is.
+    if (!details || !slot.isConnected) return;
+    // An answer with no episodes in it does say something: there is no such series to continue.
+    // A cour once placed as its own show left a card on an id the metadata has never had -
+    // no poster, no episodes, and a label that could never resolve to anything playable.
+    if (details.episodes.length === 0) {
         slot.remove();
         refillHomeStrip();
         return;
     }
+    const target = resolveUpNextEpisode(entry, details.episodes, (episode) => isEpisodeWatched(
+        episodeWatchState,
+        details.media,
+        episode,
+        watchHistory
+    ));
+    if (!target) {
+        slot.remove();
+        refillHomeStrip();
+        return;
+    }
+    const next = target.episode;
     slot.replaceWith(removableSlot(entry, mediaCard(
         entry.media,
         entry.media.name,
-        `Next · S${pad(next.season)}E${pad(next.episode)} · ${next.name}`,
+        `${target.resume ? "Resume" : "Next"} · S${pad(next.season)}E${pad(next.episode)} · ${next.name}`,
         () => void loadStreams(details.media, next, details.episodes),
         false,
-        null
+        target.resume ? entry.progress : null
     )));
 }
 
@@ -778,16 +828,16 @@ async function resolveUpNext(entry: WatchHistoryEntry, slot: HTMLElement): Promi
 function loadSeriesEpisodes(media: Media): Promise<{ media: Media; episodes: Episode[] } | null> {
     const key = mediaIdentity(media);
     const cached = seriesEpisodes.get(key);
-    if (cached) return cached;
-    const request = loadMediaDetails(media, new AbortController().signal)
-        .then((details) => ({ media: details.media, episodes: details.episodes }))
+    if (cached && Date.now() - cached.at < SERIES_EPISODES_TTL_MS) return cached.details;
+    const details = loadMediaDetails(media, new AbortController().signal)
+        .then((loaded) => ({ media: loaded.media, episodes: loaded.episodes }))
         .catch(() => {
             // Forget the failure so the next render tries again instead of inheriting it.
             seriesEpisodes.delete(key);
             return null;
         });
-    seriesEpisodes.set(key, request);
-    return request;
+    seriesEpisodes.set(key, { at: Date.now(), details });
+    return details;
 }
 
 /**
@@ -975,7 +1025,9 @@ export function getDefaultSeason(
     watched: (episode: Episode) => boolean,
     available: (episode: Episode) => boolean = isEpisodeAvailable
 ): number {
-    const ordered = sortEpisodes(episodes, "oldest");
+    // Specials are not what a show is watched through, so an unwatched one never claims the
+    // season a viewer lands on.
+    const ordered = sortEpisodes(serialEpisodes(episodes, null), "oldest");
     const next = ordered.find((episode) => available(episode) && !watched(episode));
     return (next || ordered[0])?.season ?? 0;
 }

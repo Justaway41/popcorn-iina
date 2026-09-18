@@ -391,6 +391,20 @@ episodes while retaining its selected season and scroll position.
 - The preference webview exposes an asynchronous `window.iina.preferences` bridge, not the plugin runtime's full `iina` APIs.
 - The sidebar and overlay must be loaded after `iina.window-loaded`.
 - Plugin-created players are managed by the global API and are shut down when the plugin unloads.
+- A preference value must contain no `null`, `undefined`, or non-finite number. IINA stores a
+  plugin's preferences as a property list, which has no null: one anywhere in the value fails the
+  whole write with "Unable to write preferences file: The data couldn't be written because of an
+  error in the destination for the data", and every key that flush carried is silently lost. A
+  movie's history entry holds `episode: null`, so on 2026-09-18 every sync write on a real store
+  was being discarded - `lastSyncAt` had not moved for a day and `animeChains` never persisted,
+  which in turn kept AniList answering 429. All plugin writes go through
+  `createPlistSafeStore` (`src/plugin/preferences.ts`); never write to `iina.preferences`
+  directly, and keep `plistSafe` free of the `undefined` identifier so the global bundle stays
+  clear of it.
+- The splash asset keeps its `.png` extension (`assets/Popcorn.png`). Without one macOS draws a
+  blank document icon in the window, and the icon must not be painted on with an AppleScript at
+  startup - that is what crashed IINA on macOS 27 (removed in 2.6.9). `SPLASH_URL_MARKER` matches
+  by substring, and `setWindowTitle` still forces the title to "Popcorn".
 - The global entry registers no `global.onMessage` listeners. On IINA 1.4.4 under macOS 27.0 (26A428)
   such a callback runs outside the context it was written in - it throws `ReferenceError` on a
   function declared beside it - and when it declares the sender-id second parameter, the next
@@ -468,6 +482,12 @@ git var GIT_COMMITTER_IDENT
 - Never install a local and published package with the same `identifier` simultaneously; IINA treats that as a duplicate plugin.
 
 ## Current Working State
+
+Debugging handoff: `docs/superpowers/specs/2026-09-18-navigation-simkl-debug-findings.md` records
+the confirmed next-episode and Simkl cross-device sync failures with their reproductions. S1-S7 and
+N2-N7 are fixed and carry regressions; its "Still Open" section lists what is not (Previous Episode
+and where it appears, EOF event ordering, remote unwatch convergence, and the Simkl header and
+cross-mapping follow-ups). Read it before changing either area.
 
 As of 2026-08-27:
 

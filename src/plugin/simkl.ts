@@ -37,6 +37,10 @@ export interface IinaSimklClient {
      */
     sync(history: WatchHistoryEntry[]): Promise<{
         history: WatchHistoryEntry[];
+        /** Only what Simkl reported, for deciding what it is still missing. */
+        remoteHistory: WatchHistoryEntry[];
+        /** Whether this pull carried everything, so held state can be rebuilt from it. */
+        fullPull: boolean;
         watchedPatches: WatchedShowPatch[];
         watchedCours: WatchedCour[];
         commit(): void;
@@ -119,7 +123,14 @@ export function createIinaSimklClient(
         sync(history) {
             return enqueue(async () => {
                 const state = read();
-                const empty = { history, watchedPatches: [], watchedCours: [], commit: () => {} };
+                const empty = {
+                    history,
+                    remoteHistory: [],
+                    fullPull: false,
+                    watchedPatches: [],
+                    watchedCours: [],
+                    commit: () => {}
+                };
                 if (!state.accessToken) return empty;
                 try {
                     const result = await syncSimklHistory(transport, state, history);
@@ -131,8 +142,14 @@ export function createIinaSimklClient(
                     if (!sameConnection(read(), state)) return empty;
                     return {
                         history: result.history,
+                        remoteHistory: result.remoteHistory,
+                        fullPull: result.fullPull,
                         watchedPatches: result.watchedPatches,
                         watchedCours: result.watchedCours,
+                        // The caller flushes: IINA drops a preference write that lands on the
+                        // heels of another, and the pull's data and its cursor belong in one
+                        // flush anyway - a lost flush must not leave the cursor past data that
+                        // was never stored.
                         commit: () => {
                             // Re-read so a scrobble or upload saved meanwhile keeps its fields;
                             // only what this pull owns is written.
@@ -146,7 +163,6 @@ export function createIinaSimklClient(
                                 lastError: "",
                                 retryAt: 0
                             });
-                            preferences.sync();
                         }
                     };
                 } catch (error) {

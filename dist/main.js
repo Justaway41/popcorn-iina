@@ -234,6 +234,9 @@
       return episodes.length > 0 ? [{ id: show.id, episodes }] : [];
     });
   }
+  function clearSimklWatched(state) {
+    return { ...parseEpisodeWatchState(state), simkl: [], simklCours: [] };
+  }
   function mergeSimklCours(state, cours) {
     const next = parseEpisodeWatchState(state);
     for (const cour of parseWatchedCours(cours)) {
@@ -263,7 +266,7 @@
         imdbId: readString(record?.imdbId),
         name: readString(record?.name),
         year: readString(record?.year),
-        ownsImdb: record?.ownsImdb !== false,
+        ownership: readOwnership(record),
         simklId: readString(record?.simklId),
         episodes,
         lastWatchedAt: readString(record?.lastWatchedAt)
@@ -277,6 +280,12 @@
       }
       return episodes.length > 0 || cour.paused ? [cour] : [];
     });
+  }
+  function readOwnership(record) {
+    const stored = record?.ownership;
+    if (stored === "owner" || stored === "other" || stored === "unknown")
+      return stored;
+    return record?.ownsImdb === false ? "other" : "unknown";
   }
   function isCourEpisode(value) {
     return typeof value === "number" && Number.isInteger(value) && value > 0;
@@ -632,19 +641,29 @@
     const aired = Date.parse(episode.aired);
     return !Number.isFinite(aired) || aired <= now.getTime();
   }
-  function findNextEpisode(episodes, current, now = new Date) {
-    const sorted = episodes.filter((episode) => isEpisodeAvailable(episode, now)).sort((a, b) => {
+  function serialEpisodes(episodes, current) {
+    const specials = current?.season === 0;
+    const scoped = episodes.filter((episode) => episode.season === 0 === specials);
+    return scoped.length > 0 ? scoped : episodes;
+  }
+  function uniqueEpisodes(episodes) {
+    const sorted = [...episodes].sort((a, b) => {
       if (a.season !== b.season)
         return a.season - b.season;
       if (a.episode !== b.episode)
         return a.episode - b.episode;
       return a.id.localeCompare(b.id);
     });
-    const index = sorted.findIndex((episode) => episode.id === current.id);
-    if (index !== -1) {
-      return sorted[index + 1] || null;
-    }
-    return sorted.find((episode) => episode.season > current.season || episode.season === current.season && episode.episode > current.episode) || null;
+    return sorted.filter((episode, index) => {
+      const previous = sorted[index - 1];
+      return !previous || previous.season !== episode.season || previous.episode !== episode.episode;
+    });
+  }
+  function findNextEpisode(episodes, current, now = new Date) {
+    const ordered = uniqueEpisodes(serialEpisodes(episodes, current));
+    const index = ordered.findIndex((episode) => episode.id === current.id || episode.season === current.season && episode.episode === current.episode);
+    const next = index !== -1 ? ordered[index + 1] : ordered.find((episode) => episode.season > current.season || episode.season === current.season && episode.episode > current.episode);
+    return next && isEpisodeAvailable(next, now) ? next : null;
   }
   function isHttpUrl(value) {
     return /^https?:\/\/[^/]+/i.test(value.trim());
@@ -786,16 +805,15 @@
     let bestRank = [];
     streams.forEach((stream, index) => {
       const height = qualityHeight(stream.resolution);
-      if (height === null)
-        return;
       const rank = [
         showRank(stream.showTitle || "", options.showTitle || ""),
         cacheRank(stream.cached),
         releaseRank(stream.rawTitle || "", previousRelease),
         languageRank(stream.audioLanguages, preferredAudio),
         languageRank(stream.subtitleLanguages, preferredSubtitle),
+        height === null ? 1 : 0,
         target !== null && height === target ? 0 : 1,
-        -height,
+        -(height ?? 0),
         index
       ];
       if (!bestStream || compareRanks(rank, bestRank) < 0) {
@@ -1192,9 +1210,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.9",
+    version: "2.7.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 26,
+    ghVersion: 27,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -1248,6 +1266,8 @@
   var SLEEP_REFRESH_INTERVAL_SEC = 20;
   var PLUGINS_DIR = "~/Library/Application Support/com.colliderli.iina/plugins";
   var POPCORN_SPLASH_CANDIDATES = [
+    `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin/assets/Popcorn.png`,
+    `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin-dev/assets/Popcorn.png`,
     `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin/assets/Popcorn`,
     `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin-dev/assets/Popcorn`
   ];
@@ -1271,6 +1291,36 @@
     return Number.isFinite(prefetchedAtMs) && nowMs - prefetchedAtMs >= 0 && nowMs - prefetchedAtMs < maxAgeMs;
   }
 
+  // src/shared/errors.ts
+  function describeRejection(error) {
+    if (error instanceof Error)
+      return error.message;
+    if (typeof error === "string")
+      return error;
+    const record = error && typeof error === "object" && !Array.isArray(error) ? error : null;
+    if (!record)
+      return String(error);
+    const described = ["message", "error", "reason", "description", "localizedDescription"].map((key) => typeof record[key] === "string" ? record[key] : "").find((value) => value !== "");
+    const status = finite(record.statusCode) ?? finite(record.status);
+    const code = typeof record.code === "string" ? record.code : finite(record.code) ?? "";
+    const parts = [
+      described ?? "",
+      status === null ? "" : `status ${status}`,
+      code === "" ? "" : `code ${code}`
+    ].filter((part) => part !== "");
+    if (parts.length > 0)
+      return parts.join(", ");
+    try {
+      const json = JSON.stringify(error);
+      return json && json !== "{}" ? json.slice(0, 200) : "no reason given";
+    } catch {
+      return "no reason given";
+    }
+  }
+  function finite(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+
   // src/plugin/utils.ts
   var { console } = iina;
   function getSplashUrl() {
@@ -1292,7 +1342,7 @@
     return String(title).replace(/[\n\r,=]/g, " ");
   }
   function formatError(error) {
-    return error instanceof Error ? error.message : String(error);
+    return describeRejection(error);
   }
   function logDebug(...args) {
     if (DEBUG_LOGS)
@@ -1672,6 +1722,19 @@
       return true;
     return candidate.season !== current.season ? candidate.season > current.season : candidate.episode > current.episode;
   }
+  function isNewerCheckpoint(candidate, current) {
+    if (!current)
+      return true;
+    const left = Date.parse(candidate.playedAt);
+    const right = Date.parse(current.playedAt);
+    if (Number.isFinite(left) && Number.isFinite(right))
+      return left > right;
+    if (Number.isFinite(left))
+      return true;
+    if (Number.isFinite(right))
+      return false;
+    return isLater(candidate.at, current.at);
+  }
   function buildEntry(details, at, playedAt, watched, progress) {
     const id = `${details.media.imdbId}:${at.season}:${at.episode}`;
     const known = details.episodes.find((episode) => episode.season === at.season && episode.episode === at.episode);
@@ -1795,7 +1858,7 @@
           }
         }
       };
-      await scan(new Set(cours.filter((cour) => !cour.ownsImdb || !isImdbId(cour.imdbId)).map((cour) => cour.malId)));
+      await scan(new Set(cours.filter((cour) => cour.ownership !== "owner" || !isImdbId(cour.imdbId)).map((cour) => cour.malId)));
       await scan(new Set(cours.map((cour) => cour.malId).filter((malId) => !owners.has(malId))));
       return owners;
     }
@@ -1823,22 +1886,11 @@
             episodes: entry.episodes
           }));
           const named = history.find((entry) => entry.media.imdbId === simklChain.imdbId);
-          const candidate = named ? showCandidate(named.media) : {
-            imdbId: simklChain.imdbId,
-            name: "",
-            preview: {
-              id: simklChain.imdbId,
-              imdbId: simklChain.imdbId,
-              type: "series",
-              name: "",
-              releaseInfo: "",
-              poster: ""
-            }
-          };
+          const candidate = named ? showCandidate(named.media) : null;
           for (const entry of chain)
             fromSimkl.set(entry.malId, { candidate, chain });
         }
-        const remaining = cours.filter((cour) => !fromSimkl.has(cour.malId));
+        const remaining = cours.filter((cour) => !fromSimkl.get(cour.malId)?.candidate);
         const owners = await indexCandidates(remaining, history);
         const shows = new Map;
         for (const cour of cours) {
@@ -1849,21 +1901,25 @@
             let details = owner ? await loadSeries(owner) : null;
             let chain = null;
             if (owner && details) {
-              chain = known && alignsWithSeasons(known.chain, details.seasons) ? known.chain : await loadChain(owner.name);
+              const name = owner.name || details.media.name;
+              chain = known && alignsWithSeasons(known.chain, details.seasons) ? known.chain : name ? await loadChainWithinBudget(name) : null;
             }
-            if (!details && cour.ownsImdb && isImdbId(cour.imdbId)) {
+            if (!details && cour.ownership === "owner" && isImdbId(cour.imdbId)) {
               candidate = courCandidate(cour);
-              details = await loadSeries(candidate) ?? { media: candidate.preview, episodes: [], seasons: [] };
+              details = await loadSeries(candidate);
               chain = null;
             }
             if (!candidate || !details)
               continue;
+            const direct = cour.ownership === "owner" && candidate.imdbId === cour.imdbId;
             const show = shows.get(candidate.imdbId) ?? { details, episodes: new Set };
             shows.set(candidate.imdbId, show);
             const place = (number) => {
               const at = chain ? mapCourEpisode(details.seasons, chain, cour.malId, number) : null;
               if (at || chain)
                 return at;
+              if (!direct)
+                return null;
               const first = details.seasons[0];
               if (!first)
                 return { season: 1, episode: number };
@@ -1880,8 +1936,14 @@
             }
             const session = cour.paused;
             const pausedAt = session ? place(session.episode) : null;
-            if (session && pausedAt && isLater(pausedAt, show.paused?.at)) {
-              show.paused = { at: pausedAt, playedAt: session.at, progress: session.progress };
+            if (session && pausedAt) {
+              const checkpoint = {
+                at: pausedAt,
+                playedAt: session.at,
+                progress: session.progress
+              };
+              if (isNewerCheckpoint(checkpoint, show.paused))
+                show.paused = checkpoint;
             }
           } catch (error) {
             logDebug("Popcorn: Anime cour placement failed:", formatError(error));
@@ -1894,6 +1956,9 @@
           if (show.watched) {
             placed.entries.push(buildEntry(show.details, show.watched.at, show.watched.playedAt, true, 100));
           }
+          if (show.paused && show.episodes.has(`${show.paused.at.season}:${show.paused.at.episode}`)) {
+            show.paused = undefined;
+          }
           if (show.paused) {
             placed.entries.push(buildEntry(show.details, show.paused.at, show.paused.playedAt, false, show.paused.progress));
           }
@@ -1901,7 +1966,17 @@
         return placed;
       },
       async uploadEpisodes(media, coordinates) {
-        if (!isImdbId(media.imdbId) || coordinates.length === 0)
+        if (coordinates.length === 0)
+          return [];
+        if (media.malId) {
+          return coordinates.map((at) => ({
+            malId: media.malId,
+            title: media.name,
+            season: 1,
+            episode: at.episode
+          }));
+        }
+        if (!isImdbId(media.imdbId))
           return [];
         try {
           if (!chains.has(media.name) && lookupBudget <= 0)
@@ -1931,7 +2006,7 @@
   }
 
   // src/shared/simkl.ts
-  var FULL_PULL_VERSION = 2;
+  var FULL_PULL_VERSION = 3;
 
   class SimklError extends Error {
     status;
@@ -1974,7 +2049,7 @@
   async function simklScrobble(transport, state, action, context, progress, cour = null, now = Date.now()) {
     if (!isSimklConnected(state))
       return state;
-    if (!isImdbId(context.media.imdbId))
+    if (!cour && !isImdbId(context.media.imdbId))
       return state;
     if (state.retryAt > now)
       return state;
@@ -2031,8 +2106,13 @@
     if (key === state.lastUploadKey)
       return state;
     try {
-      await request2(transport, state, "POST", "/sync/history", buildHistoryUpload(episodes), now);
-      return { ...state, lastUploadKey: key, lastError: "", retryAt: 0 };
+      const result = await request2(transport, state, "POST", "/sync/history", buildHistoryUpload(episodes), now);
+      return {
+        ...state,
+        lastUploadKey: hasUnmatchedUploads(result) ? state.lastUploadKey : key,
+        lastError: "",
+        retryAt: 0
+      };
     } catch (error) {
       return {
         ...state,
@@ -2041,35 +2121,46 @@
       };
     }
   }
+  function hasUnmatchedUploads(result) {
+    const notFound = getRecord4(getRecord4(result)?.not_found);
+    if (!notFound)
+      return false;
+    return Object.values(notFound).some((value) => Array.isArray(value) && value.length > 0);
+  }
   function uploadKey(episodes) {
     return episodes.map((episode) => `${episode.malId ?? episode.imdbId ?? ""}:${episode.season}:${episode.episode}`).sort().join(",");
   }
-  function resumeKey(points) {
-    return points.map((point) => {
-      const episode = point.context.episode;
-      const id = point.cour?.malId || point.context.media.imdbId;
-      const at = episode ? `${episode.season}:${episode.episode}` : "";
-      return `${id}:${at}:${Math.round(point.progress)}`;
-    }).sort().join(",");
+  function resumePointKey(point) {
+    const episode = point.context.episode;
+    const id = point.cour?.malId || point.context.media.imdbId;
+    const at = episode ? `${episode.season}:${episode.episode}` : "";
+    return `${id}:${at}:${Math.round(point.progress)}`;
   }
+  var MAX_TRACKED_RESUME_KEYS = 64;
   async function uploadSimklResume(transport, state, points, now = Date.now()) {
     if (!isSimklConnected(state) || state.retryAt > now || points.length === 0)
       return state;
-    const key = resumeKey(points);
-    if (key === state.lastResumeKey)
+    const delivered = state.lastResumeKey ? state.lastResumeKey.split(",") : [];
+    const sent = new Set(delivered);
+    const pending = points.filter((point) => !sent.has(resumePointKey(point)));
+    if (pending.length === 0)
       return state;
     let failure = null;
-    for (const point of points.slice(0, MAX_RESUME_UPLOADS)) {
+    const carried = [];
+    for (const point of pending.slice(0, MAX_RESUME_UPLOADS)) {
       try {
         await request2(transport, state, "POST", "/scrobble/pause", buildSimklScrobblePayload(point.context, point.progress, point.cour), now);
+        carried.push(resumePointKey(point));
       } catch (error) {
         failure = error;
       }
     }
+    const lastResumeKey = [...new Set([...carried, ...delivered])].slice(0, MAX_TRACKED_RESUME_KEYS).join(",");
     if (!failure)
-      return { ...state, lastResumeKey: key, lastError: "", retryAt: 0 };
+      return { ...state, lastResumeKey, lastError: "", retryAt: 0 };
     return {
       ...state,
+      lastResumeKey,
       lastError: failure instanceof Error ? failure.message : "Simkl request failed.",
       retryAt: failure instanceof SimklError ? failure.retryAt : 0
     };
@@ -2094,7 +2185,7 @@
     const chains = [];
     const roots = new Set;
     for (const cour of cours) {
-      if (cour.ownsImdb || !cour.simklId)
+      if (cour.ownership === "owner" || !cour.simklId)
         continue;
       let root = await read(cour.simklId);
       if (!root)
@@ -2155,7 +2246,14 @@
   }
   async function syncSimklHistory(transport, state, local, now = Date.now()) {
     if (!isSimklConnected(state) || state.retryAt > now) {
-      return { state, history: local, watchedPatches: [], watchedCours: [] };
+      return {
+        state,
+        history: local,
+        remoteHistory: [],
+        fullPull: false,
+        watchedPatches: [],
+        watchedCours: []
+      };
     }
     try {
       const activities = getRecord4(await request2(transport, state, "GET", "/sync/activities", null, now));
@@ -2164,6 +2262,8 @@
         return {
           state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
           history: local,
+          remoteHistory: [],
+          fullPull: false,
           watchedPatches: [],
           watchedCours: []
         };
@@ -2180,6 +2280,7 @@
       const playback = await request2(transport, state, "GET", `/sync/playback${cursor}`, null, now);
       const watchedCours = parseSimklWatchedCours(items, playback);
       await markCourOwnership(transport, state, watchedCours, now);
+      const remoteHistory = parseSimklHistory(items, playback);
       return {
         state: {
           ...state,
@@ -2189,7 +2290,9 @@
           lastError: "",
           retryAt: 0
         },
-        history: mergeWatchHistory(local, parseSimklHistory(items, playback)),
+        history: mergeWatchHistory(local, remoteHistory),
+        remoteHistory,
+        fullPull: from === "",
         watchedPatches: parseSimklWatchedPatches(items),
         watchedCours
       };
@@ -2203,6 +2306,8 @@
             retryAt: 0
           },
           history: local,
+          remoteHistory: [],
+          fullPull: false,
           watchedPatches: [],
           watchedCours: []
         };
@@ -2214,6 +2319,8 @@
           retryAt: error instanceof SimklError ? error.retryAt : 0
         },
         history: local,
+        remoteHistory: [],
+        fullPull: false,
         watchedPatches: [],
         watchedCours: []
       };
@@ -2240,7 +2347,7 @@
           continue;
         for (const cour of group) {
           if (cour.simklId)
-            cour.ownsImdb = cour.simklId === simklId;
+            cour.ownership = cour.simklId === simklId ? "owner" : "other";
         }
       } catch {}
     }
@@ -2264,7 +2371,7 @@
         imdbId: getString4(getRecord4(show?.ids)?.imdb),
         name: getString4(show?.title),
         year: String(show?.year ?? ""),
-        ownsImdb: true,
+        ownership: "unknown",
         simklId: String(getRecord4(show?.ids)?.simkl ?? ""),
         episodes,
         lastWatchedAt: getString4(item?.last_watched_at)
@@ -2296,7 +2403,7 @@
         imdbId: getString4(getRecord4(show?.ids)?.imdb),
         name: getString4(show?.title),
         year: String(show?.year ?? ""),
-        ownsImdb: true,
+        ownership: "unknown",
         simklId: String(getRecord4(show?.ids)?.simkl ?? ""),
         episodes: [],
         lastWatchedAt: "",
@@ -2464,31 +2571,6 @@
     const reason = describeRejection(error).replace(/https?:\/\/\S*/gi, "").replace(/\s+/g, " ").trim();
     return new Error(reason ? `Simkl request failed: ${reason}` : "Simkl request failed.");
   }
-  function describeRejection(error) {
-    if (error instanceof Error)
-      return error.message;
-    if (typeof error === "string")
-      return error;
-    const record2 = getRecord4(error);
-    if (!record2)
-      return String(error);
-    const described = ["message", "error", "reason", "description", "localizedDescription"].map((key) => getString4(record2[key])).find((value) => value !== "");
-    const status = getFiniteNumber(record2.statusCode) ?? getFiniteNumber(record2.status);
-    const code = getString4(record2.code) || (getFiniteNumber(record2.code) ?? "");
-    const parts = [
-      described ?? "",
-      status === null ? "" : `status ${status}`,
-      code === "" ? "" : `code ${code}`
-    ].filter((part) => part !== "");
-    if (parts.length > 0)
-      return parts.join(", ");
-    try {
-      const json = JSON.stringify(error);
-      return json && json !== "{}" ? json.slice(0, 200) : "no reason given";
-    } catch {
-      return "no reason given";
-    }
-  }
   function responseError2(response, now) {
     const retryAt = response.status === 429 ? now + (retryAfterMs2(response.headers) ?? DEFAULT_RETRY_MS2) : 0;
     return new SimklError(response.status, retryAt, response.status === 429 ? "Simkl rate limit exceeded." : `Simkl request failed with status ${response.status}.`);
@@ -2640,7 +2722,14 @@
       sync(history) {
         return enqueue(async () => {
           const state = read();
-          const empty = { history, watchedPatches: [], watchedCours: [], commit: () => {} };
+          const empty = {
+            history,
+            remoteHistory: [],
+            fullPull: false,
+            watchedPatches: [],
+            watchedCours: [],
+            commit: () => {}
+          };
           if (!state.accessToken)
             return empty;
           try {
@@ -2653,6 +2742,8 @@
               return empty;
             return {
               history: result.history,
+              remoteHistory: result.remoteHistory,
+              fullPull: result.fullPull,
               watchedPatches: result.watchedPatches,
               watchedCours: result.watchedCours,
               commit: () => {
@@ -2667,7 +2758,6 @@
                   lastError: "",
                   retryAt: 0
                 });
-                preferences.sync();
               }
             };
           } catch (error) {
@@ -2683,6 +2773,41 @@
   }
 
   // src/plugin/preferences.ts
+  var UNWRITABLE = Symbol("unwritable");
+  function plistSafe(value) {
+    if (value === null || typeof value === "undefined")
+      return UNWRITABLE;
+    if (Array.isArray(value)) {
+      return value.map(plistSafe).filter((item) => item !== UNWRITABLE);
+    }
+    if (typeof value === "object") {
+      const safe = {};
+      for (const [key, item] of Object.entries(value)) {
+        const cleaned = plistSafe(item);
+        if (cleaned !== UNWRITABLE)
+          safe[key] = cleaned;
+      }
+      return safe;
+    }
+    if (typeof value === "number" && !Number.isFinite(value))
+      return UNWRITABLE;
+    return value;
+  }
+  function createPlistSafeStore(preferences) {
+    return {
+      get(key) {
+        return preferences.get(key);
+      },
+      set(key, value) {
+        const safe = plistSafe(value);
+        if (safe !== UNWRITABLE)
+          preferences.set(key, safe);
+      },
+      sync() {
+        preferences.sync();
+      }
+    };
+  }
   function migrateStructuredPreferences(preferences) {
     const storedAddons = preferences.get("addons");
     const addons = parseAddons(storedAddons, preferences.get("addonManifestUrl"));
@@ -2693,7 +2818,7 @@
     }
     const watchHistory = preferences.get("watchHistory");
     if (typeof watchHistory === "string") {
-      preferences.set("watchHistory", parseWatchHistory(watchHistory));
+      preferences.set("watchHistory", plistSafe(parseWatchHistory(watchHistory)));
       changed = true;
     }
     const trakt = preferences.get("trakt");
@@ -2709,7 +2834,8 @@
   }
 
   // src/plugin/main.ts
-  var { core, event, global, http, mpv, overlay, preferences, sidebar, utils } = iina;
+  var { core, event, global, http, mpv, overlay, sidebar, utils } = iina;
+  var preferences = createPlistSafeStore(iina.preferences);
   var json = createJsonClient(http);
   var anime = createAnimeChainClient(http, preferences);
   var trakt = createIinaTraktClient(http, preferences, (error) => {
@@ -3244,7 +3370,7 @@
     const pending = pendingSimklUploads(state);
     const episodes = [];
     for (const show of pending) {
-      const media = history.find((entry) => entry.media.imdbId === show.id)?.media;
+      const media = history.find((entry) => historyTitleId(entry) === show.id)?.media;
       if (!media)
         continue;
       const coordinates = show.episodes.flatMap((episode) => {
@@ -3262,11 +3388,13 @@
     const points = [];
     for (const entry of history) {
       const progress = getResumePercent(entry.progress, entry.watched);
-      if (progress === null || !isImdbId(entry.media.imdbId))
+      if (progress === null)
         continue;
       if (known.has(`${entry.id}:${Math.round(progress)}`))
         continue;
       const cour = entry.episode ? (await anime.uploadEpisodes(entry.media, [entry.episode])).flatMap((episode) => episode.malId ? [{ malId: episode.malId, episode: episode.episode }] : [])[0] ?? null : null;
+      if (!cour && !isImdbId(entry.media.imdbId))
+        continue;
       points.push({
         context: { media: entry.media, episode: entry.episode, episodes: [] },
         progress,
@@ -3284,23 +3412,24 @@
     trakt.sync(watchHistory).then((synced) => simkl.sync(synced)).then(async (synced) => {
       const latestHistory = parseWatchHistory(preferences.get("watchHistory"));
       const merged = mergeWatchHistory(latestHistory, synced.history);
-      const stored = mergeSimklCours(applySimklWatchedPatches(parseEpisodeWatchState(preferences.get("episodeWatchState"), merged), synced.watchedPatches), synced.watchedCours);
+      const held = parseEpisodeWatchState(preferences.get("episodeWatchState"), merged);
+      const stored = mergeSimklCours(applySimklWatchedPatches(synced.fullPull ? clearSimklWatched(held) : held, synced.watchedPatches), synced.watchedCours);
       const simklChains = await simkl.courChains(stored.simklCours);
       const placed = await anime.placeWatchedCours(stored.simklCours, merged, simklChains);
       const watchedState = addSimklWatchedEpisodes(stored, placed.patches);
-      const history = mergeWatchHistory(applyWatchedMarks(merged, watchedState), placed.entries);
+      const history = applyWatchedMarks(mergeWatchHistory(merged, placed.entries), watchedState);
       watchHistory = history;
       episodeWatchState = watchedState;
       preferences.set("watchHistory", history);
       preferences.set("episodeWatchState", watchedState);
-      preferences.sync();
       synced.commit();
+      preferences.sync();
       sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, {
         history,
         episodeWatchState: watchedState
       });
       await uploadLocalHistory(watchedState, history, [
-        ...synced.history,
+        ...synced.remoteHistory,
         ...placed.entries
       ]);
     }).catch((error) => logDebug(`History sync failed: ${formatError(error)}`)).then(() => {

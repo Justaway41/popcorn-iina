@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { migrateStructuredPreferences, parseLanguagePreference } from "./preferences";
+import { createPlistSafeStore, migrateStructuredPreferences, parseLanguagePreference } from "./preferences";
 
 const info = await Bun.file(
     new URL("../../Info.json", import.meta.url)
@@ -94,4 +94,40 @@ test("keeps resolved anime chains across restarts", () => {
     const source = preferenceWriters[3];
     expect(source).toContain('preferences.get("animeChains")');
     expect(source).toContain('preferences.set("animeChains"');
+});
+
+test("a preference write drops what a property list cannot hold", () => {
+    // IINA stores a plugin's preferences as a property list, which has no null: one null
+    // anywhere failed the whole write with "the data couldn't be written because of an error in
+    // the destination for the data", and every sync silently stored nothing. A movie's history
+    // entry carries `episode: null`, so watched state stopped updating entirely.
+    const writes: Array<[string, unknown]> = [];
+    const store = createPlistSafeStore({
+        get() { return undefined; },
+        set(key, value) { writes.push([key, value]); },
+        sync() {}
+    });
+
+    store.set("watchHistory", [
+        { id: "tt1", episode: null, progress: 42 },
+        { id: "tt2", episode: { season: 1, episode: 2 }, progress: null },
+        { id: "tt3", progress: Number.NaN }
+    ]);
+
+    expect(writes).toEqual([["watchHistory", [
+        { id: "tt1", progress: 42 },
+        { id: "tt2", episode: { season: 1, episode: 2 } },
+        { id: "tt3" }
+    ]]]);
+
+    // Nested nulls and unwritable array members go too.
+    store.set("episodeWatchState", { local: [null, { id: "tt9", episodes: ["1:1"] }], simkl: [] });
+    expect(writes[1]).toEqual(["episodeWatchState", {
+        local: [{ id: "tt9", episodes: ["1:1"] }],
+        simkl: []
+    }]);
+
+    // A value that is nothing but null has no property list form, so what is stored stands.
+    store.set("mediaType", null);
+    expect(writes).toHaveLength(2);
 });

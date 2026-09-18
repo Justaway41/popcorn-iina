@@ -237,6 +237,7 @@ test("normalizes compact episode watch state", () => {
         simklCours: [
             { malId: "56784", imdbId: "tt0434665", name: "Bleach", year: "2022", ownsImdb: false, simklId: "2268810", episodes: [6, 6, 0, -2, 1.5], lastWatchedAt: "z" },
             { malId: "", episodes: [1] },
+            { malId: "12345", ownsImdb: true, episodes: [3] },
             { malId: "41467", episodes: [] },
             { malId: "16498", episodes: [], paused: { episode: 22, at: "y", progress: 46.14 } },
             { malId: "918", episodes: [], paused: { episode: 0, at: "x", progress: 5 } },
@@ -246,13 +247,25 @@ test("normalizes compact episode watch state", () => {
         local: [],
         simkl: [],
         simklCours: [
-            { malId: "56784", imdbId: "tt0434665", name: "Bleach", year: "2022", ownsImdb: false, simklId: "2268810", episodes: [6], lastWatchedAt: "z" },
+            { malId: "56784", imdbId: "tt0434665", name: "Bleach", year: "2022", ownership: "other", simklId: "2268810", episodes: [6], lastWatchedAt: "z" },
+            // A stored `ownsImdb: true` was written both for a verified owner and for a lookup
+            // that failed, so it cannot be read back as ownership.
+            {
+                malId: "12345",
+                imdbId: "",
+                name: "",
+                year: "",
+                ownership: "unknown",
+                simklId: "",
+                episodes: [3],
+                lastWatchedAt: ""
+            },
             {
                 malId: "16498",
                 imdbId: "",
                 name: "",
                 year: "",
-                ownsImdb: true,
+                ownership: "unknown",
                 simklId: "",
                 episodes: [],
                 lastWatchedAt: "",
@@ -316,7 +329,7 @@ test("adds Simkl episodes without dropping the cours a pull left out", () => {
         imdbId: "tt14986406",
         name: "Bleach",
         year: "2022",
-        ownsImdb: true,
+        ownership: "owner" as const,
         simklId: "",
         episodes,
         lastWatchedAt: "z"
@@ -368,7 +381,7 @@ test("a cour carrying only a paused session keeps the episodes already known", (
         imdbId: "tt0434665",
         name: "Bleach",
         year: "2024",
-        ownsImdb: false,
+        ownership: "other" as const,
         simklId: "2268810",
         episodes: [1, 2, 3, 4, 5, 6],
         lastWatchedAt: "a"

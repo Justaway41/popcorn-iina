@@ -35,7 +35,7 @@ function preferences(value: unknown) {
 test("returns an empty watched patch list when disconnected", async () => {
     const client = createIinaSimklClient({} as never, preferences({ ...connected, accessToken: "" }) as never, () => {});
 
-    expect(withoutCommit(await client.sync([]))).toEqual({ history: [], watchedPatches: [], watchedCours: [] });
+    expect(withoutCommit(await client.sync([]))).toEqual({ history: [], remoteHistory: [], fullPull: false, watchedPatches: [], watchedCours: [] });
 });
 
 test("returns exact watched patches from a connected sync", async () => {
@@ -70,6 +70,8 @@ test("returns exact watched patches from a connected sync", async () => {
 
     expect(withoutCommit(await client.sync([]))).toEqual({
         history: [],
+        remoteHistory: [],
+        fullPull: true,
         watchedPatches: [{ id: "tt5753856", episodes: ["2:1"] }],
         watchedCours: []
     });
@@ -122,7 +124,7 @@ test("drops watched patches from an account disconnected during sync", async () 
     stored = { ...connected, accessToken: "" };
     releaseRequest();
 
-    expect(withoutCommit(await result)).toEqual({ history: [], watchedPatches: [], watchedCours: [] });
+    expect(withoutCommit(await result)).toEqual({ history: [], remoteHistory: [], fullPull: false, watchedPatches: [], watchedCours: [] });
 });
 
 test("the cursor moves only when the caller commits what it stored", async () => {
@@ -165,4 +167,33 @@ test("a commit keeps what a scrobble saved while the pulled data was being store
         lastActivityAt: "2026-09-13T15:42:44Z",
         lastResumeKey: "tt9:1:2:40"
     });
+});
+
+test("a commit stores the cursor and leaves the flush to the caller", async () => {
+    // IINA drops a preference write that lands on the heels of another, and a lost flush used
+    // to take the whole sync with it. The pulled data and the cursor it belongs to now reach
+    // disk in the one flush the caller makes.
+    let flushes = 0;
+    const store = {
+        stored: { ...connected } as unknown,
+        get() { return this.stored; },
+        set(_key: string, next: unknown) { this.stored = next; },
+        sync() { flushes += 1; }
+    };
+    const http = {
+        async get(url: string) {
+            if (url.endsWith("/sync/activities")) {
+                return { statusCode: 200, data: { all: "2026-09-13T15:42:44Z" }, text: "" };
+            }
+            return { statusCode: 200, data: url.includes("/sync/playback") ? [] : {}, text: "" };
+        }
+    };
+    const client = createIinaSimklClient(http as never, store as never, () => {});
+
+    const synced = await client.sync([]);
+    const pulled = flushes;
+    synced.commit();
+
+    expect((store.get() as { lastActivityAt: string }).lastActivityAt).toBe("2026-09-13T15:42:44Z");
+    expect(flushes).toBe(pulled);
 });

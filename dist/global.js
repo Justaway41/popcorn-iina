@@ -3,9 +3,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.9",
+    version: "2.7.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 26,
+    ghVersion: 27,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -59,11 +59,43 @@
   var SLEEP_REFRESH_INTERVAL_SEC = 20;
   var PLUGINS_DIR = "~/Library/Application Support/com.colliderli.iina/plugins";
   var POPCORN_SPLASH_CANDIDATES = [
+    `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin/assets/Popcorn.png`,
+    `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin-dev/assets/Popcorn.png`,
     `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin/assets/Popcorn`,
     `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin-dev/assets/Popcorn`
   ];
   var POPCORN_PLAYER_LABEL = "popcorn";
   var POPCORN_WINDOW_OPEN = "popcornWindowOpen";
+
+  // src/shared/errors.ts
+  function describeRejection(error) {
+    if (error instanceof Error)
+      return error.message;
+    if (typeof error === "string")
+      return error;
+    const record = error && typeof error === "object" && !Array.isArray(error) ? error : null;
+    if (!record)
+      return String(error);
+    const described = ["message", "error", "reason", "description", "localizedDescription"].map((key) => typeof record[key] === "string" ? record[key] : "").find((value) => value !== "");
+    const status = finite(record.statusCode) ?? finite(record.status);
+    const code = typeof record.code === "string" ? record.code : finite(record.code) ?? "";
+    const parts = [
+      described ?? "",
+      status === null ? "" : `status ${status}`,
+      code === "" ? "" : `code ${code}`
+    ].filter((part) => part !== "");
+    if (parts.length > 0)
+      return parts.join(", ");
+    try {
+      const json = JSON.stringify(error);
+      return json && json !== "{}" ? json.slice(0, 200) : "no reason given";
+    } catch {
+      return "no reason given";
+    }
+  }
+  function finite(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
 
   // src/plugin/utils.ts
   var { console } = iina;
@@ -86,7 +118,7 @@
     return String(title).replace(/[\n\r,=]/g, " ");
   }
   function formatError(error) {
-    return error instanceof Error ? error.message : String(error);
+    return describeRejection(error);
   }
   function logDebug(...args) {
     if (DEBUG_LOGS)
@@ -315,6 +347,9 @@
       return episodes.length > 0 ? [{ id: show.id, episodes }] : [];
     });
   }
+  function clearSimklWatched(state) {
+    return { ...parseEpisodeWatchState(state), simkl: [], simklCours: [] };
+  }
   function mergeSimklCours(state, cours) {
     const next = parseEpisodeWatchState(state);
     for (const cour of parseWatchedCours(cours)) {
@@ -344,7 +379,7 @@
         imdbId: readString(record?.imdbId),
         name: readString(record?.name),
         year: readString(record?.year),
-        ownsImdb: record?.ownsImdb !== false,
+        ownership: readOwnership(record),
         simklId: readString(record?.simklId),
         episodes,
         lastWatchedAt: readString(record?.lastWatchedAt)
@@ -358,6 +393,12 @@
       }
       return episodes.length > 0 || cour.paused ? [cour] : [];
     });
+  }
+  function readOwnership(record) {
+    const stored = record?.ownership;
+    if (stored === "owner" || stored === "other" || stored === "unknown")
+      return stored;
+    return record?.ownsImdb === false ? "other" : "unknown";
   }
   function isCourEpisode(value) {
     return typeof value === "number" && Number.isInteger(value) && value > 0;
@@ -713,19 +754,29 @@
     const aired = Date.parse(episode.aired);
     return !Number.isFinite(aired) || aired <= now.getTime();
   }
-  function findNextEpisode(episodes, current, now = new Date) {
-    const sorted = episodes.filter((episode) => isEpisodeAvailable(episode, now)).sort((a, b) => {
+  function serialEpisodes(episodes, current) {
+    const specials = current?.season === 0;
+    const scoped = episodes.filter((episode) => episode.season === 0 === specials);
+    return scoped.length > 0 ? scoped : episodes;
+  }
+  function uniqueEpisodes(episodes) {
+    const sorted = [...episodes].sort((a, b) => {
       if (a.season !== b.season)
         return a.season - b.season;
       if (a.episode !== b.episode)
         return a.episode - b.episode;
       return a.id.localeCompare(b.id);
     });
-    const index = sorted.findIndex((episode) => episode.id === current.id);
-    if (index !== -1) {
-      return sorted[index + 1] || null;
-    }
-    return sorted.find((episode) => episode.season > current.season || episode.season === current.season && episode.episode > current.episode) || null;
+    return sorted.filter((episode, index) => {
+      const previous = sorted[index - 1];
+      return !previous || previous.season !== episode.season || previous.episode !== episode.episode;
+    });
+  }
+  function findNextEpisode(episodes, current, now = new Date) {
+    const ordered = uniqueEpisodes(serialEpisodes(episodes, current));
+    const index = ordered.findIndex((episode) => episode.id === current.id || episode.season === current.season && episode.episode === current.episode);
+    const next = index !== -1 ? ordered[index + 1] : ordered.find((episode) => episode.season > current.season || episode.season === current.season && episode.episode > current.episode);
+    return next && isEpisodeAvailable(next, now) ? next : null;
   }
   function isHttpUrl2(value) {
     return /^https?:\/\/[^/]+/i.test(value.trim());
@@ -1192,6 +1243,41 @@
   }
 
   // src/plugin/preferences.ts
+  var UNWRITABLE = Symbol("unwritable");
+  function plistSafe(value) {
+    if (value === null || typeof value === "undefined")
+      return UNWRITABLE;
+    if (Array.isArray(value)) {
+      return value.map(plistSafe).filter((item) => item !== UNWRITABLE);
+    }
+    if (typeof value === "object") {
+      const safe = {};
+      for (const [key, item] of Object.entries(value)) {
+        const cleaned = plistSafe(item);
+        if (cleaned !== UNWRITABLE)
+          safe[key] = cleaned;
+      }
+      return safe;
+    }
+    if (typeof value === "number" && !Number.isFinite(value))
+      return UNWRITABLE;
+    return value;
+  }
+  function createPlistSafeStore(preferences) {
+    return {
+      get(key) {
+        return preferences.get(key);
+      },
+      set(key, value) {
+        const safe = plistSafe(value);
+        if (safe !== UNWRITABLE)
+          preferences.set(key, safe);
+      },
+      sync() {
+        preferences.sync();
+      }
+    };
+  }
   function migrateStructuredPreferences(preferences) {
     const storedAddons = preferences.get("addons");
     const addons = parseAddons(storedAddons, preferences.get("addonManifestUrl"));
@@ -1202,7 +1288,7 @@
     }
     const watchHistory = preferences.get("watchHistory");
     if (typeof watchHistory === "string") {
-      preferences.set("watchHistory", parseWatchHistory(watchHistory));
+      preferences.set("watchHistory", plistSafe(parseWatchHistory(watchHistory)));
       changed = true;
     }
     const trakt = preferences.get("trakt");
@@ -1218,7 +1304,8 @@
   }
 
   // src/plugin/global.ts
-  var { console: console2, global, menu, preferences } = iina;
+  var { console: console2, global, menu } = iina;
+  var preferences = createPlistSafeStore(iina.preferences);
   migrateStructuredPreferences(preferences);
   var popcornPlayerId = null;
   preferences.set(POPCORN_WINDOW_OPEN, false);

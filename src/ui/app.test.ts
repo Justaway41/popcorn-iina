@@ -20,7 +20,8 @@ import {
     getProgressDisplay,
     getSizeSortControl,
     mergeSettledCatalogResults,
-    replaceRequest
+    replaceRequest,
+    resolveUpNextEpisode
 } from "./app";
 import { isEpisodeWatched, parseEpisodeWatchState } from "../shared/history";
 import type { Episode, Media } from "../shared/stremio";
@@ -343,4 +344,82 @@ test("matches the row when the overlay started the stream, not just a sidebar cl
     // A missing release name is what the bug looked like: no url match, no name to fall back on.
     const nameless = parseNowPlaying({ videoId: "tt0988818:1:11", url: overlayStarted.url });
     expect(isPlayingStream(row, playingStream(nameless, "tt0988818:1:11"))).toBe(false);
+});
+
+test("a Continue Watching card resumes an unfinished episode", () => {
+    const episodes = [episode(1, 1), episode(1, 2), episode(1, 3)];
+    const entry = {
+        id: episodes[1].id,
+        media: show,
+        episode: episodes[1],
+        lastPlayedAt: "2026-09-03T00:00:00.000Z",
+        watched: false,
+        progress: 42
+    };
+
+    const target = resolveUpNextEpisode(entry, episodes, () => false);
+    expect(target?.resume).toBe(true);
+    expect(target?.episode.id).toBe("tt9:1:2");
+});
+
+test("a Continue Watching card offers the first episode the watched set is missing", () => {
+    // The card asked for the episode after the one history happened to carry, so a gap in the
+    // exact watched state was stepped over and rewatching an older episode moved it backwards.
+    const episodes = [episode(1, 1), episode(1, 2), episode(1, 3), episode(1, 4)];
+    const state = parseEpisodeWatchState({ simkl: [{ id: "tt9", episodes: ["1:1", "1:3"] }] });
+    const watched = (item: Episode) => isEpisodeWatched(state, show, item);
+    const finished = (at: Episode) => ({
+        id: at.id,
+        media: show,
+        episode: at,
+        lastPlayedAt: "2026-09-03T00:00:00.000Z",
+        watched: true,
+        progress: 100
+    });
+
+    expect(resolveUpNextEpisode(finished(episodes[2]), episodes, watched))
+        .toEqual({ episode: episodes[1], resume: false });
+    // Rewatching episode one does not pull the target back to episode two-after-one.
+    expect(resolveUpNextEpisode(finished(episodes[0]), episodes, watched))
+        .toEqual({ episode: episodes[1], resume: false });
+    // A part-watched episode the watched set says is finished elsewhere is not resumed.
+    expect(resolveUpNextEpisode(
+        { ...finished(episodes[0]), watched: false, progress: 42 },
+        episodes,
+        watched
+    )).toEqual({ episode: episodes[1], resume: false });
+
+    // Nothing left to watch removes the card.
+    const allWatched = parseEpisodeWatchState({
+        simkl: [{ id: "tt9", episodes: ["1:1", "1:2", "1:3", "1:4"] }]
+    });
+    expect(resolveUpNextEpisode(
+        finished(episodes[3]),
+        episodes,
+        (item) => isEpisodeWatched(allWatched, show, item)
+    )).toBeNull();
+});
+
+test("an unwatched special never becomes what a show is continued with", () => {
+    const episodes = [episode(0, 1), episode(1, 1), episode(1, 2)];
+    const watched = (item: Episode) => item.season === 1 && item.episode === 1;
+    const entry = {
+        id: episodes[1].id,
+        media: show,
+        episode: episodes[1],
+        lastPlayedAt: "2026-09-03T00:00:00.000Z",
+        watched: true,
+        progress: 100
+    };
+
+    expect(resolveUpNextEpisode(entry, episodes, watched)?.episode.id).toBe("tt9:1:2");
+    expect(getActiveSeason(episodes, undefined, watched)).toBe(1);
+});
+
+test("a Continue Watching card for a series the metadata has no episodes for is dropped", () => {
+    // A cour once placed as its own show left a card on an IMDb id Cinemeta answers with an
+    // empty body: no poster, no episode list, and an "After SxxExx" label that never resolved.
+    // A lookup that merely failed still leaves the card alone.
+    expect(appSource).toContain("if (!details || !slot.isConnected) return;");
+    expect(appSource).toMatch(/if \(details\.episodes\.length === 0\) \{\s*slot\.remove\(\);/);
 });

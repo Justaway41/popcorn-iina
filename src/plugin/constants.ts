@@ -10,7 +10,15 @@ export const SLEEP_CAFFEINATE_TIMEOUT_SEC = 30;
 export const SLEEP_REFRESH_INTERVAL_SEC = 20;
 
 const PLUGINS_DIR = "~/Library/Application Support/com.colliderli.iina/plugins";
+/**
+ * The splash carries its `.png` extension so macOS can tell what it is: without one the window
+ * showed a blank document icon, and the icon used to be painted onto the file by an AppleScript
+ * at startup - which is what crashed IINA on macOS 27. An extension asks nothing of the system
+ * but the file's own name. The extensionless paths stay for a plugin folder written before this.
+ */
 export const POPCORN_SPLASH_CANDIDATES = [
+    `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin/assets/Popcorn.png`,
+    `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin-dev/assets/Popcorn.png`,
     `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin/assets/Popcorn`,
     `${PLUGINS_DIR}/xyz.brbc.popcorn.iinaplugin-dev/assets/Popcorn`
 ];

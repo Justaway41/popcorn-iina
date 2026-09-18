@@ -126,7 +126,9 @@ function releaseRank(name: string, previous: Set<string>): number {
  * Picks the stream the overlay's Next Episode button will play. Availability decides whether
  * playback starts now, so a stream reported cached ranks first; then come the user's audio and
  * subtitle preferences - unknown states stay neutral and never read as negative - then the
- * resolution already playing, and failing that the highest on offer.
+ * resolution already playing, and failing that the highest on offer. A release whose resolution
+ * cannot be read is ranked last rather than discarded: discarding it left the overlay with no
+ * next episode at all for providers that name no resolution, while the sidebar played it.
  */
 export function pickNextEpisodeStream<T extends {
     resolution: string;
@@ -144,7 +146,6 @@ export function pickNextEpisodeStream<T extends {
     let bestRank: number[] = [];
     streams.forEach((stream, index) => {
         const height = qualityHeight(stream.resolution);
-        if (height === null) return;
         const rank = [
             // Before availability: a stream of a different show is no use however fast it starts.
             showRank(stream.showTitle || "", options.showTitle || ""),
@@ -154,10 +155,13 @@ export function pickNextEpisodeStream<T extends {
             releaseRank(stream.rawTitle || "", previousRelease),
             languageRank(stream.audioLanguages, preferredAudio),
             languageRank(stream.subtitleLanguages, preferredSubtitle),
+            // A named resolution is preferred over an unknown one, but only once nothing more
+            // important separates them.
+            height === null ? 1 : 0,
             // Matching what is playing comes first, but everything else is ranked by height
             // alone: absolute distance used to prefer 720p over 2160p when 1080p was playing.
             target !== null && height === target ? 0 : 1,
-            -height,
+            -(height ?? 0),
             index
         ];
         if (!bestStream || compareRanks(rank, bestRank) < 0) {

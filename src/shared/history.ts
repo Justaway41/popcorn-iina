@@ -33,6 +33,8 @@ export type WatchedShowPatch = WatchedShow;
  * count from one within it. They are not season coordinates and cannot be stored as they
  * arrive - see `parseSimklWatchedCours`.
  */
+export type CourOwnership = "owner" | "other" | "unknown";
+
 export interface WatchedCour {
     malId: string;
     /**
@@ -43,11 +45,13 @@ export interface WatchedCour {
     name: string;
     year: string;
     /**
-     * Whether Simkl resolves `imdbId` back to this cour rather than to another one. True for a
-     * show's first cour, which is the only case where the cour's own numbering can be read as
-     * season one of `imdbId` without walking the chain.
+     * What Simkl answers when `imdbId` is resolved back: `owner` means it leads to this cour,
+     * which is the only case where the cour's own numbering can be read as season one of
+     * `imdbId` without walking the chain; `other` means it names a different cour. A lookup
+     * that failed leaves `unknown`, which must be treated as "needs the chain" rather than as
+     * ownership - a transport failure used to read as permission to place the cour directly.
      */
-    ownsImdb: boolean;
+    ownership: CourOwnership;
     /** Simkl's own id for the cour, which is what `imdbId` is checked against. */
     simklId: string;
     episodes: number[];
@@ -189,7 +193,7 @@ function parseWatchedCours(value: unknown): WatchedCour[] {
             imdbId: readString(record?.imdbId),
             name: readString(record?.name),
             year: readString(record?.year),
-            ownsImdb: record?.ownsImdb !== false,
+            ownership: readOwnership(record),
             simklId: readString(record?.simklId),
             episodes,
             lastWatchedAt: readString(record?.lastWatchedAt)
@@ -203,6 +207,17 @@ function parseWatchedCours(value: unknown): WatchedCour[] {
         }
         return episodes.length > 0 || cour.paused ? [cour] : [];
     });
+}
+
+/**
+ * Ownership as stored. A state written before the check was tri-state recorded `true` both for
+ * a verified owner and for a lookup that failed, so it cannot be trusted as ownership and is
+ * read back as unknown; the next sync verifies it again.
+ */
+function readOwnership(record: Record<string, unknown> | null): CourOwnership {
+    const stored = record?.ownership;
+    if (stored === "owner" || stored === "other" || stored === "unknown") return stored;
+    return record?.ownsImdb === false ? "other" : "unknown";
 }
 
 function isCourEpisode(value: unknown): value is number {

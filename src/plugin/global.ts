@@ -1,8 +1,10 @@
 import { POPCORN_PLAYER_LABEL, POPCORN_WINDOW_OPEN } from "./constants";
 import { formatError, getSplashUrl, logDebug } from "./utils";
-import { migrateStructuredPreferences } from "./preferences";
+import { createPlistSafeStore, migrateStructuredPreferences } from "./preferences";
 
-const { console, global, menu, preferences } = iina;
+const { console, global, menu } = iina;
+// IINA's property list cannot hold a null, and one in a value fails the whole flush silently.
+const preferences = createPlistSafeStore(iina.preferences);
 
 migrateStructuredPreferences(preferences);
 // Only the id of a window this entry created can be addressed on IINA 1.4.4.

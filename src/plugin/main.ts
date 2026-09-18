@@ -14,6 +14,7 @@ import {
     addSimklWatchedEpisodes,
     applyWatchedMarks,
     applySimklWatchedPatches,
+    clearSimklWatched,
     mergeSimklCours,
     getResumePercent,
     pendingSimklUploads,
@@ -21,6 +22,7 @@ import {
     type WatchHistoryEntry,
     getHistoryEntry,
     historyContextId,
+    historyTitleId,
     markEpisodeWatched,
     parseEpisodeWatchState,
     parseWatchHistory,
@@ -73,10 +75,13 @@ import {
     type IntroInterval,
     type OverlayAction
 } from "./intro";
-import { parseLanguagePreference } from "./preferences";
+import { createPlistSafeStore, parseLanguagePreference } from "./preferences";
 import { formatError, isHttpUrl, logDebug, sanitizeMediaTitle } from "./utils";
 
-const { core, event, global, http, mpv, overlay, preferences, sidebar, utils } = iina;
+const { core, event, global, http, mpv, overlay, sidebar, utils } = iina;
+// Every write goes through here: IINA's property list cannot hold a null, and one in the value
+// fails the whole flush silently.
+const preferences = createPlistSafeStore(iina.preferences);
 const json = createJsonClient(http);
 const anime = createAnimeChainClient(http, preferences);
 const trakt = createIinaTraktClient(http, preferences, (error) => {
@@ -787,7 +792,7 @@ async function uploadLocalHistory(
     const pending = pendingSimklUploads(state);
     const episodes: SimklUploadEpisode[] = [];
     for (const show of pending) {
-        const media = history.find((entry) => entry.media.imdbId === show.id)?.media;
+        const media = history.find((entry) => historyTitleId(entry) === show.id)?.media;
         if (!media) continue;
         const coordinates = show.episodes.flatMap((episode) => {
             const [season, number] = episode.split(":").map(Number);
@@ -816,7 +821,7 @@ async function uploadLocalResume(
     const points: SimklResumePoint[] = [];
     for (const entry of history) {
         const progress = getResumePercent(entry.progress, entry.watched);
-        if (progress === null || !isImdbId(entry.media.imdbId)) continue;
+        if (progress === null) continue;
         if (known.has(`${entry.id}:${Math.round(progress)}`)) continue;
         const cour = entry.episode
             ? (await anime.uploadEpisodes(entry.media, [entry.episode]))
@@ -824,6 +829,9 @@ async function uploadLocalResume(
                     ? [{ malId: episode.malId, episode: episode.episode }]
                     : [])[0] ?? null
             : null;
+        // A cour carries the MAL id Simkl accepts on its own; without one the position can only
+        // be addressed by IMDb id.
+        if (!cour && !isImdbId(entry.media.imdbId)) continue;
         points.push({
             context: { media: entry.media, episode: entry.episode, episodes: [] },
             progress,
@@ -849,9 +857,14 @@ function syncRemoteHistory(): void {
             // Anime arrives keyed by cour and has to be walked back onto Cinemeta's seasons
             // before it means anything to the sidebar. Reading preferences again afterwards
             // keeps progress recorded while the lookups ran.
+            // A pull that carried everything is the whole truth, so marks placed from state
+            // that has since been corrected - a cour filed under a show Cinemeta never had, or
+            // anything lost while preference writes were being discarded - are rebuilt from it
+            // rather than kept forever by the union.
+            const held = parseEpisodeWatchState(preferences.get("episodeWatchState"), merged);
             const stored = mergeSimklCours(
                 applySimklWatchedPatches(
-                    parseEpisodeWatchState(preferences.get("episodeWatchState"), merged),
+                    synced.fullPull ? clearSimklWatched(held) : held,
                     synced.watchedPatches
                 ),
                 synced.watchedCours
@@ -863,25 +876,31 @@ function syncRemoteHistory(): void {
             const simklChains = await simkl.courChains(stored.simklCours);
             const placed = await anime.placeWatchedCours(stored.simklCours, merged, simklChains);
             const watchedState = addSimklWatchedEpisodes(stored, placed.patches);
-            // Marks are applied before the merge so a locally part-watched episode that another
-            // device finished stops occupying the one unfinished slot its title gets.
-            const history = mergeWatchHistory(
-                applyWatchedMarks(merged, watchedState),
-                placed.entries
+            // Marks are applied after the merge so nothing an episode is already known to have
+            // finished can reintroduce it as unfinished - a locally part-watched episode another
+            // device completed, or a paused session Simkl never cleared - and take the one
+            // unfinished slot its title gets.
+            const history = applyWatchedMarks(
+                mergeWatchHistory(merged, placed.entries),
+                watchedState
             );
             watchHistory = history;
             episodeWatchState = watchedState;
             preferences.set("watchHistory", history);
             preferences.set("episodeWatchState", watchedState);
-            preferences.sync();
-            // Only now that what was pulled is stored does the cursor move past it.
+            // Only now that what was pulled is stored does the cursor move past it - and both
+            // go to disk in one flush, because IINA drops a write that lands immediately after
+            // another one and the whole sync was being lost that way.
             synced.commit();
+            preferences.sync();
             sidebar.postMessage(MESSAGE_NAMES.HistoryUpdated, {
                 history,
                 episodeWatchState: watchedState
             });
+            // Only what Simkl reported, never the merged history: passing the merge made every
+            // local position look like one Simkl already had, and nothing was backfilled.
             await uploadLocalHistory(watchedState, history, [
-                ...synced.history,
+                ...synced.remoteHistory,
                 ...placed.entries
             ]);
         })

@@ -264,7 +264,7 @@
         imdbId: readString(record?.imdbId),
         name: readString(record?.name),
         year: readString(record?.year),
-        ownsImdb: record?.ownsImdb !== false,
+        ownership: readOwnership(record),
         simklId: readString(record?.simklId),
         episodes,
         lastWatchedAt: readString(record?.lastWatchedAt)
@@ -278,6 +278,12 @@
       }
       return episodes.length > 0 || cour.paused ? [cour] : [];
     });
+  }
+  function readOwnership(record) {
+    const stored = record?.ownership;
+    if (stored === "owner" || stored === "other" || stored === "unknown")
+      return stored;
+    return record?.ownsImdb === false ? "other" : "unknown";
   }
   function isCourEpisode(value) {
     return typeof value === "number" && Number.isInteger(value) && value > 0;
@@ -430,6 +436,36 @@
     return typeof value === "string" ? value : "";
   }
   function getNumber(value) {
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  }
+
+  // src/shared/errors.ts
+  function describeRejection(error) {
+    if (error instanceof Error)
+      return error.message;
+    if (typeof error === "string")
+      return error;
+    const record = error && typeof error === "object" && !Array.isArray(error) ? error : null;
+    if (!record)
+      return String(error);
+    const described = ["message", "error", "reason", "description", "localizedDescription"].map((key) => typeof record[key] === "string" ? record[key] : "").find((value) => value !== "");
+    const status = finite(record.statusCode) ?? finite(record.status);
+    const code = typeof record.code === "string" ? record.code : finite(record.code) ?? "";
+    const parts = [
+      described ?? "",
+      status === null ? "" : `status ${status}`,
+      code === "" ? "" : `code ${code}`
+    ].filter((part) => part !== "");
+    if (parts.length > 0)
+      return parts.join(", ");
+    try {
+      const json = JSON.stringify(error);
+      return json && json !== "{}" ? json.slice(0, 200) : "no reason given";
+    } catch {
+      return "no reason given";
+    }
+  }
+  function finite(value) {
     return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
 
@@ -676,19 +712,23 @@
     const aired = Date.parse(episode.aired);
     return !Number.isFinite(aired) || aired <= now.getTime();
   }
-  function findNextEpisode(episodes, current, now = new Date) {
-    const sorted = episodes.filter((episode) => isEpisodeAvailable(episode, now)).sort((a, b) => {
+  function serialEpisodes(episodes, current) {
+    const specials = current?.season === 0;
+    const scoped = episodes.filter((episode) => episode.season === 0 === specials);
+    return scoped.length > 0 ? scoped : episodes;
+  }
+  function uniqueEpisodes(episodes) {
+    const sorted = [...episodes].sort((a, b) => {
       if (a.season !== b.season)
         return a.season - b.season;
       if (a.episode !== b.episode)
         return a.episode - b.episode;
       return a.id.localeCompare(b.id);
     });
-    const index = sorted.findIndex((episode) => episode.id === current.id);
-    if (index !== -1) {
-      return sorted[index + 1] || null;
-    }
-    return sorted.find((episode) => episode.season > current.season || episode.season === current.season && episode.episode > current.episode) || null;
+    return sorted.filter((episode, index) => {
+      const previous = sorted[index - 1];
+      return !previous || previous.season !== episode.season || previous.episode !== episode.episode;
+    });
   }
   function isHttpUrl(value) {
     return /^https?:\/\/[^/]+/i.test(value.trim());
@@ -1195,7 +1235,7 @@
   }
 
   // src/shared/simkl.ts
-  var FULL_PULL_VERSION = 2;
+  var FULL_PULL_VERSION = 3;
 
   class SimklError extends Error {
     status;
@@ -1275,7 +1315,14 @@
   }
   async function syncSimklHistory(transport, state, local, now = Date.now()) {
     if (!isSimklConnected(state) || state.retryAt > now) {
-      return { state, history: local, watchedPatches: [], watchedCours: [] };
+      return {
+        state,
+        history: local,
+        remoteHistory: [],
+        fullPull: false,
+        watchedPatches: [],
+        watchedCours: []
+      };
     }
     try {
       const activities = getRecord4(await request2(transport, state, "GET", "/sync/activities", null, now));
@@ -1284,6 +1331,8 @@
         return {
           state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
           history: local,
+          remoteHistory: [],
+          fullPull: false,
           watchedPatches: [],
           watchedCours: []
         };
@@ -1300,6 +1349,7 @@
       const playback = await request2(transport, state, "GET", `/sync/playback${cursor}`, null, now);
       const watchedCours = parseSimklWatchedCours(items, playback);
       await markCourOwnership(transport, state, watchedCours, now);
+      const remoteHistory = parseSimklHistory(items, playback);
       return {
         state: {
           ...state,
@@ -1309,7 +1359,9 @@
           lastError: "",
           retryAt: 0
         },
-        history: mergeWatchHistory(local, parseSimklHistory(items, playback)),
+        history: mergeWatchHistory(local, remoteHistory),
+        remoteHistory,
+        fullPull: from === "",
         watchedPatches: parseSimklWatchedPatches(items),
         watchedCours
       };
@@ -1323,6 +1375,8 @@
             retryAt: 0
           },
           history: local,
+          remoteHistory: [],
+          fullPull: false,
           watchedPatches: [],
           watchedCours: []
         };
@@ -1334,6 +1388,8 @@
           retryAt: error instanceof SimklError ? error.retryAt : 0
         },
         history: local,
+        remoteHistory: [],
+        fullPull: false,
         watchedPatches: [],
         watchedCours: []
       };
@@ -1360,7 +1416,7 @@
           continue;
         for (const cour of group) {
           if (cour.simklId)
-            cour.ownsImdb = cour.simklId === simklId;
+            cour.ownership = cour.simklId === simklId ? "owner" : "other";
         }
       } catch {}
     }
@@ -1384,7 +1440,7 @@
         imdbId: getString4(getRecord4(show?.ids)?.imdb),
         name: getString4(show?.title),
         year: String(show?.year ?? ""),
-        ownsImdb: true,
+        ownership: "unknown",
         simklId: String(getRecord4(show?.ids)?.simkl ?? ""),
         episodes,
         lastWatchedAt: getString4(item?.last_watched_at)
@@ -1416,7 +1472,7 @@
         imdbId: getString4(getRecord4(show?.ids)?.imdb),
         name: getString4(show?.title),
         year: String(show?.year ?? ""),
-        ownsImdb: true,
+        ownership: "unknown",
         simklId: String(getRecord4(show?.ids)?.simkl ?? ""),
         episodes: [],
         lastWatchedAt: "",
@@ -1591,31 +1647,6 @@
     const reason = describeRejection(error).replace(/https?:\/\/\S*/gi, "").replace(/\s+/g, " ").trim();
     return new Error(reason ? `Simkl request failed: ${reason}` : "Simkl request failed.");
   }
-  function describeRejection(error) {
-    if (error instanceof Error)
-      return error.message;
-    if (typeof error === "string")
-      return error;
-    const record = getRecord4(error);
-    if (!record)
-      return String(error);
-    const described = ["message", "error", "reason", "description", "localizedDescription"].map((key) => getString4(record[key])).find((value) => value !== "");
-    const status = getFiniteNumber(record.statusCode) ?? getFiniteNumber(record.status);
-    const code = getString4(record.code) || (getFiniteNumber(record.code) ?? "");
-    const parts = [
-      described ?? "",
-      status === null ? "" : `status ${status}`,
-      code === "" ? "" : `code ${code}`
-    ].filter((part) => part !== "");
-    if (parts.length > 0)
-      return parts.join(", ");
-    try {
-      const json = JSON.stringify(error);
-      return json && json !== "{}" ? json.slice(0, 200) : "no reason given";
-    } catch {
-      return "no reason given";
-    }
-  }
   function responseError2(response, now) {
     const retryAt = response.status === 429 ? now + (retryAfterMs2(response.headers) ?? DEFAULT_RETRY_MS2) : 0;
     return new SimklError(response.status, retryAt, response.status === 429 ? "Simkl rate limit exceeded." : `Simkl request failed with status ${response.status}.`);
@@ -1629,9 +1660,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.9",
+    version: "2.7.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 26,
+    ghVersion: 27,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"

@@ -1,3 +1,4 @@
+import { describeRejection } from "./errors";
 import type { WatchedCour, WatchedShowPatch, WatchHistoryEntry } from "./history";
 import type { PlaybackContext } from "./messages";
 import { isImdbId } from "./stremio";
@@ -51,8 +52,10 @@ export interface SimklState {
 /**
  * 1: an incremental pull could erase a cour's episodes (2.6.5).
  * 2: the cursor was saved before the pulled episodes, so an interrupted sync skipped them (2.6.8).
+ * 3: a preference write carrying a null was discarded whole, so everything pulled between
+ *    2026-09-17 and the fix was stored nowhere while the cursor moved on without it.
  */
-export const FULL_PULL_VERSION = 2;
+export const FULL_PULL_VERSION = 3;
 
 export interface SimklPin {
     userCode: string;
@@ -63,7 +66,19 @@ export interface SimklPin {
 
 export interface SimklHistorySyncResult {
     state: SimklState;
+    /** The local history with everything Simkl reported merged into it. */
     history: WatchHistoryEntry[];
+    /**
+     * Whether this pull asked for everything rather than what changed. What such a pull reports
+     * is the whole truth, so held state that no longer matches it can be rebuilt from it.
+     */
+    fullPull: boolean;
+    /**
+     * Only what Simkl itself reported. `history` has the local entries merged in, so reading
+     * ownership of a position from it made every local resume point look like one Simkl already
+     * had, and nothing was ever backfilled.
+     */
+    remoteHistory: WatchHistoryEntry[];
     watchedPatches: WatchedShowPatch[];
     watchedCours: WatchedCour[];
 }
@@ -205,7 +220,9 @@ export async function simklScrobble(
     now = Date.now()
 ): Promise<SimklState> {
     if (!isSimklConnected(state)) return state;
-    if (!isImdbId(context.media.imdbId)) return state;
+    // A resolved cour carries the MAL id Simkl accepts, so anime from a catalogue that has no
+    // IMDb metadata at all is still addressable; only an IMDb-addressed payload needs the id.
+    if (!cour && !isImdbId(context.media.imdbId)) return state;
     if (state.retryAt > now) return state;
     try {
         await request(
@@ -293,8 +310,18 @@ export async function uploadSimklHistory(
     const key = uploadKey(episodes);
     if (key === state.lastUploadKey) return state;
     try {
-        await request(transport, state, "POST", "/sync/history", buildHistoryUpload(episodes), now);
-        return { ...state, lastUploadKey: key, lastError: "", retryAt: 0 };
+        const result = await request(
+            transport, state, "POST", "/sync/history", buildHistoryUpload(episodes), now
+        );
+        // Simkl answers 2xx even when it matched nothing: the items it could not find come back
+        // under `not_found`. Recording the key for such an answer retired the set for good, so
+        // an upload is only complete once nothing was left unmatched.
+        return {
+            ...state,
+            lastUploadKey: hasUnmatchedUploads(result) ? state.lastUploadKey : key,
+            lastError: "",
+            retryAt: 0
+        };
     } catch (error) {
         return {
             ...state,
@@ -302,6 +329,16 @@ export async function uploadSimklHistory(
             retryAt: error instanceof SimklError ? error.retryAt : 0
         };
     }
+}
+
+/**
+ * Whether Simkl reported anything it could not match. The payload names media, so only whether
+ * something was rejected is read out of it - never what.
+ */
+export function hasUnmatchedUploads(result: unknown): boolean {
+    const notFound = getRecord(getRecord(result)?.not_found);
+    if (!notFound) return false;
+    return Object.values(notFound).some((value) => Array.isArray(value) && value.length > 0);
 }
 
 export function uploadKey(episodes: SimklUploadEpisode[]): string {
@@ -318,17 +355,20 @@ export interface SimklResumePoint {
     cour: AnimeCourEpisode | null;
 }
 
-export function resumeKey(points: SimklResumePoint[]): string {
-    return points
-        .map((point) => {
-            const episode = point.context.episode;
-            const id = point.cour?.malId || point.context.media.imdbId;
-            const at = episode ? `${episode.season}:${episode.episode}` : "";
-            return `${id}:${at}:${Math.round(point.progress)}`;
-        })
-        .sort()
-        .join(",");
+/** Identifies one position, so a point already delivered is not counted as pending again. */
+export function resumePointKey(point: SimklResumePoint): string {
+    const episode = point.context.episode;
+    const id = point.cour?.malId || point.context.media.imdbId;
+    const at = episode ? `${episode.season}:${episode.episode}` : "";
+    return `${id}:${at}:${Math.round(point.progress)}`;
 }
+
+export function resumeKey(points: SimklResumePoint[]): string {
+    return points.map(resumePointKey).sort().join(",");
+}
+
+/** Positions recorded as delivered. Enough to outlast the points one pass can carry. */
+const MAX_TRACKED_RESUME_KEYS = 64;
 
 /**
  * Sends where playback was left for anything still unfinished. Scrobbling covers this while
@@ -343,12 +383,19 @@ export async function uploadSimklResume(
     now = Date.now()
 ): Promise<SimklState> {
     if (!isSimklConnected(state) || state.retryAt > now || points.length === 0) return state;
-    const key = resumeKey(points);
-    if (key === state.lastResumeKey) return state;
+    // Which positions have actually reached Simkl, rather than which set was last asked for:
+    // the key used to describe every point while only the first few were sent, so a ninth
+    // position was marked delivered without a request and never sent again.
+    const delivered = state.lastResumeKey ? state.lastResumeKey.split(",") : [];
+    const sent = new Set(delivered);
+    const pending = points.filter((point) => !sent.has(resumePointKey(point)));
+    if (pending.length === 0) return state;
     let failure: unknown = null;
+    const carried: string[] = [];
     // Simkl allows one scrobble operation per account at a time, so these go one after another
-    // and a single refusal is recorded rather than abandoning the positions behind it.
-    for (const point of points.slice(0, MAX_RESUME_UPLOADS)) {
+    // and a single refusal is recorded rather than abandoning the positions behind it. The ones
+    // this pass could not reach stay pending, and the next pass starts with them.
+    for (const point of pending.slice(0, MAX_RESUME_UPLOADS)) {
         try {
             await request(
                 transport,
@@ -358,13 +405,18 @@ export async function uploadSimklResume(
                 buildSimklScrobblePayload(point.context, point.progress, point.cour),
                 now
             );
+            carried.push(resumePointKey(point));
         } catch (error) {
             failure = error;
         }
     }
-    if (!failure) return { ...state, lastResumeKey: key, lastError: "", retryAt: 0 };
+    const lastResumeKey = [...new Set([...carried, ...delivered])]
+        .slice(0, MAX_TRACKED_RESUME_KEYS)
+        .join(",");
+    if (!failure) return { ...state, lastResumeKey, lastError: "", retryAt: 0 };
     return {
         ...state,
+        lastResumeKey,
         lastError: failure instanceof Error ? failure.message : "Simkl request failed.",
         retryAt: failure instanceof SimklError ? failure.retryAt : 0
     };
@@ -430,7 +482,8 @@ export async function resolveSimklCourChains(
     const chains: SimklCourChain[] = [];
     const roots = new Set<string>();
     for (const cour of cours) {
-        if (cour.ownsImdb || !cour.simklId) continue;
+        // An unverified cour is chained like a non-owner: the check may simply have failed.
+        if (cour.ownership === "owner" || !cour.simklId) continue;
         let root = await read(cour.simklId);
         if (!root) continue;
         for (let hop = 0; hop < MAX_COUR_HOPS && root.prequel; hop += 1) {
@@ -491,7 +544,10 @@ export async function syncSimklHistory(
     now = Date.now()
 ): Promise<SimklHistorySyncResult> {
     if (!isSimklConnected(state) || state.retryAt > now) {
-        return { state, history: local, watchedPatches: [], watchedCours: [] };
+        return {
+            state, history: local, remoteHistory: [], fullPull: false,
+            watchedPatches: [], watchedCours: []
+        };
     }
     try {
         const activities = getRecord(
@@ -503,6 +559,8 @@ export async function syncSimklHistory(
             return {
                 state: { ...state, lastSyncAt: new Date(now).toISOString(), lastError: "", retryAt: 0 },
                 history: local,
+                remoteHistory: [],
+                fullPull: false,
                 watchedPatches: [],
                 watchedCours: []
             };
@@ -524,6 +582,7 @@ export async function syncSimklHistory(
 
         const watchedCours = parseSimklWatchedCours(items, playback);
         await markCourOwnership(transport, state, watchedCours, now);
+        const remoteHistory = parseSimklHistory(items, playback);
 
         return {
             state: {
@@ -534,7 +593,9 @@ export async function syncSimklHistory(
                 lastError: "",
                 retryAt: 0
             },
-            history: mergeWatchHistory(local, parseSimklHistory(items, playback)),
+            history: mergeWatchHistory(local, remoteHistory),
+            remoteHistory,
+            fullPull: from === "",
             watchedPatches: parseSimklWatchedPatches(items),
             watchedCours
         };
@@ -548,6 +609,8 @@ export async function syncSimklHistory(
                     retryAt: 0
                 },
                 history: local,
+                remoteHistory: [],
+                fullPull: false,
                 watchedPatches: [],
                 watchedCours: []
             };
@@ -559,6 +622,8 @@ export async function syncSimklHistory(
                 retryAt: error instanceof SimklError ? error.retryAt : 0
             },
             history: local,
+            remoteHistory: [],
+            fullPull: false,
             watchedPatches: [],
             watchedCours: []
         };
@@ -580,7 +645,7 @@ export function parseSimklWatchedPatches(items: unknown): WatchedShowPatch[] {
  * series it continues, so the id alone cannot say which show an episode belongs to; asking
  * what the id resolves to is what separates "this is the show's first cour, its numbering is
  * the show's own" from "this id names a different show". A lookup that fails leaves the cour
- * trusted, which is how it behaved before this check existed.
+ * unknown: reading a transport failure as ownership placed later cours on the wrong show.
  */
 async function markCourOwnership(
     transport: HttpTransport,
@@ -609,10 +674,11 @@ async function markCourOwnership(
             const simklId = String(getRecord(first?.ids)?.simkl ?? "");
             if (!simklId) continue;
             for (const cour of group) {
-                if (cour.simklId) cour.ownsImdb = cour.simklId === simklId;
+                if (cour.simklId) cour.ownership = cour.simklId === simklId ? "owner" : "other";
             }
         } catch {
-            // Leave the group trusted rather than dropping state over a transport failure.
+            // Leave the group unknown: it stays eligible for the chain and is asked again next
+            // sync, rather than being granted the ownership the lookup never confirmed.
         }
     }
 }
@@ -634,7 +700,7 @@ export function parseSimklWatchedCours(items: unknown, playback: unknown): Watch
             imdbId: getString(getRecord(show?.ids)?.imdb),
             name: getString(show?.title),
             year: String(show?.year ?? ""),
-            ownsImdb: true,
+            ownership: "unknown",
             simklId: String(getRecord(show?.ids)?.simkl ?? ""),
             episodes,
             lastWatchedAt: getString(item?.last_watched_at)
@@ -667,7 +733,7 @@ function parsePausedCours(playback: unknown): Map<string, WatchedCour> {
             imdbId: getString(getRecord(show?.ids)?.imdb),
             name: getString(show?.title),
             year: String(show?.year ?? ""),
-            ownsImdb: true,
+            ownership: "unknown",
             simklId: String(getRecord(show?.ids)?.simkl ?? ""),
             episodes: [],
             lastWatchedAt: "",
@@ -895,35 +961,6 @@ function transportError(error: unknown): Error {
         .replace(/\s+/g, " ")
         .trim();
     return new Error(reason ? `Simkl request failed: ${reason}` : "Simkl request failed.");
-}
-
-/**
- * IINA rejects a failed request with a plain object, not an Error, and `String` turns that into
- * "[object Object]" - which was the entire diagnosis a user got. Read the fields such an object
- * actually carries, and fall back to its JSON rather than its type name.
- */
-function describeRejection(error: unknown): string {
-    if (error instanceof Error) return error.message;
-    if (typeof error === "string") return error;
-    const record = getRecord(error);
-    if (!record) return String(error);
-    const described = ["message", "error", "reason", "description", "localizedDescription"]
-        .map((key) => getString(record[key]))
-        .find((value) => value !== "");
-    const status = getFiniteNumber(record.statusCode) ?? getFiniteNumber(record.status);
-    const code = getString(record.code) || (getFiniteNumber(record.code) ?? "");
-    const parts = [
-        described ?? "",
-        status === null ? "" : `status ${status}`,
-        code === "" ? "" : `code ${code}`
-    ].filter((part) => part !== "");
-    if (parts.length > 0) return parts.join(", ");
-    try {
-        const json = JSON.stringify(error);
-        return json && json !== "{}" ? json.slice(0, 200) : "no reason given";
-    } catch {
-        return "no reason given";
-    }
 }
 
 function responseError(response: HttpResponse, now: number): SimklError {

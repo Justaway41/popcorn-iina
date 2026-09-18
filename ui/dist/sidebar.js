@@ -230,7 +230,7 @@
         imdbId: readString(record?.imdbId),
         name: readString(record?.name),
         year: readString(record?.year),
-        ownsImdb: record?.ownsImdb !== false,
+        ownership: readOwnership(record),
         simklId: readString(record?.simklId),
         episodes,
         lastWatchedAt: readString(record?.lastWatchedAt)
@@ -244,6 +244,12 @@
       }
       return episodes.length > 0 || cour.paused ? [cour] : [];
     });
+  }
+  function readOwnership(record) {
+    const stored = record?.ownership;
+    if (stored === "owner" || stored === "other" || stored === "unknown")
+      return stored;
+    return record?.ownsImdb === false ? "other" : "unknown";
   }
   function isCourEpisode(value) {
     return typeof value === "number" && Number.isInteger(value) && value > 0;
@@ -655,19 +661,23 @@
     const aired = Date.parse(episode.aired);
     return !Number.isFinite(aired) || aired <= now.getTime();
   }
-  function findNextEpisode(episodes, current, now = new Date) {
-    const sorted = episodes.filter((episode) => isEpisodeAvailable(episode, now)).sort((a, b) => {
+  function serialEpisodes(episodes, current) {
+    const specials = current?.season === 0;
+    const scoped = episodes.filter((episode) => episode.season === 0 === specials);
+    return scoped.length > 0 ? scoped : episodes;
+  }
+  function uniqueEpisodes(episodes) {
+    const sorted = [...episodes].sort((a, b) => {
       if (a.season !== b.season)
         return a.season - b.season;
       if (a.episode !== b.episode)
         return a.episode - b.episode;
       return a.id.localeCompare(b.id);
     });
-    const index = sorted.findIndex((episode) => episode.id === current.id);
-    if (index !== -1) {
-      return sorted[index + 1] || null;
-    }
-    return sorted.find((episode) => episode.season > current.season || episode.season === current.season && episode.episode > current.episode) || null;
+    return sorted.filter((episode, index) => {
+      const previous = sorted[index - 1];
+      return !previous || previous.season !== episode.season || previous.episode !== episode.episode;
+    });
   }
   function isHttpUrl(value) {
     return /^https?:\/\/[^/]+/i.test(value.trim());
@@ -811,9 +821,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.6.9",
+    version: "2.7.0",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 26,
+    ghVersion: 27,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -865,6 +875,7 @@
   var watchHistory = [];
   var episodeWatchState = parseEpisodeWatchState(null);
   var seriesEpisodes = new Map;
+  var SERIES_EPISODES_TTL_MS = 10 * 60 * 1000;
   var homeQuery = "";
   var view = { kind: "home", query: "" };
   var retryAction = null;
@@ -1353,32 +1364,51 @@
     const episode = entry.episode;
     return removableSlot(entry, mediaCard(entry.media, entry.media.name, !episode ? entry.media.releaseInfo : upNext ? `After S${pad(episode.season)}E${pad(episode.episode)}` : `S${pad(episode.season)}E${pad(episode.episode)} · ${episode.name}`, () => upNext ? void loadEpisodes(entry.media) : void openHistoryEntry(entry), upNext ? false : entry.watched, upNext ? null : entry.progress));
   }
+  function resolveUpNextEpisode(entry, episodes, watched, available = isEpisodeAvailable) {
+    const current = entry.episode;
+    if (!current)
+      return null;
+    const ordered = uniqueEpisodes(serialEpisodes(episodes, current));
+    if (getResumePercent(entry.progress, entry.watched) !== null) {
+      const same = ordered.find((episode) => episode.season === current.season && episode.episode === current.episode);
+      if (same && !watched(same))
+        return { episode: same, resume: true };
+    }
+    const next = ordered.find((episode) => available(episode) && !watched(episode));
+    return next ? { episode: next, resume: false } : null;
+  }
   async function resolveUpNext(entry, slot) {
     const current = entry.episode;
     if (!current)
       return;
     const details = await loadSeriesEpisodes(entry.media);
-    if (!details || details.episodes.length === 0 || !slot.isConnected)
+    if (!details || !slot.isConnected)
       return;
-    const next = findNextEpisode(details.episodes, current);
-    if (!next) {
+    if (details.episodes.length === 0) {
       slot.remove();
       refillHomeStrip();
       return;
     }
-    slot.replaceWith(removableSlot(entry, mediaCard(entry.media, entry.media.name, `Next · S${pad(next.season)}E${pad(next.episode)} · ${next.name}`, () => void loadStreams(details.media, next, details.episodes), false, null)));
+    const target = resolveUpNextEpisode(entry, details.episodes, (episode) => isEpisodeWatched(episodeWatchState, details.media, episode, watchHistory));
+    if (!target) {
+      slot.remove();
+      refillHomeStrip();
+      return;
+    }
+    const next = target.episode;
+    slot.replaceWith(removableSlot(entry, mediaCard(entry.media, entry.media.name, `${target.resume ? "Resume" : "Next"} · S${pad(next.season)}E${pad(next.episode)} · ${next.name}`, () => void loadStreams(details.media, next, details.episodes), false, target.resume ? entry.progress : null)));
   }
   function loadSeriesEpisodes(media) {
     const key = mediaIdentity(media);
     const cached = seriesEpisodes.get(key);
-    if (cached)
-      return cached;
-    const request = loadMediaDetails(media, new AbortController().signal).then((details) => ({ media: details.media, episodes: details.episodes })).catch(() => {
+    if (cached && Date.now() - cached.at < SERIES_EPISODES_TTL_MS)
+      return cached.details;
+    const details = loadMediaDetails(media, new AbortController().signal).then((loaded) => ({ media: loaded.media, episodes: loaded.episodes })).catch(() => {
       seriesEpisodes.delete(key);
       return null;
     });
-    seriesEpisodes.set(key, request);
-    return request;
+    seriesEpisodes.set(key, { at: Date.now(), details });
+    return details;
   }
   function removableSlot(entry, card) {
     const slot = document.createElement("div");
@@ -1529,7 +1559,7 @@
     return media.imdbId || media.providerId || media.id;
   }
   function getDefaultSeason(episodes, watched, available = isEpisodeAvailable) {
-    const ordered = sortEpisodes(episodes, "oldest");
+    const ordered = sortEpisodes(serialEpisodes(episodes, null), "oldest");
     const next = ordered.find((episode) => available(episode) && !watched(episode));
     return (next || ordered[0])?.season ?? 0;
   }
