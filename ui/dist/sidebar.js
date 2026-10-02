@@ -415,6 +415,8 @@
     HistoryUpdated: "historyUpdated",
     RemoveHistoryEntry: "removeHistoryEntry",
     ShowNextEpisode: "showNextEpisode",
+    SearchFocusChanged: "searchFocusChanged",
+    PasteSearchText: "pasteSearchText",
     NowPlaying: "nowPlaying"
   };
 
@@ -821,9 +823,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.7.0",
+    version: "2.7.1",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 27,
+    ghVersion: 28,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -867,6 +869,7 @@
 
   // src/ui/app.ts
   var ui;
+  var blurredSearchSelection = null;
   var mediaType = "movie";
   var pendingMediaType = null;
   var episodeOrder = "oldest";
@@ -969,7 +972,14 @@
     });
     iina.onMessage(MESSAGE_NAMES.NowPlaying, (data) => {
       nowPlaying = parseNowPlaying(data);
+      settlePendingPlayback();
       applyPlayingMarks();
+    });
+    iina.onMessage(MESSAGE_NAMES.PasteSearchText, (data) => {
+      const selection = blurredSearchSelection;
+      blurredSearchSelection = null;
+      if (ui)
+        pasteSearchText(ui.searchInput, data?.text, selection ?? undefined);
     });
     iina.onMessage(MESSAGE_NAMES.ShowNextEpisode, (data) => {
       const payload = data;
@@ -999,6 +1009,33 @@
         loadHome(ui.searchInput.value.trim());
       });
       ui.searchInput.addEventListener("input", updateSearchClear);
+      const reportSearchFocus = () => iina.postMessage(MESSAGE_NAMES.SearchFocusChanged, {
+        focused: document.activeElement === ui.searchInput
+      });
+      const rememberSearchSelection = () => {
+        const input = ui.searchInput;
+        if (document.hasFocus() && document.activeElement === input) {
+          blurredSearchSelection = {
+            value: input.value,
+            selectionStart: input.selectionStart,
+            selectionEnd: input.selectionEnd
+          };
+        }
+      };
+      ui.searchInput.addEventListener("select", rememberSearchSelection);
+      ui.searchInput.addEventListener("input", rememberSearchSelection);
+      ui.searchInput.addEventListener("keyup", rememberSearchSelection);
+      ui.searchInput.addEventListener("click", rememberSearchSelection);
+      ui.searchInput.addEventListener("focus", reportSearchFocus);
+      ui.searchInput.addEventListener("blur", () => {
+        if (document.activeElement !== ui.searchInput)
+          blurredSearchSelection = null;
+        reportSearchFocus();
+      });
+      window.addEventListener("blur", reportSearchFocus);
+      window.addEventListener("focus", () => {
+        blurredSearchSelection = null;
+      });
       ui.searchClear.addEventListener("click", () => {
         ui.searchInput.value = "";
         updateSearchClear();
@@ -1013,6 +1050,26 @@
       updateTypeButtons();
       refreshConfiguration().then(() => loadHome(""));
     });
+  }
+  function restoreSearchFocus(input) {
+    if (input.ownerDocument.activeElement !== input)
+      return;
+    const { selectionStart, selectionEnd, selectionDirection } = input;
+    input.blur();
+    input.focus({ preventScroll: true });
+    if (selectionStart !== null && selectionEnd !== null) {
+      input.setSelectionRange(selectionStart, selectionEnd, selectionDirection ?? undefined);
+    }
+  }
+  function pasteSearchText(input, text, selection) {
+    if (typeof text !== "string" || input.ownerDocument.activeElement !== input)
+      return;
+    restoreSearchFocus(input);
+    if (selection?.value === input.value && selection.selectionStart !== null && selection.selectionEnd !== null) {
+      input.setSelectionRange(selection.selectionStart, selection.selectionEnd);
+    }
+    input.setRangeText(text, input.selectionStart ?? input.value.length, input.selectionEnd ?? input.value.length, "end");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
   }
   function applyConfiguration(data) {
     const payload = data;
@@ -1056,6 +1113,52 @@
   }
   function viewVideoId() {
     return view.kind === "streams" ? view.episode?.id || mediaIdentity(view.media) : "";
+  }
+  var PLAYBACK_START_TIMEOUT_MS = 60000;
+  function getPendingPlayback(pending, nowPlayingUrl, now) {
+    if (!pending)
+      return null;
+    if (nowPlayingUrl !== "" && nowPlayingUrl === pending.url)
+      return null;
+    if (nowPlayingUrl !== "" && nowPlayingUrl !== pending.url)
+      return null;
+    return now - pending.startedAt >= PLAYBACK_START_TIMEOUT_MS ? null : pending;
+  }
+  function isPendingStream(stream, pending) {
+    if (!pending)
+      return false;
+    return stream.url === pending.url || pending.releaseName !== "" && stream.rawTitle === pending.releaseName;
+  }
+  var pendingPlayback = null;
+  var pendingPlaybackTimer = 0;
+  function beginPendingPlayback(stream) {
+    pendingPlayback = {
+      url: stream.url,
+      releaseName: stream.rawTitle,
+      startedAt: Date.now()
+    };
+    window.clearTimeout(pendingPlaybackTimer);
+    pendingPlaybackTimer = window.setTimeout(settlePendingPlayback, PLAYBACK_START_TIMEOUT_MS);
+    applyPendingMarks();
+  }
+  function settlePendingPlayback() {
+    const next = getPendingPlayback(pendingPlayback, nowPlaying.url, Date.now());
+    if (next === pendingPlayback)
+      return;
+    pendingPlayback = next;
+    window.clearTimeout(pendingPlaybackTimer);
+    applyPendingMarks();
+  }
+  function applyPendingMarks() {
+    for (const row of ui.content.querySelectorAll(".srow")) {
+      const release = row.dataset.release || "";
+      const waiting = pendingPlayback !== null && pendingPlayback.releaseName !== "" && release === pendingPlayback.releaseName;
+      row.classList.toggle("srow--starting", waiting);
+      if (waiting)
+        row.setAttribute("aria-busy", "true");
+      else
+        row.removeAttribute("aria-busy");
+    }
   }
   function applyPlayingMarks() {
     const playing = playingStream(nowPlaying, viewVideoId());
@@ -1698,6 +1801,8 @@
     if (failedAddons > 0)
       content.appendChild(addonWarning(failedAddons, "addon"));
     const playStream = (stream) => {
+      if (isPendingStream(stream, pendingPlayback))
+        return;
       const resumePercent = getEntryProgress(episode?.id || mediaIdentity(media));
       iina.postMessage(MESSAGE_NAMES.PlayItem, {
         url: stream.url,
@@ -1711,6 +1816,7 @@
         },
         ...resumePercent === null ? {} : { resumePercent }
       });
+      beginPendingPlayback(stream);
     };
     const varying = getVaryingStreamFields(streams);
     const seriesPrefix = episode ? buildSeriesPrefixPattern(media, episode) : null;
@@ -1728,7 +1834,7 @@
     const renderList = () => {
       sortButton.textContent = getSizeSortControl(streamSizeOrder).label;
       summaryText.textContent = buildStreamSummary(streams, varying, englishSubtitles);
-      list.replaceChildren(...buildStreamTiers(streams, streamSizeOrder, varying, seriesPrefix, playStream, playing));
+      list.replaceChildren(...buildStreamTiers(streams, streamSizeOrder, varying, seriesPrefix, playStream, playing, pendingPlayback));
     };
     sortButton.addEventListener("click", () => {
       streamSizeOrder = getSizeSortControl(streamSizeOrder).next;
@@ -1786,7 +1892,7 @@
     const number = String(episode.episode);
     return new RegExp(`^\\s*${escaped}[\\s(]*(?:\\d{4}\\)?)?[\\s\\-–·()]*` + `(?:s0?${season}\\s*[.\\s]?e0?${number}|s0?${season}|0?${season}x0?${number}` + `|season\\s*0?${season})?[\\s\\-–·]*`, "i");
   }
-  function buildStreamTiers(streams, sizeOrder, varying, seriesPrefix, playStream, playing) {
+  function buildStreamTiers(streams, sizeOrder, varying, seriesPrefix, playStream, playing, pending) {
     const tiers = groupStreamsByResolution(streams);
     const openTier = getDefaultTier(tiers);
     return tiers.map(({ resolution, streams: tierStreams }) => {
@@ -1817,7 +1923,7 @@
       const body = document.createElement("div");
       body.className = "tier-body";
       const draw = (limit) => {
-        body.replaceChildren(...ordered.slice(0, limit).map((stream) => streamRow(stream, varying, seriesPrefix, () => playStream(stream), playing)));
+        body.replaceChildren(...ordered.slice(0, limit).map((stream) => streamRow(stream, varying, seriesPrefix, () => playStream(stream), playing, pending)));
         if (limit < ordered.length) {
           const more = document.createElement("button");
           more.type = "button";
@@ -1845,7 +1951,7 @@
       return withReady.resolution;
     return tiers.reduce((best, tier) => tier.streams.length > best.streams.length ? tier : best, tiers[0])?.resolution || "";
   }
-  function streamRow(stream, varying, seriesPrefix, action, playing) {
+  function streamRow(stream, varying, seriesPrefix, action, playing, pending) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "srow";
@@ -1856,6 +1962,10 @@
     if (isPlayingStream(stream, playing)) {
       button.classList.add("srow--playing");
       button.setAttribute("aria-current", "true");
+    }
+    if (isPendingStream(stream, pending)) {
+      button.classList.add("srow--starting");
+      button.setAttribute("aria-busy", "true");
     }
     if (varying.cache) {
       const dot = document.createElement("span");

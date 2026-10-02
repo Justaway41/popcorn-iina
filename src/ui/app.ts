@@ -63,6 +63,7 @@ interface Elements {
 }
 
 let ui: Elements;
+let blurredSearchSelection: Pick<HTMLInputElement, "value" | "selectionStart" | "selectionEnd"> | null = null;
 let mediaType: MediaType = "movie";
 /** A type switch not yet echoed back by the plugin; incoming configuration must not undo it. */
 let pendingMediaType: MediaType | null = null;
@@ -217,9 +218,16 @@ export function initApp(): void {
     });
     iina.onMessage(MESSAGE_NAMES.NowPlaying, (data) => {
         nowPlaying = parseNowPlaying(data);
+        // Playback starting is what the press was waiting for.
+        settlePendingPlayback();
         // Repaint the marks in place. Rebuilding the list would throw away the tier the viewer
         // has open and the position they are scrolled to, for a one-class change.
         applyPlayingMarks();
+    });
+    iina.onMessage(MESSAGE_NAMES.PasteSearchText, (data) => {
+        const selection = blurredSearchSelection;
+        blurredSearchSelection = null;
+        if (ui) pasteSearchText(ui.searchInput, (data as { text?: unknown })?.text, selection ?? undefined);
     });
     iina.onMessage(MESSAGE_NAMES.ShowNextEpisode, (data) => {
         const payload = data as ShowNextEpisodePayload;
@@ -251,6 +259,32 @@ export function initApp(): void {
             void loadHome(ui.searchInput.value.trim());
         });
         ui.searchInput.addEventListener("input", updateSearchClear);
+        const reportSearchFocus = () => iina.postMessage(MESSAGE_NAMES.SearchFocusChanged, {
+            focused: document.activeElement === ui.searchInput
+        });
+        const rememberSearchSelection = () => {
+            const input = ui.searchInput;
+            if (document.hasFocus() && document.activeElement === input) {
+                blurredSearchSelection = {
+                    value: input.value, selectionStart: input.selectionStart, selectionEnd: input.selectionEnd
+                };
+            }
+        };
+        // Capture while the editor is active: by window blur WebKit can already report range 0.
+        ui.searchInput.addEventListener("select", rememberSearchSelection);
+        ui.searchInput.addEventListener("input", rememberSearchSelection);
+        ui.searchInput.addEventListener("keyup", rememberSearchSelection);
+        ui.searchInput.addEventListener("click", rememberSearchSelection);
+        ui.searchInput.addEventListener("focus", reportSearchFocus);
+        ui.searchInput.addEventListener("blur", () => {
+            // WebKit also reports native window blur here, with this input still active.
+            if (document.activeElement !== ui.searchInput) blurredSearchSelection = null;
+            reportSearchFocus();
+        });
+        // A native focus loss (e.g. Raycast's panel) leaves DOM focus on the search input.
+        window.addEventListener("blur", reportSearchFocus);
+        // A real user click/focus return invalidates the old selection.
+        window.addEventListener("focus", () => { blurredSearchSelection = null; });
         ui.searchClear.addEventListener("click", () => {
             ui.searchInput.value = "";
             updateSearchClear();
@@ -267,6 +301,33 @@ export function initApp(): void {
         updateTypeButtons();
         void refreshConfiguration().then(() => loadHome(""));
     });
+}
+
+/** DOM focus survives IINA's native responder reset; a plain focus() is therefore a no-op. */
+export function restoreSearchFocus(input: HTMLInputElement): void {
+    if (input.ownerDocument.activeElement !== input) return;
+    const { selectionStart, selectionEnd, selectionDirection } = input;
+    input.blur();
+    input.focus({ preventScroll: true });
+    if (selectionStart !== null && selectionEnd !== null) {
+        input.setSelectionRange(selectionStart, selectionEnd, selectionDirection ?? undefined);
+    }
+}
+
+export function pasteSearchText(
+    input: HTMLInputElement,
+    text: unknown,
+    selection?: Pick<HTMLInputElement, "value" | "selectionStart" | "selectionEnd">
+): void {
+    if (typeof text !== "string" || input.ownerDocument.activeElement !== input) return;
+    restoreSearchFocus(input);
+    // The key-window reset can collapse the DOM range to zero. Use the range captured before
+    // Raycast opened, but only while the same text/control is still selected.
+    if (selection?.value === input.value && selection.selectionStart !== null && selection.selectionEnd !== null) {
+        input.setSelectionRange(selection.selectionStart, selection.selectionEnd);
+    }
+    input.setRangeText(text, input.selectionStart ?? input.value.length, input.selectionEnd ?? input.value.length, "end");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function applyConfiguration(data: unknown): void {
@@ -342,6 +403,83 @@ function viewVideoId(): string {
  * Rows carry only their release name, never their URL: a stream URL can hold private debrid
  * credentials and has no business sitting in the DOM.
  */
+/**
+ * A press that has been sent to the player but has not started playing yet. A debrid link has to
+ * be minted and the file opened before the first frame, which is seconds of a list that looks
+ * like nothing happened - and an impatient second press starts the whole thing again.
+ */
+export interface PendingPlayback {
+    /** What was sent. Never written into the DOM: a debrid URL carries private credentials. */
+    url: string;
+    releaseName: string;
+    startedAt: number;
+}
+
+/** Long enough for a debrid link and a slow open, short enough not to spin forever. */
+export const PLAYBACK_START_TIMEOUT_MS = 60_000;
+
+/**
+ * Whether a press is still waiting. It stops waiting when the player reports it playing, when it
+ * reports something else entirely - a press the viewer replaced, or playback they started
+ * elsewhere - and when it has waited longer than a start can reasonably take.
+ */
+export function getPendingPlayback(
+    pending: PendingPlayback | null,
+    nowPlayingUrl: string,
+    now: number
+): PendingPlayback | null {
+    if (!pending) return null;
+    if (nowPlayingUrl !== "" && nowPlayingUrl === pending.url) return null;
+    if (nowPlayingUrl !== "" && nowPlayingUrl !== pending.url) return null;
+    return now - pending.startedAt >= PLAYBACK_START_TIMEOUT_MS ? null : pending;
+}
+
+/** The row a press is waiting on, matched the way the playing mark is: by release name. */
+export function isPendingStream(
+    stream: { url: string; rawTitle: string },
+    pending: PendingPlayback | null
+): boolean {
+    if (!pending) return false;
+    return stream.url === pending.url ||
+        (pending.releaseName !== "" && stream.rawTitle === pending.releaseName);
+}
+
+let pendingPlayback: PendingPlayback | null = null;
+let pendingPlaybackTimer = 0;
+
+function beginPendingPlayback(stream: { url: string; rawTitle: string }): void {
+    pendingPlayback = {
+        url: stream.url,
+        releaseName: stream.rawTitle,
+        startedAt: Date.now()
+    };
+    window.clearTimeout(pendingPlaybackTimer);
+    // One shot, cleared the moment playback is reported; a start that never happens must not
+    // leave the row waiting for the rest of the session.
+    pendingPlaybackTimer = window.setTimeout(settlePendingPlayback, PLAYBACK_START_TIMEOUT_MS);
+    applyPendingMarks();
+}
+
+function settlePendingPlayback(): void {
+    const next = getPendingPlayback(pendingPlayback, nowPlaying.url, Date.now());
+    if (next === pendingPlayback) return;
+    pendingPlayback = next;
+    window.clearTimeout(pendingPlaybackTimer);
+    applyPendingMarks();
+}
+
+function applyPendingMarks(): void {
+    for (const row of ui.content.querySelectorAll<HTMLElement>(".srow")) {
+        const release = row.dataset.release || "";
+        const waiting = pendingPlayback !== null &&
+            pendingPlayback.releaseName !== "" &&
+            release === pendingPlayback.releaseName;
+        row.classList.toggle("srow--starting", waiting);
+        if (waiting) row.setAttribute("aria-busy", "true");
+        else row.removeAttribute("aria-busy");
+    }
+}
+
 function applyPlayingMarks(): void {
     const playing = playingStream(nowPlaying, viewVideoId());
     for (const row of ui.content.querySelectorAll<HTMLElement>(".srow")) {
@@ -1202,6 +1340,8 @@ function renderStreams(
     const content = document.createDocumentFragment();
     if (failedAddons > 0) content.appendChild(addonWarning(failedAddons, "addon"));
     const playStream = (stream: AddonStream) => {
+        // A second press on the row already starting would send the whole request again.
+        if (isPendingStream(stream, pendingPlayback)) return;
         const resumePercent = getEntryProgress(episode?.id || mediaIdentity(media));
         iina.postMessage(MESSAGE_NAMES.PlayItem, {
             url: stream.url,
@@ -1215,6 +1355,7 @@ function renderStreams(
             },
             ...(resumePercent === null ? {} : { resumePercent })
         });
+        beginPendingPlayback(stream);
     };
     const varying = getVaryingStreamFields(streams);
     const seriesPrefix = episode ? buildSeriesPrefixPattern(media, episode) : null;
@@ -1240,7 +1381,8 @@ function renderStreams(
             varying,
             seriesPrefix,
             playStream,
-            playing
+            playing,
+            pendingPlayback
         ));
     };
     sortButton.addEventListener("click", () => {
@@ -1329,7 +1471,8 @@ function buildStreamTiers(
     varying: { addon: boolean; cache: boolean; source: boolean },
     seriesPrefix: RegExp | null,
     playStream: (stream: AddonStream) => void,
-    playing: NowPlaying
+    playing: NowPlaying,
+    pending: PendingPlayback | null
 ): HTMLElement[] {
     const tiers = groupStreamsByResolution(streams);
     const openTier = getDefaultTier(tiers);
@@ -1365,7 +1508,7 @@ function buildStreamTiers(
         body.className = "tier-body";
         const draw = (limit: number) => {
             body.replaceChildren(...ordered.slice(0, limit).map((stream) => (
-                streamRow(stream, varying, seriesPrefix, () => playStream(stream), playing)
+                streamRow(stream, varying, seriesPrefix, () => playStream(stream), playing, pending)
             )));
             if (limit < ordered.length) {
                 const more = document.createElement("button");
@@ -1408,7 +1551,8 @@ function streamRow(
     varying: { addon: boolean; cache: boolean; source: boolean },
     seriesPrefix: RegExp | null,
     action: () => void,
-    playing: NowPlaying
+    playing: NowPlaying,
+    pending: PendingPlayback | null
 ): HTMLButtonElement {
     const button = document.createElement("button");
     button.type = "button";
@@ -1421,6 +1565,11 @@ function streamRow(
     if (isPlayingStream(stream, playing)) {
         button.classList.add("srow--playing");
         button.setAttribute("aria-current", "true");
+    }
+    // Survives a re-render of the list, so sorting while a press is starting keeps its place.
+    if (isPendingStream(stream, pending)) {
+        button.classList.add("srow--starting");
+        button.setAttribute("aria-busy", "true");
     }
 
     if (varying.cache) {

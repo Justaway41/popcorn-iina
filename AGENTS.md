@@ -31,7 +31,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, currently version `2.6.9`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, version `2.7.1`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -68,7 +68,7 @@ Open the owner file and its test first. Follow imports only when the actual flow
 | --- | --- | --- |
 | Plugin manifest, permissions, defaults, version | `Info.json` | `scripts/verify-root-info.js`, `scripts/verify-built-client-version.js`, `src/shared/version.ts` |
 | Global menu, `Shift+P`, managed player creation | `src/plugin/global.ts` | `src/plugin/global.test.ts` |
-| Player lifecycle, sidebar messages, playback orchestration | `src/plugin/main.ts` | `src/plugin/playback.ts`, `src/plugin/playback.test.ts` |
+| Player lifecycle, sidebar messages, playback orchestration | `src/plugin/main.ts` | `src/plugin/main.test.ts`, `src/plugin/playback.ts`, `src/plugin/playback.test.ts` |
 | Skip intro/recap/credits intervals, next-episode tail | `src/plugin/intro.ts` | `src/plugin/intro.test.ts`, overlay rendering in `src/plugin/main.ts` |
 | Display sleep prevention | `src/plugin/sleep.ts` | `src/plugin/constants.ts` |
 | IINA-side Trakt transport and serialization | `src/plugin/trakt.ts` | `src/plugin/trakt.test.ts` |
@@ -94,6 +94,31 @@ Open the owner file and its test first. Follow imports only when the actual flow
 ### Startup and sidebar
 
 `src/plugin/global.ts` registers the Plugin menu item and `Shift+P`. It creates one plugin-managed IINA player using the splash asset. `src/plugin/main.ts` loads the sidebar and overlay after `iina.window-loaded`; global/player messages reuse the active player and toggle the sidebar.
+
+IINA 1.4.4 resets the native first responder to its player window in `windowDidBecomeKey`.
+Raycast Clipboard History can return keyboard focus without emitting `window-main.changed`;
+the old event-based `RestoreSearchFocus` repair was therefore removed. Real UI tracing on
+2026-10-02 (Raycast 2.6, `Cmd+Shift+C`) reproduced an older entry selected onto the clipboard
+while search stayed empty: DOM focus still named the input, the native webview was unfocused,
+and the failed `Meta+v` reached IINA's plugin input API.
+
+`SearchFocusChanged` keeps the player informed of the selected search control (including
+window blur, which preserves DOM focus). A high-priority `Meta+v` listener reads `/usr/bin/pbpaste`
+only for an explicit paste while search is focused and the sidebar visible/window ready.
+Normal Edit-menu/WebKit paste never reaches it, so there is no double insertion. `PasteSearchText`
+goes only to the sidebar: `pasteSearchText` validates string data and active input, forces native
+focus with blur/refocus, replaces the selection using `setRangeText`, and dispatches `input`.
+Capture the range on active-editor selection/input/key/click events, before native blur can
+collapse it to zero. WebKit may deliver input blur with search still the active element; clear
+the saved range only when the active control actually changes. Apply it only if text is unchanged.
+Focus revisions and window/visibility checks discard late replies. No polling, clipboard-history
+access, contents logging, or persistence. Temporary focus diagnostics were removed.
+
+`core.window.sidebar` reports only built-in settings tabs on 1.4.4: plugin sidebars return `null`.
+`isSidebarVisible` falls back to plugin show/hide state for null/absent values. Real IINA/Raycast
+tests now pass for an older entry, repeated pastes, normal Command-V, and replacement of selected
+text; these paths also carry regressions. Do not replace this with a main-window-event repair or
+claim future changes work from unit/native standalone tests without testing actual Raycast.
 
 ### Discovery and series
 
@@ -164,6 +189,12 @@ no dot at all.
 
 ### Playback and next episode
 
+The sidebar keeps the stream list visible during playback startup. `PendingPlayback` in
+`src/ui/app.ts` marks the requested release with `.srow--starting`/`aria-busy`, blocks a duplicate
+press, and survives stream-list redraws. `NowPlaying` settles the mark; a 60s webview-only one-shot
+timeout clears a start that never completes. URLs remain in memory, never in DOM attributes.
+`ui/sidebar.css` disables the waiting animation for reduced-motion users.
+
 `src/ui/app.ts` posts a `PlayItem` message. `src/plugin/main.ts` validates the URL, replaces playback through mpv, applies the media title, restores progress, records local history, and scrobbles when Trakt is connected. mpv events drive progress, watched thresholds, intro/credit controls, EOF handling, and next-episode presentation. The prefetched next stream is chosen by `pickNextEpisodeStream`: cached-first (a stream that can start now outranks a better one that cannot), then the user's preferred audio and subtitle languages (`preferredAudio`/`preferredSubtitle` preferences, unknown language states neutral, never negative), then closest resolution to the current stream with higher quality winning ties. The prefetch is only played within `PREFETCH_FRESH_MS` (30 min) of its fetch, because debrid links expire - an older prefetch is dropped and the sidebar's fresh stream list for the next episode takes over instead.
 
 ### Skip segments and next episode
@@ -210,9 +241,20 @@ mode has no load to race.
 the overlay and discards handlers registered beforehand, so a handler registered in
 `iina.window-loaded` is wiped by the first `simpleMode()` call: the button renders, reports itself
 clickable, posts its message, and nothing is listening. `ensureOverlayInitialized` therefore
-activates the mode exactly once and registers the handler immediately after; later updates only
+activates the mode exactly once in `iina.window-loaded` and registers the handler immediately after; later updates only
 call `setContent`. Do not move `simpleMode()` back into the show path — repeating it would clear
 the handler again.
+
+**HTTP continuations must not update the overlay.** IINA resolves HTTP promises on its
+`com.apple.NSURLSession-delegate` queue, not the main queue. A 2026-10-02 playback-start crash
+report traced `JavascriptAPIHttp.request` through `JavascriptAPIOverlay.simpleMode` into
+`WKWebView.loadHTMLString`, which aborted inside WebKit. Initialization now happens at window
+startup; AniSkip/IntroDB replies and next-episode prefetch only store state. `mpv.time-pos.changed`
+and `mpv.pause.changed` paint it on IINA's main queue (including a paused seek or resume).
+Synchronous chapter results can paint in `mpv.file-loaded`. No timer or polling was added.
+Overlay updates are gated on `windowReady`, and playback revisions still reject stale replies.
+The executable player-entry regression tests mock only IINA's native boundary, not the overlay
+logic. Real IINA playback, skip clicks and Next Episode still need manual validation after this fix.
 
 Also keep the click an inline `onclick` in the rendered markup rather than a bound listener, call
 `setClickable(true)` **before** `show()`, and seek with `mpv.set("time-pos", …)`; `core.seekTo` and
@@ -483,6 +525,13 @@ git var GIT_COMMITTER_IDENT
 
 ## Current Working State
 
+The `2.7.1` release manifest restores `ghRepo: Justaway41/popcorn-iina` and raises `ghVersion`
+to 28. It includes the explicit-paste fallback verified in actual IINA/Raycast and confirmed by
+the user, plus the playback-start overlay queue fix and the approved stream-start indicator.
+The identifier is unchanged to preserve settings: replace the existing plugin, never add a
+duplicate. This machine still has the tested
+`2.7.0-local.3` installation; publishing does not replace it automatically.
+
 Debugging handoff: `docs/superpowers/specs/2026-09-18-navigation-simkl-debug-findings.md` records
 the confirmed next-episode and Simkl cross-device sync failures with their reproductions. S1-S7 and
 N2-N7 are fixed and carry regressions; its "Still Open" section lists what is not (Previous Episode
@@ -550,7 +599,19 @@ As of 2026-08-27:
   a configuration reply can still carry the previous media type. `applyConfiguration` holds a local
   switch in `pendingMediaType` until the plugin echoes it back; without that, switching type while a
   search is showing flips straight back, because only the search path refreshes configuration.
-- The uninstall symptom was confirmed as an IINA 1.4.4 `SIGTRAP` in `JavascriptAPIPreferences.get(_:)` invoked by the old global polling timer during plugin teardown. IINA also quits when the plugin is uninstalled while its window is open; that window is a plugin-created player instance, so this is expected and is not the crash.
+- The old uninstall crash was an IINA 1.4.4 `SIGTRAP` in `JavascriptAPIPreferences.get(_:)`
+  invoked by the removed global polling timer. The 2026-10-02 uninstall report is different:
+  the user confirms no crash report, and the 15:11 session logs an orderly `App will terminate`.
+  Native `JavascriptAPIGlobal.cleanUp` closes the managed player and immediately shuts it down.
+  Closing puts it into `stopping`; `PlaybackInfo` rejects `stopping` → `shuttingDown`, but
+  `PlayerCore.shutdown` sends mpv quit anyway. When stop finishes, `mpvHasShutdown` sees a state
+  other than `shuttingDown`, mislabels it an mpv-initiated exit and calls `NSApp.terminate`.
+  This is an IINA teardown state-machine defect, not expected plugin behavior or a new native
+  crash. The plugin API exposes no unload hook or managed-player shutdown-state setter; do not
+  pretend a JS guard fixes this or change the user's quit preference. Workaround: close the
+  Popcorn player first, let playback stop, then uninstall from the still-open Preferences.
+  Native code supports this workaround (`stop` leaves an idle player idle), but real IINA
+  uninstall still needs manual verification. Permanent correction belongs in IINA's cleanup.
 - `.media-card` must keep `display: block` and `width: 100%`. It is a `<button>`, so as soon as it
   stops being the direct grid item (as it does inside `.card-slot`) an intrinsic width takes over
   and the poster image's natural size blows out the grid. Chrome shrink-to-fits and hides this;
@@ -559,7 +620,8 @@ As of 2026-08-27:
   `getSkeletonCells` names the bands per view and the heights in `ui/sidebar.css` are matched to
   the real elements, so content does not move when a fetch resolves. Changing a row's box model
   means updating its `sk-*` counterpart.
-- The local test archive is `xyz.brbc.popcorn.iinaplugin.iinaplgz`; it is not published.
+- The package archive is `xyz.brbc.popcorn.iinaplugin.iinaplgz`; releases attach the CI-built
+  archive under the same filename.
 - Existing untracked historical plan/spec files under `docs/superpowers/` are user-owned. Do not delete, rewrite, or stage them unless explicitly requested.
 
 Remove or revise current-state entries as soon as they are committed, verified, resolved, or superseded.

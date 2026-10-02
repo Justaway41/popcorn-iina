@@ -78,7 +78,7 @@ import {
 import { createPlistSafeStore, parseLanguagePreference } from "./preferences";
 import { formatError, isHttpUrl, logDebug, sanitizeMediaTitle } from "./utils";
 
-const { core, event, global, http, mpv, overlay, sidebar, utils } = iina;
+const { core, event, global, http, input, mpv, overlay, sidebar, utils } = iina;
 // Every write goes through here: IINA's property list cannot hold a null, and one in the value
 // fails the whole flush silently.
 const preferences = createPlistSafeStore(iina.preferences);
@@ -94,6 +94,8 @@ const simkl = createIinaSimklClient(http, preferences, (error) => {
 let windowReady = false;
 let pendingShowSidebar = false;
 let sidebarVisible = false;
+let searchFocused = false;
+let searchFocusRevision = 0;
 let lastPlaybackTickAt = 0;
 let savedImageDisplayDuration: string | null = null;
 let savedPositionOnQuitFlag: boolean | null = null;
@@ -152,7 +154,9 @@ function isSidebarVisible(): boolean {
     if (api.isVisible) return api.isVisible();
     try {
         const current = core.window.sidebar;
-        if (current !== undefined) return typeof current === "string" && current.includes("popcorn");
+        // IINA 1.4.4 exposes built-in settings tabs here, but returns null for plugin tabs.
+        // Null cannot tell us whether our sidebar is open; use our show/hide state instead.
+        if (typeof current === "string") return current.includes("popcorn");
     } catch (error) {
         logDebug("Popcorn: Could not read sidebar state:", formatError(error));
     }
@@ -503,8 +507,8 @@ function handleOverlayAction(data: unknown): void {
 /**
  * Activating a mode clears the overlay, which discards any message handler registered before it.
  * So the mode is activated exactly once and the handler registered immediately afterwards; later
- * updates only replace content. Registering in `window-loaded`, before any `simpleMode()` call,
- * left the button rendering and clickable with nothing listening for its message.
+ * updates only replace content. Initialize from `window-loaded`, never an HTTP continuation:
+ * IINA resolves HTTP promises on a URLSession queue, where loading the WKWebView crashes.
  */
 function ensureOverlayInitialized(): void {
     if (overlayHandlerRegistered) return;
@@ -515,6 +519,7 @@ function ensureOverlayInitialized(): void {
 }
 
 function applyOverlayState(): void {
+    if (!windowReady) return;
     if (!overlayAction) {
         if (!overlayVisible) return;
         overlay.hide();
@@ -523,7 +528,6 @@ function applyOverlayState(): void {
         overlayLabel = "";
         return;
     }
-    ensureOverlayInitialized();
     const label = OVERLAY_LABELS[overlayAction];
     if (label !== overlayLabel) {
         overlay.setContent(renderOverlayButton(overlayAction, label));
@@ -537,6 +541,7 @@ function applyOverlayState(): void {
 }
 
 function updateIntroOverlay(): void {
+    if (!windowReady) return;
     const action = getOverlayAction(
         mpv.getNumber("time-pos"),
         { intro: introInterval, recap: recapInterval, credits: creditsInterval },
@@ -573,6 +578,9 @@ async function resolvePlaybackIntervals(revision: number): Promise<void> {
     };
     if (!isCurrentRequest(revision, playbackRevision)) return;
     applySegments(found, duration);
+    // Chapters are available synchronously in the file-loaded event. HTTP replies only store
+    // intervals; time-pos/pause events render them on IINA's main queue.
+    updateIntroOverlay();
     if (found.intro && found.credits) return;
 
     const context = activePlaybackContext;
@@ -625,7 +633,6 @@ function applySegments(found: SegmentSources, duration: number): void {
     introInterval = segments.intro;
     recapInterval = segments.recap;
     creditsInterval = segments.credits;
-    updateIntroOverlay();
 }
 
 async function loadAniSkipSegments(
@@ -758,7 +765,6 @@ async function prefetchNextEpisode(revision: number): Promise<void> {
             }
         };
         prefetchedNextEpisodeAt = Date.now();
-        updateIntroOverlay();
     } catch (error) {
         logDebug("Popcorn: Next episode prefetch failed:", formatError(error));
     }
@@ -922,9 +928,14 @@ global.onMessage("showPopcornSidebar", toggleSidebar);
 
 event.on("iina.window-loaded", () => {
     sidebar.loadFile("ui/sidebar.html");
+    ensureOverlayInitialized();
     overlay.setClickable(false);
     overlay.hide();
     sidebar.onMessage(MESSAGE_NAMES.PlayItem, playItem);
+    sidebar.onMessage(MESSAGE_NAMES.SearchFocusChanged, (data) => {
+        searchFocused = (data as { focused?: unknown })?.focused === true;
+        searchFocusRevision++;
+    });
     sidebar.onMessage(MESSAGE_NAMES.SetMediaType, (data) => {
         const mediaType = parseMediaTypePreference((data as SetMediaTypePayload)?.mediaType);
         preferences.set("mediaType", mediaType);
@@ -1020,6 +1031,7 @@ event.on("mpv.file-loaded", () => {
 
 event.on("mpv.pause.changed", () => {
     if (isReplacingPlayback) return;
+    updateIntroOverlay();
     if (mpv.getFlag("pause")) checkpointPlayback();
     else sendScrobble("start", mpv.getNumber("percent-pos"));
 });
@@ -1034,6 +1046,8 @@ event.on("iina.window-will-close", () => {
     checkpointPlayback();
     windowReady = false;
     sidebarVisible = false;
+    searchFocused = false;
+    searchFocusRevision++;
     activePlaybackContext = null;
     activeStreamUrl = "";
     activeStreamRelease = "";
@@ -1045,3 +1059,16 @@ event.on("iina.window-will-close", () => {
 });
 
 logDebug("Popcorn: Main entry loaded");
+// Normal webview paste is handled by the Edit menu and never reaches this listener. IINA's
+// key-window responder reset sends Raycast's paste here instead, even without a main-window event.
+input.onKeyDown("Meta+v", () => {
+    if (!windowReady || !isSidebarVisible() || !searchFocused) return false;
+    const revision = searchFocusRevision;
+    // Read only for this explicit paste gesture; never poll, log or persist clipboard contents.
+    void utils.exec("/usr/bin/pbpaste", []).then(({ status, stdout }) => {
+        if (status !== 0 || typeof stdout !== "string" || !windowReady ||
+            !isSidebarVisible() || !searchFocused || revision !== searchFocusRevision) return;
+        sidebar.postMessage(MESSAGE_NAMES.PasteSearchText, { text: stdout });
+    }).catch(() => logDebug("Popcorn: Could not read clipboard for paste."));
+    return true;
+}, input.PRIORITY_HIGH);

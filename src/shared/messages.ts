@@ -11,6 +11,8 @@ export const MESSAGE_NAMES = {
     HistoryUpdated: "historyUpdated",
     RemoveHistoryEntry: "removeHistoryEntry",
     ShowNextEpisode: "showNextEpisode",
+    SearchFocusChanged: "searchFocusChanged",
+    PasteSearchText: "pasteSearchText",
     NowPlaying: "nowPlaying"
 } as const;
 

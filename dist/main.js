@@ -9,6 +9,8 @@
     HistoryUpdated: "historyUpdated",
     RemoveHistoryEntry: "removeHistoryEntry",
     ShowNextEpisode: "showNextEpisode",
+    SearchFocusChanged: "searchFocusChanged",
+    PasteSearchText: "pasteSearchText",
     NowPlaying: "nowPlaying"
   };
 
@@ -1210,9 +1212,9 @@
   var Info_default = {
     name: "Popcorn for IINA",
     identifier: "xyz.brbc.popcorn",
-    version: "2.7.0",
+    version: "2.7.1",
     ghRepo: "Justaway41/popcorn-iina",
-    ghVersion: 27,
+    ghVersion: 28,
     description: "Discover media and play direct Stremio addon streams in IINA",
     author: {
       name: "Justaway41"
@@ -2834,7 +2836,7 @@
   }
 
   // src/plugin/main.ts
-  var { core, event, global, http, mpv, overlay, sidebar, utils } = iina;
+  var { core, event, global, http, input, mpv, overlay, sidebar, utils } = iina;
   var preferences = createPlistSafeStore(iina.preferences);
   var json = createJsonClient(http);
   var anime = createAnimeChainClient(http, preferences);
@@ -2847,6 +2849,8 @@
   var windowReady = false;
   var pendingShowSidebar = false;
   var sidebarVisible = false;
+  var searchFocused = false;
+  var searchFocusRevision = 0;
   var lastPlaybackTickAt = 0;
   var savedImageDisplayDuration = null;
   var savedPositionOnQuitFlag = null;
@@ -2896,8 +2900,8 @@
       return api.isVisible();
     try {
       const current = core.window.sidebar;
-      if (current !== undefined)
-        return typeof current === "string" && current.includes("popcorn");
+      if (typeof current === "string")
+        return current.includes("popcorn");
     } catch (error) {
       logDebug("Popcorn: Could not read sidebar state:", formatError(error));
     }
@@ -3187,6 +3191,8 @@
     overlayHandlerRegistered = true;
   }
   function applyOverlayState() {
+    if (!windowReady)
+      return;
     if (!overlayAction) {
       if (!overlayVisible)
         return;
@@ -3196,7 +3202,6 @@
       overlayLabel = "";
       return;
     }
-    ensureOverlayInitialized();
     const label = OVERLAY_LABELS[overlayAction];
     if (label !== overlayLabel) {
       overlay.setContent(renderOverlayButton(overlayAction, label));
@@ -3209,6 +3214,8 @@
     overlayVisible = true;
   }
   function updateIntroOverlay() {
+    if (!windowReady)
+      return;
     const action = getOverlayAction(mpv.getNumber("time-pos"), { intro: introInterval, recap: recapInterval, credits: creditsInterval }, prefetchedNextEpisode !== null, mpv.getNumber("duration"));
     if (action === overlayAction)
       return;
@@ -3230,6 +3237,7 @@
     if (!isCurrentRequest(revision, playbackRevision))
       return;
     applySegments(found, duration);
+    updateIntroOverlay();
     if (found.intro && found.credits)
       return;
     const context = activePlaybackContext;
@@ -3265,7 +3273,6 @@
     introInterval = segments.intro;
     recapInterval = segments.recap;
     creditsInterval = segments.credits;
-    updateIntroOverlay();
   }
   async function loadAniSkipSegments(revision, context, episode, duration) {
     try {
@@ -3353,7 +3360,6 @@
         }
       };
       prefetchedNextEpisodeAt = Date.now();
-      updateIntroOverlay();
     } catch (error) {
       logDebug("Popcorn: Next episode prefetch failed:", formatError(error));
     }
@@ -3446,9 +3452,14 @@
   global.onMessage("showPopcornSidebar", toggleSidebar);
   event.on("iina.window-loaded", () => {
     sidebar.loadFile("ui/sidebar.html");
+    ensureOverlayInitialized();
     overlay.setClickable(false);
     overlay.hide();
     sidebar.onMessage(MESSAGE_NAMES.PlayItem, playItem);
+    sidebar.onMessage(MESSAGE_NAMES.SearchFocusChanged, (data) => {
+      searchFocused = data?.focused === true;
+      searchFocusRevision++;
+    });
     sidebar.onMessage(MESSAGE_NAMES.SetMediaType, (data) => {
       const mediaType = parseMediaTypePreference(data?.mediaType);
       preferences.set("mediaType", mediaType);
@@ -3528,6 +3539,7 @@
   event.on("mpv.pause.changed", () => {
     if (isReplacingPlayback)
       return;
+    updateIntroOverlay();
     if (mpv.getFlag("pause"))
       checkpointPlayback();
     else
@@ -3545,6 +3557,8 @@
     checkpointPlayback();
     windowReady = false;
     sidebarVisible = false;
+    searchFocused = false;
+    searchFocusRevision++;
     activePlaybackContext = null;
     activeStreamUrl = "";
     activeStreamRelease = "";
@@ -3555,4 +3569,15 @@
     markPopcornWindowOpen(false);
   });
   logDebug("Popcorn: Main entry loaded");
+  input.onKeyDown("Meta+v", () => {
+    if (!windowReady || !isSidebarVisible() || !searchFocused)
+      return false;
+    const revision = searchFocusRevision;
+    utils.exec("/usr/bin/pbpaste", []).then(({ status, stdout }) => {
+      if (status !== 0 || typeof stdout !== "string" || !windowReady || !isSidebarVisible() || !searchFocused || revision !== searchFocusRevision)
+        return;
+      sidebar.postMessage(MESSAGE_NAMES.PasteSearchText, { text: stdout });
+    }).catch(() => logDebug("Popcorn: Could not read clipboard for paste."));
+    return true;
+  }, input.PRIORITY_HIGH);
 })();

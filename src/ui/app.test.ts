@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import * as app from "./app";
 
 import {
     buildRowMeta,
@@ -19,14 +20,19 @@ import {
     getEpisodeOrderLabel,
     getProgressDisplay,
     getSizeSortControl,
+    getPendingPlayback,
+    isPendingStream,
     mergeSettledCatalogResults,
+    PLAYBACK_START_TIMEOUT_MS,
     replaceRequest,
-    resolveUpNextEpisode
+    resolveUpNextEpisode,
+    restoreSearchFocus
 } from "./app";
 import { isEpisodeWatched, parseEpisodeWatchState } from "../shared/history";
 import type { Episode, Media } from "../shared/stremio";
 
 const appSource = await Bun.file(new URL("./app.ts", import.meta.url)).text();
+const styleSource = await Bun.file(new URL("../../ui/sidebar.css", import.meta.url)).text();
 
 const show: Media = {
     id: "tt9",
@@ -45,6 +51,82 @@ const episode = (season: number, number: number): Episode => ({
     aired: "2020-01-01",
     description: "",
     thumbnail: ""
+});
+
+test("restores native search focus without losing the selection or stealing another control", () => {
+    const calls: string[] = [];
+    const input = {
+        ownerDocument: { activeElement: null as unknown },
+        selectionStart: 2, selectionEnd: 7, selectionDirection: "backward",
+        blur() { calls.push("blur"); this.ownerDocument.activeElement = null; },
+        focus(options: { preventScroll: boolean }) {
+            expect(options).toEqual({ preventScroll: true });
+            expect(this.ownerDocument.activeElement).not.toBe(this);
+            calls.push("focus");
+            this.ownerDocument.activeElement = this;
+            this.selectionStart = this.selectionEnd = 12;
+            this.selectionDirection = "none";
+        },
+        setSelectionRange(start: number, end: number, direction: string) {
+            calls.push("selection");
+            this.selectionStart = start; this.selectionEnd = end; this.selectionDirection = direction;
+        }
+    };
+    input.ownerDocument.activeElement = input;
+    restoreSearchFocus(input as unknown as HTMLInputElement);
+    expect(calls).toEqual(["blur", "focus", "selection"]);
+    expect([input.selectionStart, input.selectionEnd, input.selectionDirection]).toEqual([2, 7, "backward"]);
+    calls.length = 0;
+    input.ownerDocument.activeElement = { tagName: "BUTTON" };
+    restoreSearchFocus(input as unknown as HTMLInputElement);
+    expect(calls).toEqual([]);
+});
+
+test("a recovered paste replaces the search selection and notifies its normal input handler", () => {
+    const paste = (app as unknown as { pasteSearchText: (
+        input: HTMLInputElement, text: unknown, selection?: Pick<HTMLInputElement, "value" | "selectionStart" | "selectionEnd">
+    ) => void }).pasteSearchText;
+    expect(typeof paste).toBe("function");
+    const input = {
+        ownerDocument: { activeElement: null as unknown },
+        value: "before old after", selectionStart: 7, selectionEnd: 10, selectionDirection: "none",
+        blur() { this.ownerDocument.activeElement = null; },
+        focus() { this.ownerDocument.activeElement = this; this.selectionStart = this.selectionEnd = this.value.length; },
+        setSelectionRange(start: number, end: number) { this.selectionStart = start; this.selectionEnd = end; },
+        setRangeText(text: string, start: number, end: number, mode: string) {
+            expect(mode).toBe("end");
+            this.value = this.value.slice(0, start) + text + this.value.slice(end);
+            this.selectionStart = this.selectionEnd = start + text.length;
+        },
+        dispatchEvent(event: Event) { expect(event.type).toBe("input"); expect(event.bubbles).toBe(true); return true; }
+    };
+    input.ownerDocument.activeElement = input;
+    paste(input as unknown as HTMLInputElement, "日本語");
+    expect(input.value).toBe("before 日本語 after");
+    expect(input.selectionStart).toBe(10);
+    input.value = "before old after";
+    input.selectionStart = input.selectionEnd = 0; // IINA's native reset loses the live range.
+    paste(input as unknown as HTMLInputElement, "日本語", {
+        value: "before old after", selectionStart: 7, selectionEnd: 10
+    });
+    expect(input.value).toBe("before 日本語 after");
+    input.value = "changed text";
+    input.selectionStart = input.selectionEnd = input.value.length;
+    paste(input as unknown as HTMLInputElement, "!", {
+        value: "before old after", selectionStart: 7, selectionEnd: 10
+    });
+    expect(input.value).toBe("changed text!");
+    input.value = "before 日本語 after";
+    input.ownerDocument.activeElement = {};
+    paste(input as unknown as HTMLInputElement, "Do not steal focus");
+    input.ownerDocument.activeElement = input;
+    paste(input as unknown as HTMLInputElement, { text: "Not a string" });
+    expect(input.value).toBe("before 日本語 after");
+});
+
+test("native window blur retains the range while search is still the active control", () => {
+    expect(appSource).toContain("if (document.activeElement !== ui.searchInput) blurredSearchSelection = null;");
+    expect(appSource).toContain('ui.searchInput.addEventListener("select", rememberSearchSelection)');
 });
 
 test("uses exact local, Simkl, and legacy episode marks without inferring gaps", () => {
@@ -422,4 +504,42 @@ test("a Continue Watching card for a series the metadata has no episodes for is 
     // A lookup that merely failed still leaves the card alone.
     expect(appSource).toContain("if (!details || !slot.isConnected) return;");
     expect(appSource).toMatch(/if \(details\.episodes\.length === 0\) \{\s*slot\.remove\(\);/);
+});
+
+test("a press waits for playback to start, and stops waiting when it does", () => {
+    const pending = { url: "https://host/a.mkv", releaseName: "Show.S01E01.1080p", startedAt: 1_000 };
+
+    // Nothing reported yet: the press is still waiting.
+    expect(getPendingPlayback(pending, "", 2_000)).toBe(pending);
+    // The player reports it playing, which is what the press was waiting for.
+    expect(getPendingPlayback(pending, pending.url, 2_000)).toBeNull();
+    // Something else is playing - a press the viewer replaced, or playback started elsewhere.
+    expect(getPendingPlayback(pending, "https://host/b.mkv", 2_000)).toBeNull();
+    // A start that never happened must not leave the row waiting for the rest of the session.
+    expect(getPendingPlayback(pending, "", 1_000 + PLAYBACK_START_TIMEOUT_MS)).toBeNull();
+    expect(getPendingPlayback(null, "", 2_000)).toBeNull();
+});
+
+test("the waiting row is the one that was pressed", () => {
+    const pending = { url: "https://host/a.mkv", releaseName: "Show.S01E01.1080p", startedAt: 0 };
+
+    expect(isPendingStream({ url: "https://host/a.mkv", rawTitle: "other" }, pending)).toBe(true);
+    // A debrid addon mints a new URL for the same file, so the release name matches it too.
+    expect(isPendingStream({ url: "https://host/z.mkv", rawTitle: "Show.S01E01.1080p" }, pending)).toBe(true);
+    expect(isPendingStream({ url: "https://host/z.mkv", rawTitle: "Show.S01E02.1080p" }, pending)).toBe(false);
+    expect(isPendingStream({ url: "https://host/a.mkv", rawTitle: "x" }, null)).toBe(false);
+
+    // A release name nothing carries must not mark every unnamed row.
+    const unnamed = { url: "https://host/a.mkv", releaseName: "", startedAt: 0 };
+    expect(isPendingStream({ url: "https://host/b.mkv", rawTitle: "" }, unnamed)).toBe(false);
+});
+
+test("the sidebar marks the pressed row and drops the mark when playback is reported", () => {
+    // The URL is never written into the DOM: a debrid link carries private credentials.
+    expect(appSource).toContain("beginPendingPlayback(stream);");
+    expect(appSource).toContain("if (isPendingStream(stream, pendingPlayback)) return;");
+    expect(appSource).toContain("settlePendingPlayback();");
+    expect(appSource).not.toMatch(/dataset\.url\s*=/);
+    expect(styleSource).toContain(".srow--starting");
+    expect(styleSource).toContain("prefers-reduced-motion");
 });
