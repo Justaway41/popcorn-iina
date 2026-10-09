@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 
-test("loading the global entry does not execute external processes", async () => {
+test("opens a Popcorn-only player with hidden splash controls without executing external processes", async () => {
     const executed: string[] = [];
+    const players: unknown[] = [];
+    let openPopcorn = () => {};
 
     (globalThis as { iina?: unknown }).iina = {
         console,
@@ -12,14 +14,16 @@ test("loading the global entry does not execute external processes", async () =>
             }
         },
         global: {
-            createPlayerInstance() {
+            createPlayerInstance(options: unknown) {
+                players.push(options);
                 return 1;
             },
             postMessage() {}
         },
         menu: {
             addItem() {},
-            item() {
+            item(_title: string, action: () => void) {
+                openPopcorn = action;
                 return {};
             }
         },
@@ -38,6 +42,13 @@ test("loading the global entry does not execute external processes", async () =>
 
     await import("./global");
 
+    expect(executed).toEqual([]);
+    openPopcorn();
+    expect(players).toEqual([expect.objectContaining({
+        enablePlugins: false,
+        disableUI: true,
+        label: "popcorn"
+    })]);
     expect(executed).toEqual([]);
 });
 

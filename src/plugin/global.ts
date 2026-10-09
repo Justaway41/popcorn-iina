@@ -27,7 +27,8 @@ async function showPopcorn(): Promise<void> {
     }
     popcornPlayerId = global.createPlayerInstance({
         url: getSplashUrl(),
-        enablePlugins: true,
+        // Keep other plugins' file-loaded handlers from re-enabling this splash's controls.
+        enablePlugins: false,
         disableUI: true,
         label: POPCORN_PLAYER_LABEL
     });

@@ -31,7 +31,7 @@ Before finishing a change:
 
 ## Project Scope
 
-Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, version `2.7.1`) for discovering media and playing direct streams supplied by configured Stremio addons.
+Popcorn for IINA is an IINA JavaScript plugin (`xyz.brbc.popcorn`, version `2.7.2`) for discovering media and playing direct streams supplied by configured Stremio addons.
 
 Supported behavior:
 
@@ -94,6 +94,20 @@ Open the owner file and its test first. Follow imports only when the actual flow
 ### Startup and sidebar
 
 `src/plugin/global.ts` registers the Plugin menu item and `Shift+P`. It creates one plugin-managed IINA player using the splash asset. `src/plugin/main.ts` loads the sidebar and overlay after `iina.window-loaded`; global/player messages reuse the active player and toggle the sidebar.
+
+Popcorn creates its managed player with `enablePlugins: false`: IINA still loads the creating
+plugin, but excludes other plugins from that one window. This prevents their file-loaded
+handlers from overriding Popcorn's hidden splash controls; the existing Jellyfin handler enables
+controls for every non-Jellyfin splash. Other plugins remain enabled in ordinary IINA windows
+and their own managed players, but their sidebar tools are unavailable inside Popcorn's player.
+`setPlayerUIHidden` also ignores windows labeled for another plugin because Popcorn itself may
+be loaded in those windows. Unlabeled ordinary IINA players retain their existing behavior.
+IINA 1.5's `setUIVisibility(true)` still means `disableUI = true`; do not invert the argument
+because of the method's name. The active splash was verified in IINA 1.5 with the sidebar open
+and closed; the player-entry regression covers restoring controls when video loads. Streaming
+playback still needs manual validation after this isolation change.
+The sibling Jellyfin repository is reference-only unless the user explicitly requests changes
+there. Do not modify or package it as part of a Popcorn fix.
 
 IINA 1.4.4 resets the native first responder to its player window in `windowDidBecomeKey`.
 Raycast Clipboard History can return keyboard focus without emitting `window-main.changed`;
@@ -525,12 +539,10 @@ git var GIT_COMMITTER_IDENT
 
 ## Current Working State
 
-The `2.7.1` release manifest restores `ghRepo: Justaway41/popcorn-iina` and raises `ghVersion`
-to 28. It includes the explicit-paste fallback verified in actual IINA/Raycast and confirmed by
-the user, plus the playback-start overlay queue fix and the approved stream-start indicator.
-The identifier is unchanged to preserve settings: replace the existing plugin, never add a
-duplicate. This machine still has the tested
-`2.7.0-local.3` installation; publishing does not replace it automatically.
+The `2.7.2` release raises `ghVersion` to 29 and isolates Popcorn's managed player so other
+plugins cannot re-enable its splash controls. The identifier is unchanged to preserve settings:
+replace the existing plugin, never add a duplicate. This machine has the tested local build
+still labeled `2.7.1`; publishing does not replace it automatically.
 
 Debugging handoff: `docs/superpowers/specs/2026-09-18-navigation-simkl-debug-findings.md` records
 the confirmed next-episode and Simkl cross-device sync failures with their reproductions. S1-S7 and

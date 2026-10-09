@@ -15,7 +15,7 @@ if (!build.success) throw new Error(String(build.logs));
 const entry = await build.outputs[0].text();
 const noop = () => {};
 
-function player(chapters: Array<{ title: string; start: number }> = []) {
+function player(chapters: Array<{ title: string; start: number }> = [], label = "popcorn") {
     const events = new Map<string, (data?: unknown) => void>();
     const keys = new Map<string, () => boolean>();
     const messages = new Map<string, (data: unknown) => void>();
@@ -29,6 +29,7 @@ function player(chapters: Array<{ title: string; start: number }> = []) {
     const clipboardReads: Array<(result: unknown) => void> = [];
     const calls: Array<{ method: string; context: string }> = [];
     const sidebarPosts: Array<{ name: string; data: unknown }> = [];
+    const uiVisibility: boolean[] = [];
     const view = { modes: 0, visible: false, content: "", clickable: false };
     // IINA 1.4.4 reports only built-in settings sidebars; plugin sidebars return null.
     const window = { sidebar: null as string | null };
@@ -51,8 +52,8 @@ function player(chapters: Array<{ title: string; start: number }> = []) {
             },
             event: { on: (name: string, callback: (data?: unknown) => void) => events.set(name, callback) },
             input: { PRIORITY_HIGH: 100, onKeyDown: (key: string, callback: () => boolean) => keys.set(key, callback) },
-            global: { getLabel: () => "popcorn", onMessage: noop },
-            core: { getChapters: () => chapters, osd: noop, setUIVisibility: noop, window },
+            global: { getLabel: () => label, onMessage: noop },
+            core: { getChapters: () => chapters, osd: noop, setUIVisibility: (hidden: boolean) => uiVisibility.push(hidden), window },
             mpv: {
                 getNumber: (key: string) => Number(properties.get(key) ?? 0),
                 getString: (key: string) => String(properties.get(key) ?? ""),
@@ -89,7 +90,7 @@ function player(chapters: Array<{ title: string; start: number }> = []) {
         }
     });
     return {
-        view, window, calls, preferences, properties, events, messages, sidebarPosts, clipboardReads,
+        view, window, calls, preferences, properties, events, messages, sidebarPosts, clipboardReads, uiVisibility,
         emit: (name: string, data?: unknown) => onPlayer(() => events.get(name)!(data)),
         play: (payload: PlayItemPayload) => onPlayer(() => messages.get(MESSAGE_NAMES.PlayItem)!(payload)),
         click: (action: string) => onPlayer(() => overlayMessages.get("overlayAction")!({ action })),
@@ -119,6 +120,28 @@ const payload: PlayItemPayload = {
         episode: episodes[0], episodes, resolution: "1080p"
     }
 };
+
+test("hides splash controls and restores them for video without overriding another plugin's window", () => {
+    const p = player();
+    p.emit("iina.window-loaded");
+    p.emit("mpv.file-loaded");
+    expect(p.uiVisibility).toEqual([true]);
+    p.properties.set("path", "https://media.example/video.mkv");
+    p.emit("mpv.file-loaded");
+    expect(p.uiVisibility).toEqual([true, false]);
+
+    const foreign = player([], "jellyfin");
+    foreign.properties.set("path", "assets/Jellyfin");
+    foreign.emit("iina.window-loaded");
+    foreign.emit("mpv.file-loaded");
+    expect(foreign.uiVisibility).toEqual([]);
+
+    const ordinary = player([], "");
+    ordinary.properties.set("path", "https://media.example/video.mkv");
+    ordinary.emit("iina.window-loaded");
+    ordinary.emit("mpv.file-loaded");
+    expect(ordinary.uiVisibility).toEqual([false]);
+});
 
 test("initializes the overlay once during window startup and preserves its click handler", async () => {
     const p = player();

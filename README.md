@@ -24,6 +24,10 @@ Popcorn does not bundle a content provider, torrent client, or debrid service. I
 
 Open Popcorn with `Shift+P` or IINA's Plugin menu.
 
+Popcorn opens a dedicated player with only Popcorn loaded, keeping its splash controls hidden.
+Other plugins remain available in ordinary IINA windows and their own players; their sidebar
+tools are not loaded inside Popcorn's player.
+
 ## Install from source
 
 ```sh

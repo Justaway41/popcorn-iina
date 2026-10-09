@@ -131,6 +131,9 @@ const PREFETCH_FRESH_MS = 30 * 60_000;
 const addonManifests = new Map<string, AddonManifest>();
 
 function setPlayerUIHidden(hidden: boolean): void {
+    // IINA loads every enabled plugin in every player; don't override another plugin's UI.
+    const label = global.getLabel();
+    if (label && label !== POPCORN_PLAYER_LABEL) return;
     const api = core as typeof core & { setUIVisibility?: (hidden: boolean) => void };
     api.setUIVisibility?.(hidden);
 }
